@@ -34,6 +34,8 @@
   commit author はこのリポだけ GitHub の noreply に固定する（`--global` にしない）。
 - 公開物の顔（README・`docs/`・commit メッセージ・リリースノート）は**英語**。
   `.claude/` の中は作業用の文書なので日本語でよい。
+- **作業用の記録は git に入れない。**`.claude/` の PRD・roadmap・decisions・issues・project-status は
+  `.gitignore` で外してあり、手元とメンテナの非公開メモにだけ置く。git に入るのは `.claude/rules/` などの設定と道具だけ。
 
 ## いまやること — Phase 0
 
