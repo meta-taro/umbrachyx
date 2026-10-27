@@ -161,3 +161,21 @@ computed over encrypted values and what cannot will be drawn explicitly.
   and foreign-key violations can be detected, not only overlapping edits.
 - What is the first deterministic-simulation target: the log, the tree, or
   sync?
+- **Do rules have history too?** History makes it possible to keep logic
+  that depends on past data inside the database instead of in application
+  code. "A player who has had an account before gets no first-time bonus" is
+  one query rather than a side table the application maintains. If the rule
+  itself is versioned, a decision's provenance can name the version of the
+  rule that produced it, and "why was this decided that way?" stays answerable
+  after the rule changes. How rules are stored, versioned and referenced from
+  provenance is still open.
+- **What is kept after a subject is erased, and who declares it?**
+  Crypto-shredding makes an erased subject's past values unreadable, so they
+  cannot be used to treat that person differently when they come back. Doing
+  so would also break the promise the erasure made. Some legitimate purposes
+  still need a trace, such as stopping repeated abuse of first-time bonuses.
+  The proposal is that such a trace is a minimal, one-way value, for example a
+  hashed device identifier. It would be declared per column as "retained after
+  erasure" together with its purpose, so the boundary between what is erased
+  and what is kept can be audited rather than assumed. What a declaration
+  contains, and what may be declared, is still open.
