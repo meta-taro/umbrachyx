@@ -25,7 +25,7 @@ struct Method {
 }
 
 fn methods() -> Vec<Method> {
-    let mut methods = vec![
+    let std_methods = [
         Method {
             name: SYNC_DATA_NAME,
             sync: File::sync_data,
@@ -35,12 +35,21 @@ fn methods() -> Vec<Method> {
             sync: File::sync_all,
         },
     ];
-    #[cfg(unix)]
-    methods.push(Method {
+    std_methods.into_iter().chain(plain_fsync()).collect()
+}
+
+#[cfg(unix)]
+fn plain_fsync() -> Option<Method> {
+    Some(Method {
         name: "plain fsync(2)",
         sync: |file| rustix::fs::fsync(file).map_err(io::Error::from),
-    });
-    methods
+    })
+}
+
+/// Windows has no separate plain fsync: `FlushFileBuffers` is the only sync.
+#[cfg(not(unix))]
+fn plain_fsync() -> Option<Method> {
+    None
 }
 
 #[cfg(target_vendor = "apple")]
