@@ -8,6 +8,7 @@ without an entry here is not adopted.
 | Crate | Used for | Why this one |
 |---|---|---|
 | `crc32fast` | Checksum on every log record, so a torn or damaged record is detected on recovery | Widely used and maintained, MIT OR Apache-2.0, no dependencies beyond `cfg-if`. Hardware-accelerated where available, so the check costs little on the write path. A checksum is too small a thing to justify writing and verifying our own |
+| `rustix` (dev, Unix only) | A plain `fsync` in the sync latency example, to compare it with `F_FULLFSYNC` | std has no way to call a plain `fsync` on macOS. Maintained by the Bytecode Alliance, Apache-2.0 / MIT, and safe to call, where `libc` would need `unsafe`. Not linked into the library |
 
 ## The log
 
@@ -30,6 +31,29 @@ without an entry here is not adopted.
   the disk may not hold.
 - **The log file is locked by one writer at a time**, so two processes cannot
   interleave records.
+
+### What a durable write costs
+
+Measured with `cargo run --release --example sync_latency` (2,000 writes of
+128 bytes per method, one sync per write). These are indicative numbers from
+one machine, recorded to compare sync methods, not to state the speed of the
+database.
+
+Apple M4 MacBook Air (fanless, 32 GB), macOS 26.6.2, internal SSD with APFS,
+on AC power, 2026-11-02:
+
+| Method | p50 (µs) | p99 (µs) | max (µs) |
+|---|---|---|---|
+| `File::sync_data` (`F_FULLFSYNC`) | 4,015 | 5,387 | 10,667 |
+| `File::sync_all` (`F_FULLFSYNC`) | 4,011 | 5,139 | 10,745 |
+| plain `fsync(2)` | 25 | 47 | 79 |
+| `Log::append` (framing, checksum, `F_FULLFSYNC`) | 4,011 | 5,275 | 10,841 |
+
+A plain `fsync` is about 160 times faster on this machine because it stops at
+the drive's cache; it is not durable across a power cut and is not used. The
+log adds nothing measurable on top of the sync itself, so the cost of a
+durable write on macOS is the cost of `F_FULLFSYNC`, about 4 ms. Reaching
+memory speed for writes will need group commit: one sync for many writes.
 - **All disk access goes through one storage boundary**, so deterministic
   simulation tests can replace the disk with one that loses unsynced bytes,
   tears writes, and fails syncs.
