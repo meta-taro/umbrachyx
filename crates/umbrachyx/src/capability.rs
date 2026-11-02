@@ -14,11 +14,13 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use biscuit_auth::builder::Term;
 use biscuit_auth::error::{FailedCheck, Logic, Token};
-use biscuit_auth::{AuthorizerBuilder, Biscuit, BiscuitBuilder, BlockBuilder, KeyPair, PublicKey};
+use biscuit_auth::{
+    AuthorizerBuilder, AuthorizerLimits, Biscuit, BiscuitBuilder, BlockBuilder, KeyPair, PublicKey,
+};
 
 /// The branch that holds live data, which tokens never write to.
 pub const MAIN_BRANCH: &str = "main";
@@ -113,6 +115,17 @@ impl From<Token> for TokenError {
         Self(error)
     }
 }
+
+/// Limits on evaluating one request. The fact and iteration limits are
+/// biscuit's defaults and do not depend on the machine. The time limit only
+/// stops a token built to be expensive: biscuit's default of 1 ms is
+/// exceeded by ordinary tokens on a loaded machine, which refused valid
+/// requests at random.
+const LIMITS: AuthorizerLimits = AuthorizerLimits {
+    max_facts: 1_000,
+    max_iterations: 100,
+    max_time: Duration::from_millis(50),
+};
 
 /// Every check on the time names this fact and every check on the branch
 /// names the other, which is how the reason for a refusal is told apart.
@@ -220,6 +233,7 @@ pub fn authorize(token: &[u8], root: PublicKey, request: &Request<'_>) -> Result
             ]),
             HashMap::new(),
         )
+        .map(|builder| builder.set_limits(LIMITS))
         .and_then(|builder| builder.build(&token))
         .map_err(|_| Denied::Invalid)?;
     match authorizer.authorize() {
@@ -228,7 +242,7 @@ pub fn authorize(token: &[u8], root: PublicKey, request: &Request<'_>) -> Result
             Logic::Unauthorized { checks, .. } | Logic::NoMatchingPolicy { checks },
         )) => Err(reason(&checks)),
         // Anything else, such as reaching the evaluation limits, is refused
-        // too: a request is allowed only by a policy that matched.
+        // as invalid: a request is allowed only by a policy that matched.
         Err(_) => Err(Denied::Invalid),
     }
 }
