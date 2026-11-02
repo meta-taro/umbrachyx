@@ -10,6 +10,7 @@ without an entry here is not adopted.
 | `crc32fast` | Checksum on every log record, so a torn or damaged record is detected on recovery | Widely used and maintained, MIT OR Apache-2.0, no dependencies beyond `cfg-if`. Hardware-accelerated where available, so the check costs little on the write path. A checksum is too small a thing to justify writing and verifying our own |
 | `rustix` (dev, Unix only) | A plain `fsync` in the sync latency example, to compare it with `F_FULLFSYNC` | std has no way to call a plain `fsync` on macOS. Maintained by the Bytecode Alliance, Apache-2.0 / MIT, and safe to call, where `libc` would need `unsafe`. Not linked into the library |
 | `blake3` (tree candidates) | The hash that names every node of the tree, so equal hashes mean equal content and a diff can skip shared subtrees | Collision resistance is required: a diff or a sync between replicas trusts that equal hashes mean equal data. CC0 / Apache-2.0, maintained by its authors. Only used by the candidates crate until the chosen tree moves into the database |
+| `biscuit-auth` | Capability tokens: what a caller may read or write, carried by the caller | Tokens can be narrowed offline by whoever holds them and never widened, and are verified with a public key, so nothing secret sits on the side that checks them. Writing an authorization scheme ourselves would need its own security review. Apache-2.0, maintained under the Eclipse Foundation. Default features are off; `datalog-macro` stays on because 6.0.0 does not build without it |
 
 ## The log
 
@@ -213,3 +214,40 @@ The same 1,000,000 records with more changes:
 - **Deletes are not written yet.** Removing a key that ends a node merges
   that node with the next one; it is left until the tree moves into the
   database.
+
+## Capability tokens
+
+**Tokens are biscuits**, checked at the database's boundary before a
+request reaches the log or the tree (`crates/umbrachyx/src/capability.rs`,
+a prototype).
+
+- **What a token says.** The issuer's block, signed with the database's
+  root key, names a key prefix, the columns, the operations, a purpose and
+  an expiry. Every token also refuses writes to `main`, so an agent's
+  writes always land on a branch.
+- **Narrowing, not widening.** A holder appends a block of checks: a
+  shorter key prefix, one column, read only, an earlier expiry. The
+  database's allow policy reads only the facts of the issuer's block and the
+  request, so facts a holder appends cannot satisfy it; a test appends the
+  issuer's own fact names with wider values and is still refused. Asking to
+  narrow to something wider adds a check that the original scope still
+  fails.
+- **Refusals carry one of four reasons:** invalid (not signed by this
+  root, or damaged), expired, a write to `main`, or out of scope. Expiry is
+  reported before scope, since renewing is the first thing to do. The caller
+  is not told which fact failed, so a refusal does not reveal what the token
+  would have allowed.
+- **Keys are strings for now.** Biscuit can test a string for a prefix but
+  not a byte string; the database's keys are bytes, so they will need an
+  encoding, such as hex, that keeps prefixes.
+
+### What it costs
+
+On the same MacBook Air, checking one request takes 58 µs at p50 and 107 µs
+at p99 for an issued token of 432 bytes, and 85 µs and 103 µs once narrowed
+(560 bytes). Most of it is verifying the signatures and evaluating the
+Datalog. That is far more than a read from memory, so a token will be
+verified once per session and the decision cached per scope, not repeated
+for every key. This is a problem to solve, not a reason to leave biscuit:
+macaroons, the other well-known scheme that narrows offline, need every
+checker to hold the shared secret that mints tokens.
