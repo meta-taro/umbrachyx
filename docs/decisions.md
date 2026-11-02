@@ -9,6 +9,7 @@ without an entry here is not adopted.
 |---|---|---|
 | `crc32fast` | Checksum on every log record, so a torn or damaged record is detected on recovery | Widely used and maintained, MIT OR Apache-2.0, no dependencies beyond `cfg-if`. Hardware-accelerated where available, so the check costs little on the write path. A checksum is too small a thing to justify writing and verifying our own |
 | `rustix` (dev, Unix only) | A plain `fsync` in the sync latency example, to compare it with `F_FULLFSYNC` | std has no way to call a plain `fsync` on macOS. Maintained by the Bytecode Alliance, Apache-2.0 / MIT, and safe to call, where `libc` would need `unsafe`. Not linked into the library |
+| `blake3` (tree candidates) | The hash that names every node of the tree, so equal hashes mean equal content and a diff can skip shared subtrees | Collision resistance is required: a diff or a sync between replicas trusts that equal hashes mean equal data. CC0 / Apache-2.0, maintained by its authors. Only used by the candidates crate until the chosen tree moves into the database |
 
 ## The log
 
@@ -109,3 +110,106 @@ memory speed for writes will need group commit: one sync for many writes.
 - **Time is not simulated yet.** Nothing in the log reads the clock. It will
   go behind the same kind of boundary as the disk when the first thing that
   does (such as a group-commit timeout) is written.
+
+## The tree
+
+**The tree is a prolly tree**, as in Dolt and Noms: a B+ tree in which an
+entry ends its node when the hash of its key, salted by the level, falls in
+one bucket out of 32. Three candidates were written in
+`crates/tree-candidates`, each a persistent map with BLAKE3 Merkle hashes,
+and measured with the same synthetic data (a game inventory, 24-byte keys
+and 32-byte values) by `cargo run --release -p umbrachyx-tree-candidates
+--example tree_bench`.
+
+- **Prolly tree.** The shape depends only on which keys are present.
+- **B+ tree with Merkle hashes**, path copying, split in half when full. The
+  shape depends on the order of inserts.
+- **Hash array mapped trie (HAMT) with Merkle hashes**, 16 ways per level,
+  as in the Jellyfish Merkle tree. The shape depends only on which keys are
+  present, but keys are kept in hash order, not key order.
+
+The `prollytree` crate was looked at and not used: its diff flattens every
+child that differs instead of descending into it, so the cost does not stay
+with the size of the change, and its default features pull in a git
+implementation, an async runtime and a SQL engine.
+
+### Measurements
+
+Apple M4 MacBook Air (fanless, 32 GB), macOS 26.6.2, on AC power,
+2026-11-02. A diff is timed against two trees holding the same final data:
+"derived" was made from the base by inserts and shares its nodes; "rebuilt"
+was built separately, as a replica or a branch built elsewhere would be.
+Nodes are those the diff read on both sides; node sizes differ between
+structures, so compare node counts down a column, not across rows of
+different structures. Each lookup and insert is timed alone, and the clock
+ticks about every 41 ns on this machine, so sub-microsecond lookups are
+coarse.
+
+| Structure | Records | Heap per record (bytes) | get p50 / p99 (µs) | insert p50 / p99 (µs) | Branch (ns) | Diff of 10 changes, derived: µs (nodes) | Diff of 10 changes, rebuilt: µs (nodes) |
+|---|---|---|---|---|---|---|---|
+| Prolly tree | 100,000 | 137 | 0.46 / 1.04 | 12.9 / 27.5 | 3 | 6 (46) | 5 (46) |
+| Prolly tree | 1,000,000 | 137 | 0.88 / 1.46 | 14.3 / 30.7 | 3 | 7 (61) | 7 (61) |
+| Prolly tree | 10,000,000 | 137 | 1.38 / 2.12 | 18.7 / 36.9 | 3 | 10 (70) | 10 (70) |
+| B+ tree | 100,000 | 122 | 0.33 / 0.67 | 8.0 / 10.4 | 3 | 5 (40) | 389 (3,276) |
+| B+ tree | 1,000,000 | 122 | 0.83 / 1.29 | 8.8 / 12.0 | 3 | 7 (52) | 5,055 (42,370) |
+| B+ tree | 10,000,000 | 122 | 1.33 / 2.00 | 12.2 / 15.4 | 3 | 8 (66) | 51,224 (422,310) |
+| HAMT | 100,000 | 149 | 0.12 / 0.29 | 5.1 / 8.7 | 3 | 2 (58) | 2 (58) |
+| HAMT | 1,000,000 | 152 | 0.38 / 0.79 | 5.7 / 8.5 | 3 | 3 (80) | 3 (80) |
+| HAMT | 10,000,000 | 155 | 0.71 / 2.00 | 6.3 / 9.0 | 3 | 3 (98) | 3 (98) |
+
+The same 1,000,000 records with more changes:
+
+| Structure | Changes | Diff, derived: µs (nodes) | Diff, rebuilt: µs (nodes) |
+|---|---|---|---|
+| Prolly tree | 10 | 8 (64) | 8 (64) |
+| Prolly tree | 100 | 63 (421) | 64 (421) |
+| Prolly tree | 1,000 | 585 (2,992) | 579 (2,992) |
+| Prolly tree | 10,000 | 3,550 (17,193) | 3,497 (17,193) |
+| B+ tree | 10 | 7 (58) | 4,899 (40,748) |
+| B+ tree | 1,000 | 480 (2,760) | 5,109 (41,422) |
+| HAMT | 10 | 3 (80) | 3 (80) |
+| HAMT | 1,000 | 483 (4,290) | 391 (4,290) |
+
+### Why the prolly tree
+
+- **A diff costs what the change costs, between any two trees.** With 10
+  changes, going from 100,000 to 10,000,000 records (100 times more) adds
+  only one level: 46 to 70 nodes read. Going from 10 to 1,000 changes reads
+  about 50 times more. This holds for the rebuilt tree too, because two
+  trees with the same keys have the same shape. That is what replicas
+  comparing root hashes (anti-entropy) and branches merged after being built
+  apart need.
+- **Keys stay in order.** Ranges such as "every slot of one player" are one
+  contiguous walk, which the SQL layer planned on top of the key/value core
+  will rely on.
+- **Branching is one pointer copy**, about 3 ns, for every candidate.
+
+### Why not the others
+
+- **B+ tree:** a diff between two trees that were not derived from each
+  other reads everything. At 10,000,000 records, 10 changes took 51 ms and
+  422,310 nodes, a thousand times more than the derived case and growing
+  with the data. A replica or a rebuilt branch would pay that on every
+  comparison. Its faster inserts do not make up for it.
+- **HAMT:** it is the fastest on every row and its diff scales as well as
+  the prolly tree's. It was not chosen because keys are scattered by their
+  hash: a range of keys would need a second, ordered index, and that index
+  would need its own history. If ranges turn out not to matter, this is the
+  decision to revisit.
+
+### Costs taken on
+
+- **Inserts are the slowest of the three**, 37 µs at p99 with 10,000,000
+  records, because a node is re-hashed and re-cut whole on every change.
+  The tree is updated after the log has made a write durable, not on the
+  path that acknowledges it, and a durable write already costs about 4 ms
+  on this machine.
+- **Node size is not bounded.** A run of keys with no boundary is
+  geometric in length, so nodes of a few hundred entries are rare but
+  possible. A hard cap can be added if they show up.
+- **The key hash that places boundaries is not keyed**, so keys chosen to
+  collide could make nodes large. The database will need a keyed hash
+  before it takes keys from untrusted clients.
+- **Deletes are not written yet.** Removing a key that ends a node merges
+  that node with the next one; it is left until the tree moves into the
+  database.
