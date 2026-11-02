@@ -72,6 +72,12 @@ const FORMAT_VERSION: u8 = 3;
 const KIND_COMMIT: u8 = 1;
 const KIND_BRANCH: u8 = 2;
 const KIND_GROUP: u8 = 3;
+/// The version and kind bytes that start every payload.
+const KIND_PREFIX: usize = 2;
+/// The bytes in front of a group's commits: the version, kind and count.
+pub const GROUP_OVERHEAD: usize = KIND_PREFIX + LEN_PREFIX;
+const TIME_LEN: usize = 8;
+const ID_LEN: usize = 32;
 const ABSENT: u8 = 0;
 const PRESENT: u8 = 1;
 
@@ -109,6 +115,33 @@ fn encode_payload(record: &Record) -> Result<Vec<u8>, LogError> {
         return Err(LogError::RecordTooLarge { len: payload.len() });
     }
     Ok(payload)
+}
+
+/// What a commit adds to a payload, in bytes: exactly what `push_commit`
+/// writes for it. A commit record's payload is this plus the version and
+/// kind; a group's is the sum over its commits plus `GROUP_OVERHEAD`.
+pub fn commit_len(
+    branch: &str,
+    who: &str,
+    why: &str,
+    approved_by: Option<&str>,
+    is_merge: bool,
+    changes: &[Edit],
+) -> usize {
+    let field = |len: usize| LEN_PREFIX + len;
+    let optional = |len: Option<usize>| 1 + len.map_or(0, field);
+    let edits: usize = changes
+        .iter()
+        .map(|edit| field(edit.key.len()) + optional(edit.value.as_ref().map(Vec::len)))
+        .sum();
+    field(branch.len())
+        + field(who.len())
+        + field(why.len())
+        + optional(approved_by.map(str::len))
+        + TIME_LEN
+        + optional(is_merge.then_some(ID_LEN))
+        + LEN_PREFIX
+        + edits
 }
 
 fn push_count(payload: &mut Vec<u8>, count: usize) -> Result<(), LogError> {
@@ -189,7 +222,7 @@ enum Frame {
 /// The smallest payload `encode` can produce: the version, the kind and a
 /// branch record's two empty fields. Anything shorter is not a frame, which
 /// also keeps a zeroed header (`len 0`, `crc32("") == 0`) from checking out.
-const MIN_PAYLOAD_LEN: usize = 2 + 2 * LEN_PREFIX;
+const MIN_PAYLOAD_LEN: usize = KIND_PREFIX + 2 * LEN_PREFIX;
 
 fn read_frame(rest: &[u8], offset: u64) -> Result<Frame, LogError> {
     match check_frame(rest) {
@@ -572,5 +605,44 @@ mod tests {
 
             assert_eq!(scan.records, vec![before.clone()], "cut at {cut}");
         }
+    }
+
+    #[test]
+    fn commit_len_is_what_encoding_writes() {
+        let plain = commit("a", None);
+        let full = Commit {
+            merged: Some([7; 32]),
+            changes: vec![
+                Edit {
+                    key: b"kept".to_vec(),
+                    value: Some(b"value".to_vec()),
+                },
+                Edit {
+                    key: b"removed".to_vec(),
+                    value: None,
+                },
+            ],
+            ..commit("b", Some("ops:lead"))
+        };
+        let len = |c: &Commit| {
+            commit_len(
+                &c.branch,
+                &c.who,
+                &c.why,
+                c.approved_by.as_deref(),
+                c.merged.is_some(),
+                &c.changes,
+            )
+        };
+
+        for c in [&plain, &full] {
+            let single = encode(&Record::Commit(c.clone())).expect("encodes");
+            assert_eq!(single.len(), HEADER_LEN + KIND_PREFIX + len(c));
+        }
+        let group = encode(&Record::Group(vec![plain.clone(), full.clone()])).expect("encodes");
+        assert_eq!(
+            group.len(),
+            HEADER_LEN + GROUP_OVERHEAD + len(&plain) + len(&full)
+        );
     }
 }

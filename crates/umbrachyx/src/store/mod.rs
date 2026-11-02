@@ -23,8 +23,10 @@ use std::time::SystemTime;
 use crate::log::{Branch, Commit, Edit, Log, LogError, Record, Storage};
 use crate::tree::{Bytes, Tree};
 
+mod committer;
 mod merge;
 
+pub use committer::{Committer, Writer};
 pub use merge::{Conflict, Merged, Reverted, ValueChange};
 
 /// The branch that holds live data. It exists from the start.
@@ -113,6 +115,8 @@ pub enum StoreError {
     /// The log holds a record the store cannot apply, such as a commit to a
     /// branch that was never created. The log itself checked out.
     Inconsistent(String),
+    /// The committer stopped before the commit was written.
+    Stopped,
 }
 
 impl fmt::Display for StoreError {
@@ -127,6 +131,7 @@ impl fmt::Display for StoreError {
             Self::BranchExists(name) => write!(f, "a branch named {name:?} already exists"),
             Self::BadBranchName => write!(f, "a branch name must be 1 to {MAX_BRANCH_NAME} bytes"),
             Self::Inconsistent(what) => write!(f, "the log cannot be applied: {what}"),
+            Self::Stopped => write!(f, "the committer has stopped; nothing was written"),
         }
     }
 }

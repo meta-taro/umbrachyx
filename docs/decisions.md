@@ -298,6 +298,16 @@ checker to hold the shared secret that mints tokens.
   missing from the log.
 - **A failed commit leaves the tree unchanged**, and the store, like the
   log, refuses further commits until it is reopened.
+- **Group commit runs on one thread that owns the store.** Writers on other
+  threads send it commits and wait for their answer; it writes every commit
+  that arrived during the previous sync as one group, with one sync, and
+  answers each writer once the group is durable. A commit to an unknown
+  branch is refused alone, and a commit too large for one record is
+  written alone, so neither fails the writers grouped with it. When the
+  previous group had several writers, it waits up to 50 µs for each further
+  commit, 0.5 ms in all: without that, the writers it just answered miss
+  the next sync and the writers split into two groups taking turns, which
+  doubled every wait with 8 writers. A single writer never waits.
 - **Every commit keeps the tree it produced**, so any past state can be
   read. Versions share the nodes they have in common, so keeping all of
   them costs only the paths each commit rewrote.

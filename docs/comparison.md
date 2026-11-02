@@ -18,6 +18,7 @@ compared, it says that too.
 
   ```sh
   cargo run --release -p umbrachyx --example compare -- 1000000 /tmp/dolt-input
+  cargo run --release -p umbrachyx --example concurrent_writes
   bench/dolt.sh /tmp/dolt-input
   bench/valkey.sh
   ```
@@ -40,6 +41,37 @@ once. Valkey's own default (`appendfsync everysec`) and its
 setting without persistence acknowledge before the data is on disk; they
 are faster and can lose acknowledged writes, which Umbrachyx is designed
 not to do.
+
+### Many writers at once
+
+Each writer sends one write, waits until it is durable, then sends the
+next. Umbrachyx writers are threads sending to its committer, which writes
+every commit that arrived during the previous sync as one group with one
+sync (2,048 commits per run, to an empty store). Valkey's clients are
+`valkey-benchmark -c N` over loopback (20,000 `SET`s per run); with
+`appendfsync always` it also syncs once for all the writes it read in one
+pass of its event loop.
+
+| Writers | Umbrachyx (writes/s) | p50 / p99 (ms) | Valkey (writes/s) | p50 / p99 (ms) |
+|---|---|---|---|---|
+| 1 | 248 | 4.01 / 4.62 | 248 | 4.01 / 4.91 |
+| 8 | 1,924 | 4.05 / 5.14 | 984 | 7.99 / 10.0 |
+| 64 | 10,691 | 6.00 / 6.72 | 7,313 | 8.59 / 14.3 |
+| 256 | 30,773 | 7.94 / 8.28 | 24,301 | 10.3 / 13.5 |
+
+Over three runs, Umbrachyx's rate moved by up to 16% at 64 and 256
+writers; Valkey's was measured once, and its one-writer row is the run
+in the table above. Umbrachyx's numbers have no network
+in them and Valkey's do, but the loopback round trip is about 0.06 ms
+against waits of 4 ms and more.
+
+With 8 writers both first took two syncs per write: right after a sync,
+the next one started before the writers just answered had sent again, so
+the writers split into two groups taking turns. Valkey shows that pattern
+above. Umbrachyx now waits up to 50 µs for one more commit, at most 0.5 ms
+in all, when the previous group had more than one writer; a single writer
+never waits. That brought 8 writers from about 1,070 writes a second and
+8 ms to the numbers in the table.
 
 ## Reads
 
@@ -98,10 +130,11 @@ it landed in every time: 8.6 s for 1,000,000 records and 103 s for
 ## What this says about the design
 
 1. **One durable write costs one flush, about 4 ms here.** That is the
-   same for Valkey and bounds any database that acknowledges only durable
-   writes to a few hundred writes a second per writer. The way past it is
-   group commit: writes that arrive together share one flush. This is the
-   first thing to build before any write throughput is claimed.
+   same for Valkey and bounds a single writer to about 250 durable writes
+   a second. Group commit lets writers that arrive together share one
+   flush: 256 writers reach about 30,000 durable writes a second. Past
+   that, applying each commit to the tree on the committer's one thread
+   is the next limit to measure.
 2. **Applying a write to the tree cost about 10 µs at 10,000,000
    records**, which would have bounded throughput once group commit takes
    the flush off each write. Applying each commit as one sorted batch,
