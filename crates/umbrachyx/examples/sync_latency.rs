@@ -115,6 +115,7 @@ fn time_log(writes: usize, path: &Path) -> Result<Vec<Duration>, Box<dyn std::er
             why: "sync latency".to_owned(),
             approved_by: None,
             time: n as u64,
+            merged: None,
         });
         let start = Instant::now();
         log.append(&record)?;

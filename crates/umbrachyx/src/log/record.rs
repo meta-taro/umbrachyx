@@ -26,6 +26,9 @@ pub struct Commit {
     pub approved_by: Option<String>,
     /// Microseconds since the Unix epoch, from the store's clock.
     pub time: u64,
+    /// For a merge, the head of the branch merged in: the commit's second
+    /// parent. The first is the branch's previous head.
+    pub merged: Option<[u8; 32]>,
 }
 
 /// A new branch, starting where `from` is now.
@@ -61,7 +64,7 @@ pub struct Scan {
 const LEN_PREFIX: usize = 4;
 /// Bumped whenever the payload layout changes. A frame with another version
 /// cannot be read and is reported as damage, never skipped.
-const FORMAT_VERSION: u8 = 2;
+const FORMAT_VERSION: u8 = 3;
 const KIND_COMMIT: u8 = 1;
 const KIND_BRANCH: u8 = 2;
 const ABSENT: u8 = 0;
@@ -100,6 +103,7 @@ fn encode_commit(record: &Commit) -> Result<Vec<u8>, LogError> {
         record.approved_by.as_deref().map(str::as_bytes),
     );
     payload.extend_from_slice(&record.time.to_le_bytes());
+    push_optional(&mut payload, record.merged.as_ref().map(|id| &id[..]));
     let count = u32::try_from(record.changes.len()).map_err(|_| LogError::RecordTooLarge {
         len: record.changes.len(),
     })?;
@@ -244,6 +248,10 @@ fn decode_commit(cursor: &mut Cursor<'_>) -> Option<Commit> {
         Some(bytes) => Some(bytes_to_text(bytes)?),
     };
     let time = cursor.u64()?;
+    let merged = match cursor.optional()? {
+        None => None,
+        Some(id) => Some(<[u8; 32]>::try_from(id).ok()?),
+    };
     let count = read_u32(cursor.take(LEN_PREFIX)?, 0);
     let mut changes = Vec::new();
     for _ in 0..count {
@@ -258,6 +266,7 @@ fn decode_commit(cursor: &mut Cursor<'_>) -> Option<Commit> {
         why,
         approved_by,
         time,
+        merged,
     })
 }
 
@@ -330,6 +339,7 @@ mod tests {
             why: "grant login bonus — 初回".to_owned(),
             approved_by: approved_by.map(str::to_owned),
             time: 1_800_000_000_000_000,
+            merged: None,
         }
     }
 

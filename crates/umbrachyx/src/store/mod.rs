@@ -23,6 +23,10 @@ use std::time::SystemTime;
 use crate::log::{Branch, Commit, Edit, Log, LogError, Record, Storage};
 use crate::tree::{Bytes, Tree};
 
+mod merge;
+
+pub use merge::{Conflict, Merged, Reverted, ValueChange};
+
 /// The branch that holds live data. It exists from the start.
 pub const MAIN_BRANCH: &str = "main";
 /// Branch names are short labels, not data.
@@ -73,6 +77,8 @@ pub struct Cell {
 pub struct CommitInfo {
     pub id: CommitId,
     pub parent: Option<CommitId>,
+    /// For a merge, the head of the branch merged in.
+    pub merged: Option<CommitId>,
     pub branch: String,
     pub provenance: Provenance,
     pub time: u64,
@@ -84,6 +90,9 @@ pub struct CommitInfo {
 pub enum StoreError {
     Log(LogError),
     UnknownBranch(String),
+    UnknownCommit(CommitId),
+    /// The commit is not in the branch's history.
+    NotOnBranch(CommitId),
     BranchExists(String),
     /// Empty, or longer than a label should be.
     BadBranchName,
@@ -97,6 +106,8 @@ impl fmt::Display for StoreError {
         match self {
             Self::Log(error) => write!(f, "{error}"),
             Self::UnknownBranch(name) => write!(f, "no branch named {name:?}"),
+            Self::UnknownCommit(id) => write!(f, "no commit {}", short(id)),
+            Self::NotOnBranch(id) => write!(f, "commit {} is not on this branch", short(id)),
             Self::BranchExists(name) => write!(f, "a branch named {name:?} already exists"),
             Self::BadBranchName => write!(f, "a branch name must be 1 to {MAX_BRANCH_NAME} bytes"),
             Self::Inconsistent(what) => write!(f, "the log cannot be applied: {what}"),
@@ -162,6 +173,16 @@ impl<S: Storage, C: Clock> Store<S, C> {
         edits: Vec<Edit>,
         provenance: Provenance,
     ) -> Result<CommitId, StoreError> {
+        self.commit_with(branch, edits, provenance, None)
+    }
+
+    fn commit_with(
+        &mut self,
+        branch: &str,
+        edits: Vec<Edit>,
+        provenance: Provenance,
+        merged: Option<CommitId>,
+    ) -> Result<CommitId, StoreError> {
         self.require_branch(branch)?;
         let record = Record::Commit(Commit {
             branch: branch.to_owned(),
@@ -170,6 +191,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             why: provenance.why,
             approved_by: provenance.approved_by,
             time: self.clock.now_micros().max(self.last_time),
+            merged,
         });
         self.log.append(&record)?;
         self.apply(&record)?;
@@ -236,10 +258,15 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let Some(head) = self.branches.get(branch) else {
             return Vec::new();
         };
-        head.state
-            .iter()
-            .filter_map(|(key, bytes)| Some((key.clone(), decode_cell(bytes).value?)))
-            .collect()
+        live_entries(&head.state)
+    }
+
+    /// Every live key and value as `commit` left it, in key order.
+    pub fn entries_at(&self, commit: &CommitId) -> Vec<(Bytes, Bytes)> {
+        self.commits
+            .get(commit)
+            .map(|info| live_entries(&info.state))
+            .unwrap_or_default()
     }
 
     /// The latest commit on `branch`, or `None` if it has none or does not
@@ -309,6 +336,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let info = CommitInfo {
             id,
             parent: head.commit,
+            merged: commit.merged,
             branch: commit.branch.clone(),
             provenance: Provenance {
                 who: commit.who.clone(),
@@ -383,10 +411,23 @@ fn commit_id(parent: Option<CommitId>, commit: &Commit) -> CommitId {
     field(&[u8::from(commit.approved_by.is_some())]);
     field(commit.approved_by.as_deref().unwrap_or("").as_bytes());
     field(&commit.time.to_le_bytes());
+    field(commit.merged.as_ref().map_or(&[][..], |id| &id[..]));
     for edit in &commit.changes {
         field(&edit.key);
         field(&[u8::from(edit.value.is_some())]);
         field(edit.value.as_deref().unwrap_or_default());
     }
     *hasher.finalize().as_bytes()
+}
+
+/// The first bytes of a commit id, in hex, for messages.
+fn short(id: &CommitId) -> String {
+    id.iter().take(6).map(|b| format!("{b:02x}")).collect()
+}
+
+fn live_entries(state: &Tree) -> Vec<(Bytes, Bytes)> {
+    state
+        .iter()
+        .filter_map(|(key, bytes)| Some((key.clone(), decode_cell(bytes).value?)))
+        .collect()
 }

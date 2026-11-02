@@ -339,6 +339,11 @@ fn random_record(rng: &mut Rng) -> Record {
         why: rng.ascii(why_len),
         approved_by: rng.percent(30).then(|| rng.ascii(approver_len)),
         time: rng.next_u64(),
+        merged: rng.percent(10).then(|| {
+            let mut id = [0; 32];
+            id.copy_from_slice(&rng.bytes(32));
+            id
+        }),
     })
 }
 

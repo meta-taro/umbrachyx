@@ -141,6 +141,7 @@ mod tests {
             why: "purchase".to_owned(),
             approved_by: None,
             time: u64::from(n),
+            merged: None,
         })
     }
 

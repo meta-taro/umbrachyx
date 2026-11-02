@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use super::disk::{SimStorage, SyncFault};
 use super::rng::Rng;
 use crate::log::{Edit, LogError};
-use crate::store::{Clock, MAIN_BRANCH, Provenance, Store, StoreError};
+use crate::store::{Clock, MAIN_BRANCH, Merged, Provenance, Reverted, Store, StoreError};
 
 const STEPS: usize = 64;
 /// Out of 100, per step; the rest cut power.
@@ -28,8 +28,11 @@ const KEY_SPACE: u64 = 200;
 const MAX_EDITS: u64 = 6;
 /// Out of 100, per edit.
 const REMOVE_PERCENT: u64 = 20;
-/// Out of 100, per commit step: make a branch instead.
+/// Out of 100, per commit step: make a branch, merge two branches, or undo
+/// a branch's latest commit instead.
 const NEW_BRANCH_PERCENT: u64 = 8;
+const MERGE_PERCENT: u64 = 8;
+const REVERT_PERCENT: u64 = 4;
 /// Out of 100, per reading of the clock.
 const CLOCK_BACK_PERCENT: u64 = 5;
 const START_MICROS: u64 = 1_800_000_000_000_000;
@@ -48,6 +51,9 @@ pub struct Outcome {
     pub in_flight_lost: usize,
     pub clock_went_back: usize,
     pub branches_made: usize,
+    pub merges: usize,
+    pub merge_conflicts: usize,
+    pub reverts: usize,
 }
 
 /// A clock a seed controls. It mostly moves forward a little, and sometimes
@@ -127,6 +133,12 @@ impl Run {
         if self.rng.percent(NEW_BRANCH_PERCENT) {
             return self.new_branch(step);
         }
+        if self.rng.percent(MERGE_PERCENT) {
+            return self.merge(step);
+        }
+        if self.rng.percent(REVERT_PERCENT) {
+            return self.revert_latest(step);
+        }
         let branch = self.random_branch();
         let edits = self.random_edits();
         let fault = if self.rng.percent(SYNC_FAULT_PERCENT) {
@@ -141,12 +153,10 @@ impl Run {
         if let Some(fault) = fault {
             self.store.storage_mut().fault_next_sync(fault);
         }
-        let provenance = Provenance {
-            who: "agent:sim".to_owned(),
-            why: format!("step {step}"),
-            approved_by: None,
-        };
-        match (self.store.commit(&branch, edits.clone(), provenance), fault) {
+        match (
+            self.store.commit(&branch, edits.clone(), provenance(step)),
+            fault,
+        ) {
             (Ok(_), None) => {
                 apply(self.models.get_mut(&branch).expect("known branch"), &edits);
                 self.outcome.commits += 1;
@@ -179,6 +189,65 @@ impl Run {
         self.models.insert(name.clone(), model);
         self.outcome.branches_made += 1;
         self.trace(step, format!("branch {name} from {from}"));
+        Ok(())
+    }
+
+    /// Merge semantics are tested on their own; here the point is that what
+    /// a merge wrote comes back after a restart. So the store's own result
+    /// becomes what the branch should hold.
+    fn merge(&mut self, step: usize) -> Result<(), String> {
+        let into = self.random_branch();
+        let from = self.random_branch();
+        let merged = self
+            .store
+            .merge(&into, &from, provenance(step))
+            .map_err(|e| format!("step {step}: merge {from} into {into}: {e}"))?;
+        match merged {
+            Merged::Commit(_) => self.outcome.merges += 1,
+            Merged::Conflicts(_) => self.outcome.merge_conflicts += 1,
+            Merged::UpToDate => {}
+        }
+        self.models
+            .insert(into.clone(), entries_of(&self.store, &into));
+        self.trace(step, format!("merge {from} into {into}: {merged:?}"));
+        Ok(())
+    }
+
+    /// Undoing a branch's latest commit cannot conflict, and must give back
+    /// what the branch held before it.
+    fn revert_latest(&mut self, step: usize) -> Result<(), String> {
+        let branch = self.random_branch();
+        let Some(head) = self.store.head(&branch) else {
+            return Ok(());
+        };
+        let before = self
+            .store
+            .commit_info(&head)
+            .and_then(|info| info.parent)
+            .map(|parent| self.store.entries_at(&parent))
+            .unwrap_or_default();
+        let reverted = self
+            .store
+            .revert(&branch, &head, provenance(step))
+            .map_err(|e| format!("step {step}: revert on {branch}: {e}"))?;
+        if !matches!(reverted, Reverted::Commit(_)) {
+            return Err(format!(
+                "step {step}: undoing the latest commit on {branch} gave {reverted:?}"
+            ));
+        }
+        let held = entries_of(&self.store, &branch);
+        let expected: Model = before
+            .into_iter()
+            .map(|(k, v)| (k.to_vec(), v.to_vec()))
+            .collect();
+        if held != expected {
+            return Err(format!(
+                "step {step}: undoing the latest commit on {branch} did not restore it"
+            ));
+        }
+        self.models.insert(branch.clone(), held);
+        self.outcome.reverts += 1;
+        self.trace(step, format!("revert latest on {branch}"));
         Ok(())
     }
 
@@ -279,6 +348,14 @@ impl Run {
     }
 }
 
+fn provenance(step: usize) -> Provenance {
+    Provenance {
+        who: "agent:sim".to_owned(),
+        why: format!("step {step}"),
+        approved_by: None,
+    }
+}
+
 fn apply(model: &mut Model, edits: &[Edit]) {
     for edit in edits {
         match &edit.value {
@@ -323,6 +400,9 @@ mod tests {
             total.in_flight_lost += outcome.in_flight_lost;
             total.clock_went_back += outcome.clock_went_back;
             total.branches_made += outcome.branches_made;
+            total.merges += outcome.merges;
+            total.merge_conflicts += outcome.merge_conflicts;
+            total.reverts += outcome.reverts;
         }
         total
     }
@@ -342,6 +422,9 @@ mod tests {
         assert!(total.in_flight_lost >= 20, "{total:?}");
         assert!(total.clock_went_back >= 100, "{total:?}");
         assert!(total.branches_made >= 500, "{total:?}");
+        assert!(total.merges >= 100, "{total:?}");
+        assert!(total.merge_conflicts >= 50, "{total:?}");
+        assert!(total.reverts >= 100, "{total:?}");
     }
 
     #[test]
@@ -354,13 +437,17 @@ mod tests {
         let total = run_seeds(seeds);
         println!(
             "store, {seeds} seeds: {} commits, {} restarts, interrupted commits kept {} \
-             and lost {}, clock went back {} times, {} branches made",
+             and lost {}, clock went back {} times, {} branches made, {} merges, \
+             {} merges refused for conflicts, {} reverts",
             total.commits,
             total.restarts,
             total.in_flight_kept,
             total.in_flight_lost,
             total.clock_went_back,
-            total.branches_made
+            total.branches_made,
+            total.merges,
+            total.merge_conflicts,
+            total.reverts
         );
     }
 

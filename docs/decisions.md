@@ -126,7 +126,9 @@ memory speed for writes will need group commit: one sync for many writes.
   restart every branch must exist and hold exactly what the acknowledged
   commits wrote to it, an interrupted commit must be there whole or not at
   all, and recorded times must not go back. Branches are made from any
-  branch, and commits go to any of them. CI runs 10,000 seeds of each, in release mode; the
+  branch, commits go to any of them, branches are merged into each other,
+  and a branch's latest commit is undone, which must give back what the
+  branch held before it. CI runs 10,000 seeds of each, in release mode; the
   results are the same as in debug mode.
 
 ## The tree
@@ -303,3 +305,23 @@ checker to hold the shared secret that mints tokens.
   commit that last changed it; reading the key in that commit's parent
   gives the change before, and so on. The cost is the number of times the
   key changed, not the number of commits.
+- **Diff, merge and undo work on values.** A cell rewritten with the value
+  it already had is not a change. Each reads the tree diff, so its cost
+  follows the number of changed keys.
+- **A merge is three-way.** Changes to different keys combine, the same
+  change on both sides is taken once, and different changes to one key are
+  conflicts. Conflicts are reported with the base, ours and theirs values,
+  and nothing is written; resolving them is left to the caller. A merge
+  commit records the head it merged as a second parent.
+- **The base of a merge is a shared commit that is not an ancestor of
+  another shared commit.** Walking back from one side and taking the first
+  shared commit found is wrong once that side has merged the other in: an
+  older shared commit can be as near as the right one, and a test caught
+  exactly that. With criss-cross merges several can qualify, and the latest
+  is taken. Finding it costs the size of the shared history, which is not
+  bounded yet.
+- **Undoing a commit writes its opposite** to a branch whose history holds
+  it: each key it changed goes back to the value before it. If any of
+  those keys has changed since, nothing is written and each such key is
+  reported as a conflict. This is how one wrongly granted reward is taken
+  back without touching anything else.

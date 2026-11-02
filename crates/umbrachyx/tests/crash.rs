@@ -46,6 +46,7 @@ fn record(seq: u64) -> Record {
         why: format!("write {seq}"),
         approved_by: seq.is_multiple_of(3).then(|| "ops:reviewer".to_owned()),
         time: seq,
+        merged: None,
     })
 }
 
