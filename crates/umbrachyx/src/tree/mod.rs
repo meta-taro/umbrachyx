@@ -112,6 +112,13 @@ impl Tree {
         }
     }
 
+    /// Every entry, in key order.
+    pub fn iter(&self) -> Iter<'_> {
+        Iter {
+            stack: vec![(&*self.root, 0)],
+        }
+    }
+
     /// What changed going from `self` to `other`.
     pub fn diff(&self, other: &Self) -> Diff {
         diff::diff(&self.root, &other.root)
@@ -250,6 +257,39 @@ fn collect_leaf_ends(node: &Node, keys: &mut Vec<Bytes>) {
         Node::Internal { children, .. } => {
             for child in children {
                 collect_leaf_ends(&child.node, keys);
+            }
+        }
+    }
+}
+
+/// Walks a tree in key order. Each frame is a node and the index of the
+/// next child or entry to visit in it.
+pub struct Iter<'a> {
+    stack: Vec<(&'a Node, usize)>,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = (&'a Bytes, &'a Bytes);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let (node, index) = self.stack.last_mut()?;
+            let node: &'a Node = node;
+            let at = *index;
+            *index += 1;
+            match node {
+                Node::Leaf { entries, .. } => match entries.get(at) {
+                    Some((key, value)) => return Some((key, value)),
+                    None => {
+                        self.stack.pop();
+                    }
+                },
+                Node::Internal { children, .. } => match children.get(at) {
+                    Some(child) => self.stack.push((&child.node, 0)),
+                    None => {
+                        self.stack.pop();
+                    }
+                },
             }
         }
     }

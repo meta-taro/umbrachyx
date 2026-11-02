@@ -23,7 +23,7 @@ use biscuit_auth::{
 };
 
 /// The branch that holds live data, which tokens never write to.
-pub const MAIN_BRANCH: &str = "main";
+pub use crate::store::MAIN_BRANCH;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {

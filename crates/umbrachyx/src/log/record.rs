@@ -7,11 +7,18 @@
 
 use super::LogError;
 
-/// One commit: changes to one branch, made together, with who made them,
-/// why, who approved them and when. A record is one frame, so a commit is
-/// either wholly in the log or not at all, however many keys it touches.
+/// One entry of the log. A record is one frame, so it is either wholly in
+/// the log or not at all.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Record {
+pub enum Record {
+    Commit(Commit),
+    Branch(Branch),
+}
+
+/// Changes to one branch, made together, with who made them, why, who
+/// approved them and when. However many keys it touches, it is one record.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Commit {
     pub branch: String,
     pub changes: Vec<Edit>,
     pub who: String,
@@ -19,6 +26,13 @@ pub struct Record {
     pub approved_by: Option<String>,
     /// Microseconds since the Unix epoch, from the store's clock.
     pub time: u64,
+}
+
+/// A new branch, starting where `from` is now.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Branch {
+    pub name: String,
+    pub from: String,
 }
 
 /// One key set to a value, or removed when `value` is `None`.
@@ -47,7 +61,9 @@ pub struct Scan {
 const LEN_PREFIX: usize = 4;
 /// Bumped whenever the payload layout changes. A frame with another version
 /// cannot be read and is reported as damage, never skipped.
-const FORMAT_VERSION: u8 = 1;
+const FORMAT_VERSION: u8 = 2;
+const KIND_COMMIT: u8 = 1;
+const KIND_BRANCH: u8 = 2;
 const ABSENT: u8 = 0;
 const PRESENT: u8 = 1;
 
@@ -60,7 +76,22 @@ pub fn encode(record: &Record) -> Result<Vec<u8>, LogError> {
 }
 
 fn encode_payload(record: &Record) -> Result<Vec<u8>, LogError> {
-    let mut payload = vec![FORMAT_VERSION];
+    match record {
+        Record::Commit(commit) => encode_commit(commit),
+        Record::Branch(branch) => {
+            let mut payload = vec![FORMAT_VERSION, KIND_BRANCH];
+            push_field(&mut payload, branch.name.as_bytes());
+            push_field(&mut payload, branch.from.as_bytes());
+            if payload.len() > MAX_PAYLOAD_LEN {
+                return Err(LogError::RecordTooLarge { len: payload.len() });
+            }
+            Ok(payload)
+        }
+    }
+}
+
+fn encode_commit(record: &Commit) -> Result<Vec<u8>, LogError> {
+    let mut payload = vec![FORMAT_VERSION, KIND_COMMIT];
     push_field(&mut payload, record.branch.as_bytes());
     push_field(&mut payload, record.who.as_bytes());
     push_field(&mut payload, record.why.as_bytes());
@@ -134,11 +165,10 @@ enum Frame {
     TornTail,
 }
 
-/// The smallest payload `encode` can produce: the version, three empty
-/// length-prefixed fields, the approver flag, the time and a change count of
-/// zero. Anything shorter is not a frame, which also keeps a zeroed header
-/// (`len 0`, `crc32("") == 0`) from checking out.
-const MIN_PAYLOAD_LEN: usize = 1 + 3 * LEN_PREFIX + 1 + 8 + 4;
+/// The smallest payload `encode` can produce: the version, the kind and a
+/// branch record's two empty fields. Anything shorter is not a frame, which
+/// also keeps a zeroed header (`len 0`, `crc32("") == 0`) from checking out.
+const MIN_PAYLOAD_LEN: usize = 2 + 2 * LEN_PREFIX;
 
 fn read_frame(rest: &[u8], offset: u64) -> Result<Frame, LogError> {
     match check_frame(rest) {
@@ -194,6 +224,18 @@ fn decode_payload(payload: &[u8]) -> Option<Record> {
     if cursor.byte()? != FORMAT_VERSION {
         return None;
     }
+    let record = match cursor.byte()? {
+        KIND_COMMIT => Record::Commit(decode_commit(&mut cursor)?),
+        KIND_BRANCH => Record::Branch(Branch {
+            name: cursor.text()?,
+            from: cursor.text()?,
+        }),
+        _ => return None,
+    };
+    cursor.rest.is_empty().then_some(record)
+}
+
+fn decode_commit(cursor: &mut Cursor<'_>) -> Option<Commit> {
     let branch = cursor.text()?;
     let who = cursor.text()?;
     let why = cursor.text()?;
@@ -209,7 +251,7 @@ fn decode_payload(payload: &[u8]) -> Option<Record> {
         let value = cursor.optional()?.map(<[u8]>::to_vec);
         changes.push(Edit { key, value });
     }
-    cursor.rest.is_empty().then_some(Record {
+    Some(Commit {
         branch,
         changes,
         who,
@@ -268,7 +310,11 @@ mod tests {
     use super::*;
 
     fn record(key: &str, approved_by: Option<&str>) -> Record {
-        Record {
+        Record::Commit(commit(key, approved_by))
+    }
+
+    fn commit(key: &str, approved_by: Option<&str>) -> Commit {
+        Commit {
             branch: "main".to_owned(),
             changes: vec![
                 Edit {
@@ -403,8 +449,9 @@ mod tests {
 
     #[test]
     fn oversized_record_is_refused_before_writing() {
-        let mut big = record("a", None);
+        let mut big = commit("a", None);
         big.changes[0].value = Some(vec![0; MAX_PAYLOAD_LEN + 1]);
+        let big = Record::Commit(big);
 
         let error = encode(&big).expect_err("too large to frame");
 
@@ -433,10 +480,10 @@ mod tests {
 
     #[test]
     fn a_commit_with_no_changes_round_trips() {
-        let empty = Record {
+        let empty = Record::Commit(Commit {
             changes: Vec::new(),
-            ..record("a", None)
-        };
+            ..commit("a", None)
+        });
 
         assert_eq!(
             scan(&frames(std::slice::from_ref(&empty)))
@@ -444,5 +491,19 @@ mod tests {
                 .records,
             vec![empty]
         );
+    }
+
+    #[test]
+    fn branch_records_round_trip_between_commits() {
+        let records = vec![
+            record("a", None),
+            Record::Branch(Branch {
+                name: "event/halloween".to_owned(),
+                from: "main".to_owned(),
+            }),
+            record("b", None),
+        ];
+
+        assert_eq!(scan(&frames(&records)).expect("scans").records, records);
     }
 }

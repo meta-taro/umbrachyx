@@ -16,7 +16,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::disk::{SimStorage, SyncFault};
 use super::rng::Rng;
-use crate::log::{Edit, Log, LogError, Record, Storage, record};
+use crate::log::{Branch, Commit, Edit, Log, LogError, Record, Storage, record};
 
 const STEPS: usize = 64;
 
@@ -316,22 +316,30 @@ fn frame_ends(records: &[Record]) -> Vec<usize> {
 }
 
 /// Mostly commits of one small write, sometimes several writes, removes,
-/// or large values that span many sectors.
+/// large values that span many sectors, or a new branch.
 fn random_record(rng: &mut Rng) -> Record {
+    if rng.percent(5) {
+        let name_len = 1 + rng.below(24) as usize;
+        let from_len = 1 + rng.below(24) as usize;
+        return Record::Branch(Branch {
+            name: rng.ascii(name_len),
+            from: rng.ascii(from_len),
+        });
+    }
     let count = if rng.percent(80) { 1 } else { 1 + rng.below(8) };
     let changes = (0..count).map(|_| random_write(rng)).collect();
     let who_len = 1 + rng.below(16) as usize;
     let why_len = rng.below(48) as usize;
     let approver_len = 1 + rng.below(16) as usize;
     let branch_len = 1 + rng.below(12) as usize;
-    Record {
+    Record::Commit(Commit {
         branch: rng.ascii(branch_len),
         changes,
         who: rng.ascii(who_len),
         why: rng.ascii(why_len),
         approved_by: rng.percent(30).then(|| rng.ascii(approver_len)),
         time: rng.next_u64(),
-    }
+    })
 }
 
 fn random_write(rng: &mut Rng) -> Edit {
@@ -348,6 +356,9 @@ fn random_write(rng: &mut Rng) -> Edit {
 }
 
 fn describe(record: &Record) -> String {
+    let Record::Commit(record) = record else {
+        return "new branch".to_owned();
+    };
     let bytes: usize = record
         .changes
         .iter()

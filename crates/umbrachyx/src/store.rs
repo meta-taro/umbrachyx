@@ -1,19 +1,36 @@
-//! The store: the log is the truth, and the tree is rebuilt from it.
+//! The store: the log is the truth, and commits, branches and their trees
+//! are rebuilt from it.
 //!
 //! A commit is acknowledged once its record is synced to the log; only then
-//! is it applied to the tree. Opening the store replays the log into a fresh
-//! tree, so nothing the tree holds can be missing from the log.
+//! is it applied. Opening the store replays the log, so nothing the store
+//! holds can be missing from the log.
 //!
-//! Only `main` exists so far. Branches come with commits as objects.
+//! Every commit keeps the tree it produced. Versions share every node they
+//! have in common, so keeping them all costs only the paths each commit
+//! rewrote. A branch is a name for a commit, and making one copies nothing.
+//!
+//! Each value in the tree is a cell: the value, or a mark that it was
+//! removed, and the commit that last changed it. Following that commit to
+//! its parent and reading the key there gives the change before, so the
+//! history of a key costs the number of times it changed, not the number of
+//! commits.
 
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::log::{Edit, Log, LogError, Record, Storage};
+use crate::log::{Branch, Commit, Edit, Log, LogError, Record, Storage};
 use crate::tree::{Bytes, Tree};
 
-/// The branch that holds live data.
+/// The branch that holds live data. It exists from the start.
 pub const MAIN_BRANCH: &str = "main";
+/// Branch names are short labels, not data.
+const MAX_BRANCH_NAME: usize = 255;
+
+/// Names a commit: a BLAKE3 hash of its parent, branch, provenance, time
+/// and edits.
+pub type CommitId = [u8; 32];
 
 /// Where the store reads the time. Tests replace it with a clock a seed
 /// controls, the same way they replace the disk.
@@ -44,55 +61,199 @@ pub struct Provenance {
     pub approved_by: Option<String>,
 }
 
+/// A key's value at some commit, and the commit that last changed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cell {
+    /// `None` when the change was a removal.
+    pub value: Option<Bytes>,
+    pub changed_by: CommitId,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitInfo {
+    pub id: CommitId,
+    pub parent: Option<CommitId>,
+    pub branch: String,
+    pub provenance: Provenance,
+    pub time: u64,
+    /// The cells after this commit.
+    state: Tree,
+}
+
+#[derive(Debug)]
+pub enum StoreError {
+    Log(LogError),
+    UnknownBranch(String),
+    BranchExists(String),
+    /// Empty, or longer than a label should be.
+    BadBranchName,
+    /// The log holds a record the store cannot apply, such as a commit to a
+    /// branch that was never created. The log itself checked out.
+    Inconsistent(String),
+}
+
+impl fmt::Display for StoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Log(error) => write!(f, "{error}"),
+            Self::UnknownBranch(name) => write!(f, "no branch named {name:?}"),
+            Self::BranchExists(name) => write!(f, "a branch named {name:?} already exists"),
+            Self::BadBranchName => write!(f, "a branch name must be 1 to {MAX_BRANCH_NAME} bytes"),
+            Self::Inconsistent(what) => write!(f, "the log cannot be applied: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+impl From<LogError> for StoreError {
+    fn from(error: LogError) -> Self {
+        Self::Log(error)
+    }
+}
+
+/// A branch's latest commit, or none yet, and the cells it holds.
+#[derive(Debug, Clone)]
+struct Head {
+    commit: Option<CommitId>,
+    state: Tree,
+}
+
 pub struct Store<S: Storage, C: Clock> {
     log: Log<S>,
     clock: C,
-    main: Tree,
+    branches: BTreeMap<String, Head>,
+    commits: HashMap<CommitId, Arc<CommitInfo>>,
     /// The time of the latest commit, so times never go backwards.
     last_time: u64,
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
-    /// Opens the log and replays every commit into the tree.
-    pub fn open(storage: S, clock: C) -> Result<Self, LogError> {
+    /// Opens the log and replays every record.
+    pub fn open(storage: S, clock: C) -> Result<Self, StoreError> {
         let (log, records) = Log::open(storage)?;
         let mut store = Self {
             log,
             clock,
-            main: Tree::empty(),
+            branches: BTreeMap::from([(
+                MAIN_BRANCH.to_owned(),
+                Head {
+                    commit: None,
+                    state: Tree::empty(),
+                },
+            )]),
+            commits: HashMap::new(),
             last_time: 0,
         };
         for record in &records {
-            store.apply(record);
+            store
+                .apply(record)
+                .map_err(|e| StoreError::Inconsistent(e.to_string()))?;
         }
         Ok(store)
     }
 
-    /// Writes `edits` to `main` as one commit. Returns once the commit is
-    /// durable. If it fails, the tree is unchanged and, as with the log, the
-    /// store refuses further commits.
-    pub fn commit(&mut self, edits: Vec<Edit>, provenance: Provenance) -> Result<(), LogError> {
-        let record = Record {
-            branch: MAIN_BRANCH.to_owned(),
+    /// Writes `edits` to `branch` as one commit and returns its id once it
+    /// is durable. If the log fails, nothing changes and, as with the log,
+    /// the store refuses further writes.
+    pub fn commit(
+        &mut self,
+        branch: &str,
+        edits: Vec<Edit>,
+        provenance: Provenance,
+    ) -> Result<CommitId, StoreError> {
+        self.require_branch(branch)?;
+        let record = Record::Commit(Commit {
+            branch: branch.to_owned(),
             changes: edits,
             who: provenance.who,
             why: provenance.why,
             approved_by: provenance.approved_by,
             time: self.clock.now_micros().max(self.last_time),
-        };
+        });
         self.log.append(&record)?;
-        self.apply(&record);
-        Ok(())
+        self.apply(&record)?;
+        Ok(self.head(branch).expect("a commit was just applied"))
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<&Bytes> {
-        self.main.get(key)
+    /// Makes a branch that starts where `from` is now.
+    pub fn create_branch(&mut self, name: &str, from: &str) -> Result<(), StoreError> {
+        if name.is_empty() || name.len() > MAX_BRANCH_NAME {
+            return Err(StoreError::BadBranchName);
+        }
+        if self.branches.contains_key(name) {
+            return Err(StoreError::BranchExists(name.to_owned()));
+        }
+        self.require_branch(from)?;
+        let record = Record::Branch(Branch {
+            name: name.to_owned(),
+            from: from.to_owned(),
+        });
+        self.log.append(&record)?;
+        self.apply(&record)
     }
 
-    /// The current state of `main`. Cloning it is one pointer copy, and the
-    /// clone does not change when later commits are made.
-    pub fn main(&self) -> &Tree {
-        &self.main
+    /// The live value of `key` on `branch`.
+    pub fn get(&self, branch: &str, key: &[u8]) -> Option<Bytes> {
+        self.cell(branch, key)?.value
+    }
+
+    /// The value of `key` as `commit` left it.
+    pub fn get_at(&self, commit: &CommitId, key: &[u8]) -> Option<Bytes> {
+        decode_cell(self.commits.get(commit)?.state.get(key)?).value
+    }
+
+    /// The cell of `key` on `branch`: its value, or the removal, and the
+    /// commit that made it. `None` if the key was never written there.
+    pub fn cell(&self, branch: &str, key: &[u8]) -> Option<Cell> {
+        self.branches
+            .get(branch)?
+            .state
+            .get(key)
+            .map(|bytes| decode_cell(bytes))
+    }
+
+    /// Every change to `key` that `branch` can see, newest first.
+    pub fn history(&self, branch: &str, key: &[u8]) -> Vec<Cell> {
+        let mut history = Vec::new();
+        let mut cell = self.cell(branch, key);
+        while let Some(current) = cell {
+            let parent = self
+                .commits
+                .get(&current.changed_by)
+                .and_then(|commit| commit.parent)
+                .and_then(|parent| self.commits.get(&parent));
+            cell = parent
+                .and_then(|parent| parent.state.get(key))
+                .map(|bytes| decode_cell(bytes));
+            history.push(current);
+        }
+        history
+    }
+
+    /// Every live key and value on `branch`, in key order.
+    pub fn entries(&self, branch: &str) -> Vec<(Bytes, Bytes)> {
+        let Some(head) = self.branches.get(branch) else {
+            return Vec::new();
+        };
+        head.state
+            .iter()
+            .filter_map(|(key, bytes)| Some((key.clone(), decode_cell(bytes).value?)))
+            .collect()
+    }
+
+    /// The latest commit on `branch`, or `None` if it has none or does not
+    /// exist.
+    pub fn head(&self, branch: &str) -> Option<CommitId> {
+        self.branches.get(branch)?.commit
+    }
+
+    pub fn branches(&self) -> impl Iterator<Item = &str> {
+        self.branches.keys().map(String::as_str)
+    }
+
+    pub fn commit_info(&self, id: &CommitId) -> Option<&CommitInfo> {
+        self.commits.get(id).map(Arc::as_ref)
     }
 
     /// The time recorded on the latest commit.
@@ -100,16 +261,70 @@ impl<S: Storage, C: Clock> Store<S, C> {
         self.last_time
     }
 
-    fn apply(&mut self, record: &Record) {
-        for edit in &record.changes {
-            self.main = match &edit.value {
-                Some(value) => self
-                    .main
-                    .insert(Arc::from(edit.key.as_slice()), Arc::from(value.as_slice())),
-                None => self.main.remove(&edit.key),
-            };
+    fn require_branch(&self, name: &str) -> Result<(), StoreError> {
+        if self.branches.contains_key(name) {
+            Ok(())
+        } else {
+            Err(StoreError::UnknownBranch(name.to_owned()))
         }
-        self.last_time = self.last_time.max(record.time);
+    }
+
+    fn apply(&mut self, record: &Record) -> Result<(), StoreError> {
+        match record {
+            Record::Branch(branch) => {
+                let from = self
+                    .branches
+                    .get(&branch.from)
+                    .ok_or_else(|| StoreError::UnknownBranch(branch.from.clone()))?
+                    .clone();
+                if self.branches.insert(branch.name.clone(), from).is_some() {
+                    return Err(StoreError::BranchExists(branch.name.clone()));
+                }
+                Ok(())
+            }
+            Record::Commit(commit) => self.apply_commit(commit),
+        }
+    }
+
+    fn apply_commit(&mut self, commit: &Commit) -> Result<(), StoreError> {
+        let head = self
+            .branches
+            .get_mut(&commit.branch)
+            .ok_or_else(|| StoreError::UnknownBranch(commit.branch.clone()))?;
+        let id = commit_id(head.commit, commit);
+        let mut state = head.state.clone();
+        for edit in &commit.changes {
+            let is_live = state
+                .get(&edit.key)
+                .is_some_and(|bytes| decode_cell(bytes).value.is_some());
+            // Removing what is not there changes nothing, and records nothing.
+            if edit.value.is_none() && !is_live {
+                continue;
+            }
+            state = state.insert(
+                Arc::from(edit.key.as_slice()),
+                encode_cell(&id, edit.value.as_deref()),
+            );
+        }
+        let info = CommitInfo {
+            id,
+            parent: head.commit,
+            branch: commit.branch.clone(),
+            provenance: Provenance {
+                who: commit.who.clone(),
+                why: commit.why.clone(),
+                approved_by: commit.approved_by.clone(),
+            },
+            time: commit.time,
+            state: state.clone(),
+        };
+        *head = Head {
+            commit: Some(id),
+            state,
+        };
+        self.commits.insert(id, Arc::new(info));
+        self.last_time = self.last_time.max(commit.time);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -121,4 +336,57 @@ impl<S: Storage, C: Clock> Store<S, C> {
     pub(crate) fn clock_mut(&mut self) -> &mut C {
         &mut self.clock
     }
+}
+
+const REMOVED: u8 = 0;
+const PRESENT: u8 = 1;
+const COMMIT_ID_LEN: usize = 32;
+
+/// A cell in the tree: the commit id, then a flag, then the value if any.
+fn encode_cell(commit: &CommitId, value: Option<&[u8]>) -> Bytes {
+    let mut bytes = Vec::with_capacity(COMMIT_ID_LEN + 1 + value.map_or(0, <[u8]>::len));
+    bytes.extend_from_slice(commit);
+    match value {
+        None => bytes.push(REMOVED),
+        Some(value) => {
+            bytes.push(PRESENT);
+            bytes.extend_from_slice(value);
+        }
+    }
+    Arc::from(bytes)
+}
+
+/// Cells are only written by `encode_cell`, so their layout is known.
+fn decode_cell(bytes: &[u8]) -> Cell {
+    let (id, rest) = bytes.split_at(COMMIT_ID_LEN);
+    let changed_by: CommitId = id.try_into().expect("a cell starts with a commit id");
+    let value = match rest.split_first() {
+        Some((&PRESENT, value)) => Some(Arc::from(value)),
+        _ => None,
+    };
+    Cell { value, changed_by }
+}
+
+/// Every field that makes the commit what it is, each length-prefixed, so
+/// no two different commits hash alike.
+fn commit_id(parent: Option<CommitId>, commit: &Commit) -> CommitId {
+    let mut hasher = blake3::Hasher::new();
+    let mut field = |bytes: &[u8]| {
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    field(b"umbrachyx commit");
+    field(parent.as_ref().map_or(&[][..], |id| &id[..]));
+    field(commit.branch.as_bytes());
+    field(commit.who.as_bytes());
+    field(commit.why.as_bytes());
+    field(&[u8::from(commit.approved_by.is_some())]);
+    field(commit.approved_by.as_deref().unwrap_or("").as_bytes());
+    field(&commit.time.to_le_bytes());
+    for edit in &commit.changes {
+        field(&edit.key);
+        field(&[u8::from(edit.value.is_some())]);
+        field(edit.value.as_deref().unwrap_or_default());
+    }
+    *hasher.finalize().as_bytes()
 }

@@ -246,3 +246,16 @@ fn a_diff_of_few_changes_reads_few_nodes() {
     assert!(base.diff(&rebuilt).nodes_visited <= 200);
     assert_eq!(base.diff(&rebuilt).changes, model_diff(&model, &changed));
 }
+
+#[test]
+fn iterating_gives_every_entry_in_key_order() {
+    let mut rng = Rng(12);
+    let model = starting_model(&mut rng, 20_000);
+    let ops = random_ops(&mut rng, 20_000, 3_000);
+    let (tree, changed) = apply(&build(&model), &model, &ops);
+
+    let entries: Vec<(Bytes, Bytes)> = tree.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+    assert_eq!(entries, changed.into_iter().collect::<Vec<_>>());
+    assert_eq!(Tree::empty().iter().count(), 0);
+}

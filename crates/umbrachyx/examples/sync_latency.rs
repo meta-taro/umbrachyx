@@ -13,7 +13,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use umbrachyx::log::{Edit, FileStorage, Log, Record};
+use umbrachyx::log::{Commit, Edit, FileStorage, Log, Record};
 
 const DEFAULT_WRITES: usize = 2_000;
 /// About the size of a small game-state record once framed.
@@ -105,7 +105,7 @@ fn time_log(writes: usize, path: &Path) -> Result<Vec<Duration>, Box<dyn std::er
     let (mut log, _) = Log::open(FileStorage::open(path)?)?;
     let mut samples = Vec::with_capacity(writes);
     for n in 0..writes {
-        let record = Record {
+        let record = Record::Commit(Commit {
             branch: "main".to_owned(),
             changes: vec![Edit {
                 key: format!("player:{}:coins", n % 97).into_bytes(),
@@ -115,7 +115,7 @@ fn time_log(writes: usize, path: &Path) -> Result<Vec<Duration>, Box<dyn std::er
             why: "sync latency".to_owned(),
             approved_by: None,
             time: n as u64,
-        };
+        });
         let start = Instant::now();
         log.append(&record)?;
         samples.push(start.elapsed());

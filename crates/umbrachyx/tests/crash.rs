@@ -21,7 +21,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use umbrachyx::log::{Edit, FileStorage, Log, Record};
+use umbrachyx::log::{Commit, Edit, FileStorage, Log, Record};
 
 const WRITER_ENV: &str = "UMBRACHYX_CRASH_WRITER";
 const ROUNDS_ENV: &str = "UMBRACHYX_CRASH_ROUNDS";
@@ -36,7 +36,7 @@ const READY: &str = "ready";
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn record(seq: u64) -> Record {
-    Record {
+    Record::Commit(Commit {
         branch: "main".to_owned(),
         changes: vec![Edit {
             key: format!("player:{}:coins", seq % 97).into_bytes(),
@@ -46,7 +46,7 @@ fn record(seq: u64) -> Record {
         why: format!("write {seq}"),
         approved_by: seq.is_multiple_of(3).then(|| "ops:reviewer".to_owned()),
         time: seq,
-    }
+    })
 }
 
 /// The child side: append until killed, announcing each acknowledged write.

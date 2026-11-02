@@ -33,9 +33,10 @@ without an entry here is not adopted.
   whole, checked record anywhere after it: if one exists, acknowledged data
   was damaged and the log refuses to open rather than dropping it. Damage
   inside the very last record cannot be told apart from a torn write.
-- **A record is one commit**: the branch, the keys it sets or removes, who
-  made it, why, who approved it and when. It is one frame, so a commit that
-  touches many keys is in the log whole or not at all. The payload starts
+- **A record is a commit or a new branch.** A commit holds the branch, the
+  keys it sets or removes, who made it, why, who approved it and when. It is
+  one frame, so a commit that touches many keys is in the log whole or not
+  at all. A new branch names the branch it starts from. The payload starts
   with a format version; a frame whose checksum holds but which does not
   decode, whatever its version, stops the log from opening rather than
   being cut as a torn write, because a torn write cannot pass the checksum.
@@ -122,9 +123,10 @@ memory speed for writes will need group commit: one sync for many writes.
 - **The store has its own run**, on top of the log's: commits of up to six
   keys, including removes, over a small key space so they overwrite each
   other, with failed syncs, process crashes and power cuts. After every
-  restart the tree must hold exactly what the acknowledged commits wrote, an
-  interrupted commit must be there whole or not at all, and recorded times
-  must not go back. CI runs 10,000 seeds of each, in release mode; the
+  restart every branch must exist and hold exactly what the acknowledged
+  commits wrote to it, an interrupted commit must be there whole or not at
+  all, and recorded times must not go back. Branches are made from any
+  branch, and commits go to any of them. CI runs 10,000 seeds of each, in release mode; the
   results are the same as in debug mode.
 
 ## The tree
@@ -285,3 +287,19 @@ checker to hold the shared secret that mints tokens.
   missing from the log.
 - **A failed commit leaves the tree unchanged**, and the store, like the
   log, refuses further commits until it is reopened.
+- **Every commit keeps the tree it produced**, so any past state can be
+  read. Versions share the nodes they have in common, so keeping all of
+  them costs only the paths each commit rewrote.
+- **A commit is named by a BLAKE3 hash** of its parent, branch, provenance,
+  time and edits. The hash of the tree is left out, because each cell in
+  the tree names the commit that wrote it.
+- **A branch is a name for a commit.** Making one writes a record and copies
+  nothing. Commits to a branch are not seen on the branch it came from.
+- **Each value is a cell**: the value, or a mark that it was removed, and
+  the commit that last changed it. A removal stays in the tree as a mark,
+  so "when, and in which commit, did this disappear?" is answered from the
+  current state. Removing a key that is not there records nothing.
+- **The history of a key follows those marks back.** The cell names the
+  commit that last changed it; reading the key in that commit's parent
+  gives the change before, and so on. The cost is the number of times the
+  key changed, not the number of commits.

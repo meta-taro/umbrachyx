@@ -1,22 +1,21 @@
-//! One simulated run of the store: commits of several edits, failed syncs,
-//! process crashes and power cuts, and a clock that sometimes goes
-//! backwards, all chosen by a seed.
+//! One simulated run of the store: commits of several edits to several
+//! branches, new branches, failed syncs, process crashes and power cuts, and
+//! a clock that sometimes goes backwards, all chosen by a seed.
 //!
 //! The promises, checked after every restart:
-//! - the tree holds exactly what the acknowledged commits wrote;
+//! - every branch exists and holds exactly what the acknowledged commits
+//!   wrote to it, and branches see nothing of each other's later commits;
 //! - a commit whose sync was interrupted is there whole or not at all;
 //! - recorded times never go backwards, across commits and restarts.
 //!
 //! Damage to the disk is the log's business and is covered by its own run.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use super::disk::{SimStorage, SyncFault};
 use super::rng::Rng;
 use crate::log::{Edit, LogError};
-use crate::store::{Clock, Provenance, Store};
-use crate::tree::Tree;
+use crate::store::{Clock, MAIN_BRANCH, Provenance, Store, StoreError};
 
 const STEPS: usize = 64;
 /// Out of 100, per step; the rest cut power.
@@ -29,11 +28,15 @@ const KEY_SPACE: u64 = 200;
 const MAX_EDITS: u64 = 6;
 /// Out of 100, per edit.
 const REMOVE_PERCENT: u64 = 20;
+/// Out of 100, per commit step: make a branch instead.
+const NEW_BRANCH_PERCENT: u64 = 8;
 /// Out of 100, per reading of the clock.
 const CLOCK_BACK_PERCENT: u64 = 5;
 const START_MICROS: u64 = 1_800_000_000_000_000;
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
+/// What each branch should hold.
+type Models = BTreeMap<String, Model>;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
@@ -44,6 +47,7 @@ pub struct Outcome {
     pub in_flight_kept: usize,
     pub in_flight_lost: usize,
     pub clock_went_back: usize,
+    pub branches_made: usize,
 }
 
 /// A clock a seed controls. It mostly moves forward a little, and sometimes
@@ -79,9 +83,9 @@ impl Clock for SimClock {
 struct Run {
     rng: Rng,
     store: Store<SimStorage, SimClock>,
-    model: Model,
-    /// Edits of a commit whose sync was interrupted.
-    in_flight: Option<Vec<Edit>>,
+    models: Models,
+    /// The branch and edits of a commit whose sync was interrupted.
+    in_flight: Option<(String, Vec<Edit>)>,
     /// The time of the latest acknowledged commit.
     acknowledged_time: u64,
     outcome: Outcome,
@@ -95,7 +99,7 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
     let mut run = Run {
         rng,
         store,
-        model: Model::new(),
+        models: Models::from([(MAIN_BRANCH.to_owned(), Model::new())]),
         in_flight: None,
         acknowledged_time: 0,
         outcome: Outcome::default(),
@@ -120,6 +124,10 @@ impl Run {
     }
 
     fn commit(&mut self, step: usize) -> Result<(), String> {
+        if self.rng.percent(NEW_BRANCH_PERCENT) {
+            return self.new_branch(step);
+        }
+        let branch = self.random_branch();
         let edits = self.random_edits();
         let fault = if self.rng.percent(SYNC_FAULT_PERCENT) {
             Some(if self.rng.percent(50) {
@@ -138,18 +146,18 @@ impl Run {
             why: format!("step {step}"),
             approved_by: None,
         };
-        match (self.store.commit(edits.clone(), provenance), fault) {
-            (Ok(()), None) => {
-                apply(&mut self.model, &edits);
+        match (self.store.commit(&branch, edits.clone(), provenance), fault) {
+            (Ok(_), None) => {
+                apply(self.models.get_mut(&branch).expect("known branch"), &edits);
                 self.outcome.commits += 1;
                 self.check_time(step)?;
                 self.acknowledged_time = self.store.last_time();
-                self.trace(step, format!("commit {} edits", edits.len()));
+                self.trace(step, format!("commit {} edits to {branch}", edits.len()));
                 Ok(())
             }
-            (Err(LogError::Io(_)), Some(fault)) => {
+            (Err(StoreError::Log(LogError::Io(_))), Some(fault)) => {
                 if fault == SyncFault::KeepPending {
-                    self.in_flight = Some(edits);
+                    self.in_flight = Some((branch, edits));
                 }
                 self.trace(step, format!("sync fault {fault:?}"));
                 let power = fault == SyncFault::DropPending || self.rng.percent(50);
@@ -159,6 +167,24 @@ impl Run {
                 "step {step}: commit with fault {fault:?} returned {result:?}"
             )),
         }
+    }
+
+    fn new_branch(&mut self, step: usize) -> Result<(), String> {
+        let name = format!("b{}", self.models.len());
+        let from = self.random_branch();
+        self.store
+            .create_branch(&name, &from)
+            .map_err(|e| format!("step {step}: branch {name} from {from}: {e}"))?;
+        let model = self.models[&from].clone();
+        self.models.insert(name.clone(), model);
+        self.outcome.branches_made += 1;
+        self.trace(step, format!("branch {name} from {from}"));
+        Ok(())
+    }
+
+    fn random_branch(&mut self) -> String {
+        let index = self.rng.below(self.models.len() as u64) as usize;
+        self.models.keys().nth(index).expect("in range").clone()
     }
 
     fn restart(&mut self, step: usize, power: bool) -> Result<(), String> {
@@ -180,29 +206,48 @@ impl Run {
     }
 
     fn check_recovered(&mut self, step: usize) -> Result<(), String> {
-        let root = self.store.main().root_hash();
+        let branches: Vec<&str> = self.store.branches().collect();
+        if !branches
+            .iter()
+            .copied()
+            .eq(self.models.keys().map(String::as_str))
+        {
+            return Err(format!(
+                "step {step}: branches {branches:?} came back, expected {:?}",
+                self.models.keys().collect::<Vec<_>>()
+            ));
+        }
         let in_flight = self.in_flight.take();
-        if root == tree_of(&self.model).root_hash() {
-            if in_flight.is_some() {
-                self.outcome.in_flight_lost += 1;
+        for (branch, model) in &mut self.models {
+            let held = entries_of(&self.store, branch);
+            let pending = in_flight
+                .as_ref()
+                .filter(|(target, _)| target == branch)
+                .map(|(_, edits)| edits);
+            if held == *model {
+                if pending.is_some() {
+                    self.outcome.in_flight_lost += 1;
+                }
+                continue;
             }
-        } else if let Some(edits) = in_flight {
-            let mut with_in_flight = self.model.clone();
-            apply(&mut with_in_flight, &edits);
-            if root != tree_of(&with_in_flight).root_hash() {
+            let Some(edits) = pending else {
                 return Err(format!(
-                    "step {step}: the tree is neither the acknowledged state nor that \
+                    "step {step}: {branch} does not hold what acknowledged commits wrote"
+                ));
+            };
+            let mut with_in_flight = model.clone();
+            apply(&mut with_in_flight, edits);
+            if held != with_in_flight {
+                return Err(format!(
+                    "step {step}: {branch} is neither the acknowledged state nor that \
                      state with the whole interrupted commit"
                 ));
             }
-            self.model = with_in_flight;
+            *model = with_in_flight;
             self.outcome.in_flight_kept += 1;
-        } else {
-            return Err(format!(
-                "step {step}: the tree does not hold what acknowledged commits wrote"
-            ));
         }
-        self.trace(step, format!("reopened, root {}", hex(&root)));
+        let head = self.store.head(MAIN_BRANCH).map(|id| hex(&id));
+        self.trace(step, format!("reopened, main at {head:?}"));
         Ok(())
     }
 
@@ -243,13 +288,12 @@ fn apply(model: &mut Model, edits: &[Edit]) {
     }
 }
 
-fn tree_of(model: &Model) -> Tree {
-    Tree::from_sorted(
-        model
-            .iter()
-            .map(|(k, v)| (Arc::from(k.as_slice()), Arc::from(v.as_slice())))
-            .collect(),
-    )
+fn entries_of(store: &Store<SimStorage, SimClock>, branch: &str) -> Model {
+    store
+        .entries(branch)
+        .into_iter()
+        .map(|(k, v)| (k.to_vec(), v.to_vec()))
+        .collect()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -278,6 +322,7 @@ mod tests {
             total.in_flight_kept += outcome.in_flight_kept;
             total.in_flight_lost += outcome.in_flight_lost;
             total.clock_went_back += outcome.clock_went_back;
+            total.branches_made += outcome.branches_made;
         }
         total
     }
@@ -296,6 +341,7 @@ mod tests {
         assert!(total.in_flight_kept >= 20, "{total:?}");
         assert!(total.in_flight_lost >= 20, "{total:?}");
         assert!(total.clock_went_back >= 100, "{total:?}");
+        assert!(total.branches_made >= 500, "{total:?}");
     }
 
     #[test]
@@ -308,12 +354,13 @@ mod tests {
         let total = run_seeds(seeds);
         println!(
             "store, {seeds} seeds: {} commits, {} restarts, interrupted commits kept {} \
-             and lost {}, clock went back {} times",
+             and lost {}, clock went back {} times, {} branches made",
             total.commits,
             total.restarts,
             total.in_flight_kept,
             total.in_flight_lost,
-            total.clock_went_back
+            total.clock_went_back,
+            total.branches_made
         );
     }
 
