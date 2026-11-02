@@ -39,6 +39,7 @@ the combination at memory speed.
 | SQL:2011 system-versioned tables (MariaDB, SQL Server, Db2) | Past versions of each row | No branch, merge, diff or provenance |
 | Postgres audit extensions (pgMemento, supa_audit) | A trigger-written log of row changes | Bolted on after the fact; costs write speed |
 | Redis / Valkey | Memory speed | No history at all |
+| Amazon MemoryDB | Memory speed, with every write in a durable log replicated across availability zones before it is acknowledged | The log serves recovery only: past values cannot be read, diffed or branched; a managed cloud service only |
 | Irmin | A git-like store as a library | A library, not a database server |
 
 ## Architecture sketch
