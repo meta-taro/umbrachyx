@@ -74,3 +74,38 @@ memory speed for writes will need group commit: one sync for many writes.
 - **All disk access goes through one storage boundary**, so deterministic
   simulation tests can replace the disk with one that loses unsynced bytes,
   tears writes, and fails syncs.
+
+## Deterministic simulation
+
+- **The simulator is our own, not madsim or turmoil.** Both replace an
+  async runtime and the network; the log is synchronous and has no network,
+  so there is nothing for them to replace yet. This follows FoundationDB and
+  TigerBeetle: one seeded random source, and a simulated disk behind the same
+  storage boundary the real file uses. They will be looked at again when
+  replication brings a network.
+- **The random source is SplitMix64, written out in the code.** A failing
+  seed has to replay the same run for as long as it sits in a bug report; a
+  dependency upgrade that changed the stream would break that silently. A
+  test pins its first outputs.
+- **The simulated disk keeps what is durable apart from what the process
+  sees.** Appends and truncates change only what is seen until a sync. A
+  process crash keeps what is seen, as the kernel would; a power cut keeps
+  what is durable, plus an unfinished write cut at any length with each
+  512-byte sector of it kept, zeroed or filled with garbage independently.
+  Syncs can fail, dropping the unsynced bytes or leaving them in flight, and
+  a bit can flip in data that was already durable.
+- **Each seed runs 64 steps** of writes, failed syncs, process crashes,
+  power cuts and bit flips. After every restart it checks that every
+  acknowledged record came back unchanged; that nothing else did except the
+  one record whose sync was interrupted; that damage before the last record
+  stops the log from opening, at the right offset; that what open returned
+  survives a second power cut; that a log whose sync failed refuses further
+  writes; and that the log's length matches its records. CI runs 10,000
+  seeds.
+- **The harness is checked against deliberately broken logs**: skipping the
+  sync in open, not refusing writes after a failed sync, miscounting the
+  length, treating interior damage as a torn tail, and ignoring a failed
+  sync are each caught within the first seeds.
+- **Time is not simulated yet.** Nothing in the log reads the clock. It will
+  go behind the same kind of boundary as the disk when the first thing that
+  does (such as a group-commit timeout) is written.

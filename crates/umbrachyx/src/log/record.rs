@@ -7,7 +7,7 @@
 use super::LogError;
 
 /// One acknowledged change: the value and who wrote it, why, and who approved it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Record {
     pub key: Vec<u8>,
     pub value: Vec<u8>,

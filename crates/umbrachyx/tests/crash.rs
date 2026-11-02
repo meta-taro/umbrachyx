@@ -29,6 +29,11 @@ const QUICK_ROUNDS: u32 = 20;
 const FULL_ROUNDS: u32 = 1_000;
 const MAX_KILL_DELAY_MICROS: u64 = 20_000;
 const SEED: u64 = 0x5EED_0001;
+/// Printed once the writer has opened the log. The kill delay starts here,
+/// so slow process start-up (Windows) does not eat the delay before any
+/// write happens.
+const READY: &str = "ready";
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn record(seq: u64) -> Record {
     Record {
@@ -45,6 +50,8 @@ fn run_writer(path: &Path) -> ! {
     let storage = FileStorage::open(path).expect("writer opens storage");
     let (mut log, recovered) = Log::open(storage).expect("writer opens log");
     let mut out = std::io::stdout().lock();
+    writeln!(out, "{READY}").expect("writer reports");
+    out.flush().expect("writer flushes");
     let mut seq = recovered.len() as u64;
     loop {
         log.append(&record(seq)).expect("writer appends");
@@ -73,22 +80,34 @@ fn spawn_writer(path: &Path) -> Child {
         .expect("spawns writer")
 }
 
-/// Kill the writer after `delay` and return the highest sequence it acknowledged.
+/// Kill the writer `delay` after it is ready and return the highest
+/// sequence it acknowledged.
 fn kill_after(mut child: Child, delay: Duration) -> Option<u64> {
     let stdout = child.stdout.take().expect("writer stdout");
+    let (ready_tx, ready_rx) = mpsc::channel();
     let (tx, rx) = mpsc::channel();
     let reader = thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Ok(seq) = line.trim().parse::<u64>() {
-                // The receiver outlives the reader; a send error cannot happen.
+            let line = line.trim();
+            // The receivers outlive the reader; a send error cannot happen.
+            if line == READY {
+                let _ = ready_tx.send(());
+            } else if let Ok(seq) = line.parse::<u64>() {
                 let _ = tx.send(seq);
             }
         }
     });
-    thread::sleep(delay);
+    let is_ready = ready_rx.recv_timeout(READY_TIMEOUT).is_ok();
+    if is_ready {
+        thread::sleep(delay);
+    }
     child.kill().expect("kills writer");
     child.wait().expect("reaps writer");
     reader.join().expect("reader thread");
+    assert!(
+        is_ready,
+        "writer did not open the log within {READY_TIMEOUT:?}"
+    );
     rx.try_iter().max()
 }
 

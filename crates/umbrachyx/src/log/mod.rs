@@ -4,9 +4,7 @@
 //! tree and the history are rebuilt from this log, so if the log is wrong,
 //! everything above it is wrong too.
 
-mod record;
-#[cfg(test)]
-mod sim;
+pub(crate) mod record;
 mod storage;
 
 use std::fmt;
@@ -119,12 +117,18 @@ impl<S: Storage> Log<S> {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// The storage underneath, for the simulation to inject faults into.
+    #[cfg(test)]
+    pub(crate) fn storage_mut(&mut self) -> &mut S {
+        &mut self.storage
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::sim::SimStorage;
     use super::*;
+    use crate::sim::SimStorage;
 
     fn record(n: u32) -> Record {
         Record {

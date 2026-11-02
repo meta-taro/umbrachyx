@@ -4,3 +4,5 @@
 //! this crate is meant to become.
 
 pub mod log;
+#[cfg(test)]
+mod sim;
