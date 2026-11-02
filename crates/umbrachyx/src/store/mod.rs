@@ -374,20 +374,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             .get_mut(&commit.branch)
             .ok_or_else(|| StoreError::UnknownBranch(commit.branch.clone()))?;
         let id = commit_id(head.commit, commit);
-        let mut state = head.state.clone();
-        for edit in &commit.changes {
-            let is_live = state
-                .get(&edit.key)
-                .is_some_and(|bytes| decode_cell(bytes).value.is_some());
-            // Removing what is not there changes nothing, and records nothing.
-            if edit.value.is_none() && !is_live {
-                continue;
-            }
-            state = state.insert(
-                Arc::from(edit.key.as_slice()),
-                encode_cell(&id, edit.value.as_deref()),
-            );
-        }
+        let state = head.state.insert_sorted(cells_of(&head.state, commit, &id));
         let info = CommitInfo {
             id,
             parent: head.commit,
@@ -424,6 +411,29 @@ impl<S: Storage, C: Clock> Store<S, C> {
 const REMOVED: u8 = 0;
 const PRESENT: u8 = 1;
 const COMMIT_ID_LEN: usize = 32;
+
+/// The cells `commit` writes, sorted by key. Edits apply in order, so the
+/// last edit of a key wins, and removing what is not live at that point
+/// changes nothing and records nothing.
+fn cells_of(state: &Tree, commit: &Commit, id: &CommitId) -> Vec<(Bytes, Bytes)> {
+    let mut written: BTreeMap<&[u8], Option<&[u8]>> = BTreeMap::new();
+    for edit in &commit.changes {
+        let is_live = match written.get(edit.key.as_slice()) {
+            Some(value) => value.is_some(),
+            None => state
+                .get(&edit.key)
+                .is_some_and(|bytes| decode_cell(bytes).value.is_some()),
+        };
+        if edit.value.is_none() && !is_live {
+            continue;
+        }
+        written.insert(&edit.key, edit.value.as_deref());
+    }
+    written
+        .into_iter()
+        .map(|(key, value)| (Arc::from(key), encode_cell(id, value)))
+        .collect()
+}
 
 /// A cell in the tree: the commit id, then a flag, then the value if any.
 fn encode_cell(commit: &CommitId, value: Option<&[u8]>) -> Bytes {

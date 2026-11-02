@@ -259,3 +259,65 @@ fn iterating_gives_every_entry_in_key_order() {
     assert_eq!(entries, changed.into_iter().collect::<Vec<_>>());
     assert_eq!(Tree::empty().iter().count(), 0);
 }
+
+/// A sorted run of inserts, as one commit applies them.
+fn random_batch(rng: &mut Rng, key_space: u64, count: usize) -> Model {
+    (0..count)
+        .map(|_| (key(rng.below(key_space)), value(rng)))
+        .collect()
+}
+
+/// Inserting a batch at once gives the same tree as inserting its entries
+/// one by one: the same entries, length and root hash. Batches range from
+/// one key to more keys than the tree holds, and reach past its last key.
+#[test]
+fn inserting_a_batch_matches_inserting_one_by_one() {
+    for seed in 0..40 {
+        let mut rng = Rng(seed);
+        let key_space = 1 + rng.below(30_000);
+        let model = starting_model(&mut rng, key_space);
+        let base = build(&model);
+        let count = 1 + rng.below(key_space.min(5_000)) as usize;
+        let batch = random_batch(&mut rng, key_space + 100, count);
+
+        let batched =
+            base.insert_sorted(batch.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+
+        let mut expected = model.clone();
+        expected.extend(batch.clone());
+        assert_eq!(batched.len(), expected.len(), "seed {seed}");
+        assert_eq!(
+            batched.root_hash(),
+            build(&expected).root_hash(),
+            "seed {seed}"
+        );
+        assert_eq!(
+            base.diff(&batched).changes,
+            model_diff(&model, &expected),
+            "seed {seed}"
+        );
+    }
+}
+
+#[test]
+fn inserting_a_batch_into_the_empty_tree_builds_it() {
+    let mut rng = Rng(5);
+    let model = starting_model(&mut rng, 20_000);
+
+    let tree =
+        Tree::empty().insert_sorted(model.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+
+    assert_eq!(tree.root_hash(), build(&model).root_hash());
+    assert_eq!(tree.len(), model.len());
+}
+
+#[test]
+fn inserting_an_empty_batch_changes_nothing() {
+    let mut rng = Rng(6);
+    let tree = build(&starting_model(&mut rng, 1_000));
+
+    let same = tree.insert_sorted(Vec::new());
+
+    assert_eq!(same.root_hash(), tree.root_hash());
+    assert_eq!(same.len(), tree.len());
+}

@@ -25,7 +25,10 @@ const LOAD_BATCH: usize = 50_000;
 const LOOKUPS: usize = 100_000;
 const SINGLE_COMMITS: usize = 1_000;
 const DIFF_CHANGES: usize = 10;
-const DIFF_RUNS: usize = 21;
+const DIFF_RUNS: usize = 1_001;
+/// Diffs run untimed for this long first. The single commits before them
+/// each wait about 4 ms on the disk, which leaves the core slow for a while.
+const DIFF_WARM_UP: Duration = Duration::from_millis(200);
 const SEED: u64 = 2026;
 const BRANCH: &str = "event/test";
 
@@ -155,6 +158,10 @@ fn load(store: &mut FileStore, rng: &mut Rng, records: u64) -> Result<(), Error>
 
 fn median_diff(store: &FileStore, expected: usize) -> Result<Duration, Error> {
     let (main, branch) = (store.head(MAIN_BRANCH), store.head(BRANCH));
+    let warm_up = Instant::now();
+    while warm_up.elapsed() < DIFF_WARM_UP {
+        black_box(store.diff(main.as_ref(), branch.as_ref())?);
+    }
     let mut times = Vec::with_capacity(DIFF_RUNS);
     for _ in 0..DIFF_RUNS {
         let started = Instant::now();

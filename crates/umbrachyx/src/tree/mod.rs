@@ -8,12 +8,13 @@
 //! between any two reads only around what differs. `docs/decisions.md`
 //! ("The tree") records why this structure was chosen.
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 mod diff;
 mod node;
 
-use node::{Child, Node, split_internal, split_leaf};
+use node::{Child, Entry, Node, split_internal, split_leaf};
 
 /// Keys and values are shared, not copied, between versions.
 pub type Bytes = Arc<[u8]>;
@@ -99,9 +100,22 @@ impl Tree {
 
     /// Inserts or replaces, returning a new version. `self` is unchanged.
     pub fn insert(&self, key: Bytes, value: Bytes) -> Self {
-        let len = self.len + usize::from(self.get(&key).is_none());
-        let nodes = insert_into(&self.root, self.height, key, value);
-        Self::raise(nodes, self.height, len)
+        self.insert_sorted(vec![(key, value)])
+    }
+
+    /// Inserts or replaces every entry, sorted by key with no key twice,
+    /// returning a new version. Each node above a changed key is rebuilt and
+    /// hashed once, however many of the keys land under it.
+    pub fn insert_sorted(&self, entries: Vec<(Bytes, Bytes)>) -> Self {
+        debug_assert!(
+            entries.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "entries must be sorted by key with no key twice"
+        );
+        if entries.is_empty() {
+            return self.clone();
+        }
+        let (nodes, added) = insert_into(&self.root, self.height, &entries);
+        Self::raise(nodes, self.height, self.len + added)
     }
 
     /// Removes `key` if present, returning a new version.
@@ -160,31 +174,68 @@ impl Tree {
     }
 }
 
-/// Returns the nodes that replace `node`: one, or more if it was split.
-/// An insert never moves the last key of a node other than the last one, so
-/// every node it returns but the last is closed.
-fn insert_into(node: &Node, level: u32, key: Bytes, value: Bytes) -> Vec<Arc<Node>> {
+/// Returns the nodes that replace `node`, one or more if it was split, and
+/// how many of `batch` were new keys. `batch` is sorted and every key in it
+/// belongs under `node`. An insert never moves the last key of a node other
+/// than the last one, so every node it returns but the last is closed.
+fn insert_into(node: &Node, level: u32, batch: &[Entry]) -> (Vec<Arc<Node>>, usize) {
     match node {
         Node::Leaf { entries, .. } => {
-            let mut entries = entries.clone();
-            match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
-                Ok(index) => entries[index].1 = value,
-                Err(index) => entries.insert(index, (key, value)),
-            }
-            split_leaf(entries)
+            let (merged, added) = merge_sorted(entries, batch);
+            (split_leaf(merged), added)
         }
         Node::Internal { children, .. } => {
-            let index = children
-                .partition_point(|child| child.last_key < key)
-                .min(children.len() - 1);
-            let replaced = insert_into(&children[index].node, level - 1, key, value);
-            let mut new_children = Vec::with_capacity(children.len() + replaced.len());
-            new_children.extend_from_slice(&children[..index]);
-            new_children.extend(replaced.into_iter().map(Child::of));
-            new_children.extend_from_slice(&children[index + 1..]);
-            split_internal(new_children, level)
+            let mut new_children = Vec::with_capacity(children.len() + 1);
+            let mut added = 0;
+            let mut rest = batch;
+            for (index, child) in children.iter().enumerate() {
+                // Keys past the last child's last key go to the last child.
+                let take = if index + 1 == children.len() {
+                    rest.len()
+                } else {
+                    rest.partition_point(|(key, _)| *key <= child.last_key)
+                };
+                if take == 0 {
+                    new_children.push(child.clone());
+                    continue;
+                }
+                let (here, after) = rest.split_at(take);
+                let (replaced, count) = insert_into(&child.node, level - 1, here);
+                new_children.extend(replaced.into_iter().map(Child::of));
+                added += count;
+                rest = after;
+            }
+            (split_internal(new_children, level), added)
         }
     }
+}
+
+/// Merges two sorted runs; on a key in both, `new` wins. Also returns how
+/// many keys of `new` were not in `old`.
+fn merge_sorted(old: &[Entry], new: &[Entry]) -> (Vec<Entry>, usize) {
+    let mut merged = Vec::with_capacity(old.len() + new.len());
+    let (mut i, mut j, mut added) = (0, 0, 0);
+    while i < old.len() && j < new.len() {
+        match old[i].0.cmp(&new[j].0) {
+            Ordering::Less => {
+                merged.push(old[i].clone());
+                i += 1;
+            }
+            Ordering::Greater => {
+                merged.push(new[j].clone());
+                j += 1;
+                added += 1;
+            }
+            Ordering::Equal => {
+                merged.push(new[j].clone());
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    merged.extend_from_slice(&old[i..]);
+    merged.extend_from_slice(&new[j..]);
+    (merged, added + new.len() - j)
 }
 
 /// Returns the nodes that replace `node`, or `None` if `key` is not under

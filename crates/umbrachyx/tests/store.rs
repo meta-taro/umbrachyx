@@ -280,3 +280,42 @@ fn the_state_at_an_earlier_commit_does_not_change() {
     assert_eq!(value(&store, MAIN_BRANCH, "k").as_deref(), Some("after"));
     assert_eq!(store.entries(MAIN_BRANCH).len(), 2);
 }
+
+/// Edits in one commit apply in order: the last edit of a key wins, and a
+/// removal counts what earlier edits in the same commit made live.
+#[test]
+fn edits_of_one_key_in_one_commit_apply_in_order() {
+    let dir = TempDir::new("order");
+    let mut store = open(&dir.log());
+
+    let id = store
+        .commit(
+            MAIN_BRANCH,
+            vec![
+                set("added-then-removed", "1"),
+                remove("added-then-removed"),
+                remove("removed-then-added"),
+                set("removed-then-added", "2"),
+                set("set-twice", "3"),
+                set("set-twice", "4"),
+                remove("never-there"),
+            ],
+            by("agent:x", "one commit"),
+        )
+        .expect("commits");
+
+    let removed = store
+        .cell(MAIN_BRANCH, b"added-then-removed")
+        .expect("the removal is recorded");
+    assert_eq!(removed.value, None);
+    assert_eq!(removed.changed_by, id);
+    assert_eq!(
+        value(&store, MAIN_BRANCH, "removed-then-added").as_deref(),
+        Some("2")
+    );
+    assert_eq!(
+        value(&store, MAIN_BRANCH, "set-twice").as_deref(),
+        Some("4")
+    );
+    assert!(store.cell(MAIN_BRANCH, b"never-there").is_none());
+}
