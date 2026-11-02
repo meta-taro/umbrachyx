@@ -1,19 +1,31 @@
 //! The on-disk form of one log record.
 //!
 //! A frame is `len: u32 LE | crc32: u32 LE | payload`, where the checksum
-//! covers the payload only. The payload is the record's fields, each one
-//! length-prefixed, so a reader never has to guess where a field ends.
+//! covers the payload only. The payload starts with a format version, then
+//! the record's fields, each one length-prefixed, so a reader never has to
+//! guess where a field ends.
 
 use super::LogError;
 
-/// One acknowledged change: the value and who wrote it, why, and who approved it.
+/// One commit: changes to one branch, made together, with who made them,
+/// why, who approved them and when. A record is one frame, so a commit is
+/// either wholly in the log or not at all, however many keys it touches.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Record {
-    pub key: Vec<u8>,
-    pub value: Vec<u8>,
+    pub branch: String,
+    pub changes: Vec<Edit>,
     pub who: String,
     pub why: String,
     pub approved_by: Option<String>,
+    /// Microseconds since the Unix epoch, from the store's clock.
+    pub time: u64,
+}
+
+/// One key set to a value, or removed when `value` is `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Edit {
+    pub key: Vec<u8>,
+    pub value: Option<Vec<u8>>,
 }
 
 /// Bytes in front of every payload: its length and its checksum.
@@ -33,8 +45,11 @@ pub struct Scan {
 }
 
 const LEN_PREFIX: usize = 4;
-const NO_APPROVER: u8 = 0;
-const HAS_APPROVER: u8 = 1;
+/// Bumped whenever the payload layout changes. A frame with another version
+/// cannot be read and is reported as damage, never skipped.
+const FORMAT_VERSION: u8 = 1;
+const ABSENT: u8 = 0;
+const PRESENT: u8 = 1;
 
 pub fn encode(record: &Record) -> Result<Vec<u8>, LogError> {
     let payload = encode_payload(record)?;
@@ -45,40 +60,43 @@ pub fn encode(record: &Record) -> Result<Vec<u8>, LogError> {
 }
 
 fn encode_payload(record: &Record) -> Result<Vec<u8>, LogError> {
-    let approver: &[u8] = record.approved_by.as_deref().unwrap_or("").as_bytes();
-    let fields: [&[u8]; 4] = [
-        &record.key,
-        &record.value,
-        record.who.as_bytes(),
-        record.why.as_bytes(),
-    ];
-    let len = fields.iter().map(|f| LEN_PREFIX + f.len()).sum::<usize>()
-        + 1
-        + record
-            .approved_by
-            .as_ref()
-            .map_or(0, |_| LEN_PREFIX + approver.len());
-    if len > MAX_PAYLOAD_LEN {
-        return Err(LogError::RecordTooLarge { len });
-    }
-
-    let mut payload = Vec::with_capacity(len);
-    for field in fields {
-        push_field(&mut payload, field);
-    }
-    match record.approved_by {
-        None => payload.push(NO_APPROVER),
-        Some(_) => {
-            payload.push(HAS_APPROVER);
-            push_field(&mut payload, approver);
+    let mut payload = vec![FORMAT_VERSION];
+    push_field(&mut payload, record.branch.as_bytes());
+    push_field(&mut payload, record.who.as_bytes());
+    push_field(&mut payload, record.why.as_bytes());
+    push_optional(
+        &mut payload,
+        record.approved_by.as_deref().map(str::as_bytes),
+    );
+    payload.extend_from_slice(&record.time.to_le_bytes());
+    let count = u32::try_from(record.changes.len()).map_err(|_| LogError::RecordTooLarge {
+        len: record.changes.len(),
+    })?;
+    payload.extend_from_slice(&count.to_le_bytes());
+    for write in &record.changes {
+        push_field(&mut payload, &write.key);
+        push_optional(&mut payload, write.value.as_deref());
+        if payload.len() > MAX_PAYLOAD_LEN {
+            return Err(LogError::RecordTooLarge { len: payload.len() });
         }
     }
     Ok(payload)
 }
 
+fn push_optional(payload: &mut Vec<u8>, field: Option<&[u8]>) {
+    match field {
+        None => payload.push(ABSENT),
+        Some(field) => {
+            payload.push(PRESENT);
+            push_field(payload, field);
+        }
+    }
+}
+
 fn push_field(payload: &mut Vec<u8>, field: &[u8]) {
-    // Fits: the whole payload was checked against MAX_PAYLOAD_LEN (< 4 GiB).
-    let len = field.len() as u32;
+    // A field longer than u32 cannot fit in MAX_PAYLOAD_LEN either; it is
+    // cut here and the payload is refused for its size right after.
+    let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
     payload.extend_from_slice(&len.to_le_bytes());
     payload.extend_from_slice(field);
 }
@@ -116,14 +134,21 @@ enum Frame {
     TornTail,
 }
 
-/// The smallest payload `encode` can produce: four empty length-prefixed
-/// fields and the approver flag. Anything shorter is not a frame, which also
-/// keeps a zeroed header (`len 0`, `crc32("") == 0`) from checking out.
-const MIN_PAYLOAD_LEN: usize = 4 * LEN_PREFIX + 1;
+/// The smallest payload `encode` can produce: the version, three empty
+/// length-prefixed fields, the approver flag, the time and a change count of
+/// zero. Anything shorter is not a frame, which also keeps a zeroed header
+/// (`len 0`, `crc32("") == 0`) from checking out.
+const MIN_PAYLOAD_LEN: usize = 1 + 3 * LEN_PREFIX + 1 + 8 + 4;
 
 fn read_frame(rest: &[u8], offset: u64) -> Result<Frame, LogError> {
     match check_frame(rest) {
-        Ok(frame) => Ok(frame),
+        Ok(Some(frame)) => Ok(frame),
+        // The checksum held, so this is not a torn write: it was written
+        // whole and cannot be read, by this version or at all.
+        Ok(None) => Err(LogError::Corrupt {
+            offset,
+            reason: "checksummed payload does not decode",
+        }),
         Err(reason) if has_whole_frame_after_start(rest) => {
             Err(LogError::Corrupt { offset, reason })
         }
@@ -131,8 +156,9 @@ fn read_frame(rest: &[u8], offset: u64) -> Result<Frame, LogError> {
     }
 }
 
-/// The frame at the start of `rest`, or why there is none.
-fn check_frame(rest: &[u8]) -> Result<Frame, &'static str> {
+/// The frame at the start of `rest`, or why there is none. `Ok(None)` is a
+/// frame whose checksum holds but whose payload does not decode.
+fn check_frame(rest: &[u8]) -> Result<Option<Frame>, &'static str> {
     if rest.len() < HEADER_LEN {
         return Err("header cut short");
     }
@@ -145,8 +171,7 @@ fn check_frame(rest: &[u8]) -> Result<Frame, &'static str> {
     if crc32fast::hash(payload) != read_u32(rest, LEN_PREFIX) {
         return Err("checksum mismatch");
     }
-    let record = decode_payload(payload).ok_or("malformed payload")?;
-    Ok(Frame::Whole { record, len: end })
+    Ok(decode_payload(payload).map(|record| Frame::Whole { record, len: end }))
 }
 
 /// Whether a whole, checked frame starts anywhere after the first byte.
@@ -166,22 +191,36 @@ fn read_u32(bytes: &[u8], at: usize) -> u32 {
 
 fn decode_payload(payload: &[u8]) -> Option<Record> {
     let mut cursor = Cursor { rest: payload };
-    let key = cursor.field()?.to_vec();
-    let value = cursor.field()?.to_vec();
+    if cursor.byte()? != FORMAT_VERSION {
+        return None;
+    }
+    let branch = cursor.text()?;
     let who = cursor.text()?;
     let why = cursor.text()?;
-    let approved_by = match cursor.byte()? {
-        NO_APPROVER => None,
-        HAS_APPROVER => Some(cursor.text()?),
-        _ => return None,
+    let approved_by = match cursor.optional()? {
+        None => None,
+        Some(bytes) => Some(bytes_to_text(bytes)?),
     };
+    let time = cursor.u64()?;
+    let count = read_u32(cursor.take(LEN_PREFIX)?, 0);
+    let mut changes = Vec::new();
+    for _ in 0..count {
+        let key = cursor.field()?.to_vec();
+        let value = cursor.optional()?.map(<[u8]>::to_vec);
+        changes.push(Edit { key, value });
+    }
     cursor.rest.is_empty().then_some(Record {
-        key,
-        value,
+        branch,
+        changes,
         who,
         why,
         approved_by,
+        time,
     })
+}
+
+fn bytes_to_text(bytes: &[u8]) -> Option<String> {
+    String::from_utf8(bytes.to_vec()).ok()
 }
 
 struct Cursor<'a> {
@@ -205,7 +244,22 @@ impl<'a> Cursor<'a> {
     }
 
     fn text(&mut self) -> Option<String> {
-        String::from_utf8(self.field()?.to_vec()).ok()
+        bytes_to_text(self.field()?)
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        let mut word = [0; 8];
+        word.copy_from_slice(self.take(8)?);
+        Some(u64::from_le_bytes(word))
+    }
+
+    /// `None` when the bytes do not decode; `Some(None)` for an absent field.
+    fn optional(&mut self) -> Option<Option<&'a [u8]>> {
+        match self.byte()? {
+            ABSENT => Some(None),
+            PRESENT => self.field().map(Some),
+            _ => None,
+        }
     }
 }
 
@@ -215,11 +269,21 @@ mod tests {
 
     fn record(key: &str, approved_by: Option<&str>) -> Record {
         Record {
-            key: key.as_bytes().to_vec(),
-            value: vec![0, 1, 2, 255],
+            branch: "main".to_owned(),
+            changes: vec![
+                Edit {
+                    key: key.as_bytes().to_vec(),
+                    value: Some(vec![0, 1, 2, 255]),
+                },
+                Edit {
+                    key: b"removed".to_vec(),
+                    value: None,
+                },
+            ],
             who: "agent:inventory".to_owned(),
             why: "grant login bonus — 初回".to_owned(),
             approved_by: approved_by.map(str::to_owned),
+            time: 1_800_000_000_000_000,
         }
     }
 
@@ -340,13 +404,45 @@ mod tests {
     #[test]
     fn oversized_record_is_refused_before_writing() {
         let mut big = record("a", None);
-        big.value = vec![0; MAX_PAYLOAD_LEN + 1];
+        big.changes[0].value = Some(vec![0; MAX_PAYLOAD_LEN + 1]);
 
         let error = encode(&big).expect_err("too large to frame");
 
         assert!(
             matches!(error, LogError::RecordTooLarge { .. }),
             "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_whole_frame_that_does_not_decode_is_corruption_even_last() {
+        let first = frames(&[record("a", None)]);
+        let mut bad = frames(&[record("b", None)]);
+        bad[HEADER_LEN] = FORMAT_VERSION + 1;
+        let crc = crc32fast::hash(&bad[HEADER_LEN..]);
+        bad[LEN_PREFIX..HEADER_LEN].copy_from_slice(&crc.to_le_bytes());
+        let bytes = [first.clone(), bad].concat();
+
+        let error = scan(&bytes).expect_err("a checksummed frame is not torn");
+
+        assert!(
+            matches!(error, LogError::Corrupt { offset, .. } if offset == first.len() as u64),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_commit_with_no_changes_round_trips() {
+        let empty = Record {
+            changes: Vec::new(),
+            ..record("a", None)
+        };
+
+        assert_eq!(
+            scan(&frames(std::slice::from_ref(&empty)))
+                .expect("scans")
+                .records,
+            vec![empty]
         );
     }
 }

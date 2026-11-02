@@ -63,11 +63,13 @@ jobs:
       - name: crash test (1,000 rounds)
         run: cargo test -p umbrachyx --test crash --locked -- --ignored --nocapture
 
-      # Deterministic simulation of the log over a simulated disk: power cuts
-      # that tear sectors, failed syncs and bit flips, chosen by each seed.
+      # Deterministic simulation over a simulated disk and clock, for the log
+      # (torn sectors, failed syncs, bit flips) and for the store on top of it
+      # (multi-key commits, crashes, a clock that goes back). Release mode,
+      # since the same seeds give the same results and it is ten times faster.
       # A failure prints the one-line command that replays its seed.
       - name: simulation (10,000 seeds)
-        run: cargo test -p umbrachyx --lib --locked sim::run::tests::ten_thousand_seeds -- --ignored --exact --nocapture
+        run: cargo test -p umbrachyx --lib --release --locked ten_thousand_seeds -- --ignored --nocapture
 
       - name: sync latency (reference only)
         run: cargo run -p umbrachyx --release --locked --example sync_latency

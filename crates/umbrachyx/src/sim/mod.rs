@@ -1,12 +1,12 @@
-//! Deterministic simulation: every source of nondeterminism the log sees is
-//! replaced by something a seed controls, so a failure found once can be
-//! replayed exactly.
+//! Deterministic simulation: every source of nondeterminism the database
+//! sees is replaced by something a seed controls, so a failure found once
+//! can be replayed exactly.
 //!
-//! Only the disk is simulated so far, because the log is the only component
-//! and it does nothing with time or the network.
+//! The disk and the clock are simulated. There is no network yet.
 
 mod disk;
 mod rng;
 mod run;
+mod store_run;
 
 pub use disk::SimStorage;

@@ -16,7 +16,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::disk::{SimStorage, SyncFault};
 use super::rng::Rng;
-use crate::log::{Log, LogError, Record, Storage, record};
+use crate::log::{Edit, Log, LogError, Record, Storage, record};
 
 const STEPS: usize = 64;
 
@@ -315,28 +315,45 @@ fn frame_ends(records: &[Record]) -> Vec<usize> {
         .collect()
 }
 
-/// Mostly small records, sometimes large ones that span many sectors.
+/// Mostly commits of one small write, sometimes several writes, removes,
+/// or large values that span many sectors.
 fn random_record(rng: &mut Rng) -> Record {
+    let count = if rng.percent(80) { 1 } else { 1 + rng.below(8) };
+    let changes = (0..count).map(|_| random_write(rng)).collect();
+    let who_len = 1 + rng.below(16) as usize;
+    let why_len = rng.below(48) as usize;
+    let approver_len = 1 + rng.below(16) as usize;
+    let branch_len = 1 + rng.below(12) as usize;
+    Record {
+        branch: rng.ascii(branch_len),
+        changes,
+        who: rng.ascii(who_len),
+        why: rng.ascii(why_len),
+        approved_by: rng.percent(30).then(|| rng.ascii(approver_len)),
+        time: rng.next_u64(),
+    }
+}
+
+fn random_write(rng: &mut Rng) -> Edit {
     let value_len = match rng.below(100) {
         0..90 => rng.below(256),
         90..99 => rng.below(4_096),
         _ => rng.below(65_536),
     } as usize;
     let key_len = 1 + rng.below(32) as usize;
-    let who_len = 1 + rng.below(16) as usize;
-    let why_len = rng.below(48) as usize;
-    let approver_len = 1 + rng.below(16) as usize;
-    Record {
+    Edit {
         key: rng.bytes(key_len),
-        value: rng.bytes(value_len),
-        who: rng.ascii(who_len),
-        why: rng.ascii(why_len),
-        approved_by: rng.percent(30).then(|| rng.ascii(approver_len)),
+        value: (!rng.percent(10)).then(|| rng.bytes(value_len)),
     }
 }
 
 fn describe(record: &Record) -> String {
-    format!("key {} B, value {} B", record.key.len(), record.value.len())
+    let bytes: usize = record
+        .changes
+        .iter()
+        .map(|w| w.key.len() + w.value.as_ref().map_or(0, Vec::len))
+        .sum();
+    format!("{} writes, {bytes} B", record.changes.len())
 }
 
 #[cfg(test)]

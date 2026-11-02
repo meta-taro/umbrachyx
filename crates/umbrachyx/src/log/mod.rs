@@ -10,7 +10,7 @@ mod storage;
 use std::fmt;
 use std::io;
 
-pub use record::{MAX_PAYLOAD_LEN, Record};
+pub use record::{Edit, MAX_PAYLOAD_LEN, Record};
 pub use storage::{FileStorage, Storage};
 
 #[derive(Debug)]
@@ -132,11 +132,15 @@ mod tests {
 
     fn record(n: u32) -> Record {
         Record {
-            key: format!("player:{n}:coins").into_bytes(),
-            value: n.to_le_bytes().to_vec(),
+            branch: "main".to_owned(),
+            changes: vec![Edit {
+                key: format!("player:{n}:coins").into_bytes(),
+                value: Some(n.to_le_bytes().to_vec()),
+            }],
             who: "agent:shop".to_owned(),
             why: "purchase".to_owned(),
             approved_by: None,
+            time: u64::from(n),
         }
     }
 
@@ -224,7 +228,7 @@ mod tests {
     fn oversized_record_is_refused_without_poisoning() {
         let (mut log, _) = Log::open(SimStorage::default()).expect("opens");
         let mut big = record(1);
-        big.value = vec![0; MAX_PAYLOAD_LEN + 1];
+        big.changes[0].value = Some(vec![0; MAX_PAYLOAD_LEN + 1]);
 
         let refused = log.append(&big);
         let next = log.append(&record(2));

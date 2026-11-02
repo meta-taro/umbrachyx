@@ -21,7 +21,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use umbrachyx::log::{FileStorage, Log, Record};
+use umbrachyx::log::{Edit, FileStorage, Log, Record};
 
 const WRITER_ENV: &str = "UMBRACHYX_CRASH_WRITER";
 const ROUNDS_ENV: &str = "UMBRACHYX_CRASH_ROUNDS";
@@ -37,11 +37,15 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn record(seq: u64) -> Record {
     Record {
-        key: format!("player:{}:coins", seq % 97).into_bytes(),
-        value: seq.to_le_bytes().to_vec(),
+        branch: "main".to_owned(),
+        changes: vec![Edit {
+            key: format!("player:{}:coins", seq % 97).into_bytes(),
+            value: Some(seq.to_le_bytes().to_vec()),
+        }],
         who: "agent:crash-test".to_owned(),
         why: format!("write {seq}"),
         approved_by: seq.is_multiple_of(3).then(|| "ops:reviewer".to_owned()),
+        time: seq,
     }
 }
 

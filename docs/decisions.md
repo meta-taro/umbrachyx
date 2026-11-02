@@ -33,6 +33,12 @@ without an entry here is not adopted.
   whole, checked record anywhere after it: if one exists, acknowledged data
   was damaged and the log refuses to open rather than dropping it. Damage
   inside the very last record cannot be told apart from a torn write.
+- **A record is one commit**: the branch, the keys it sets or removes, who
+  made it, why, who approved it and when. It is one frame, so a commit that
+  touches many keys is in the log whole or not at all. The payload starts
+  with a format version; a frame whose checksum holds but which does not
+  decode, whatever its version, stops the log from opening rather than
+  being cut as a torn write, because a torn write cannot pass the checksum.
 - **Opening the log always syncs before returning records.** A process that
   died between writing and syncing leaves bytes the kernel still serves but
   the disk may not hold.
@@ -108,9 +114,18 @@ memory speed for writes will need group commit: one sync for many writes.
   sync in open, not refusing writes after a failed sync, miscounting the
   length, treating interior damage as a torn tail, and ignoring a failed
   sync are each caught within the first seeds.
-- **Time is not simulated yet.** Nothing in the log reads the clock. It will
-  go behind the same kind of boundary as the disk when the first thing that
-  does (such as a group-commit timeout) is written.
+- **The clock is a boundary like the disk.** The store reads the time
+  through a `Clock` trait. The simulated clock mostly moves forward a little
+  and sometimes jumps back by up to a second, as a wall clock corrected by
+  NTP can. The store never records a time earlier than one it already
+  recorded, across commits and restarts.
+- **The store has its own run**, on top of the log's: commits of up to six
+  keys, including removes, over a small key space so they overwrite each
+  other, with failed syncs, process crashes and power cuts. After every
+  restart the tree must hold exactly what the acknowledged commits wrote, an
+  interrupted commit must be there whole or not at all, and recorded times
+  must not go back. CI runs 10,000 seeds of each, in release mode; the
+  results are the same as in debug mode.
 
 ## The tree
 
@@ -241,6 +256,12 @@ a prototype).
   reported before scope, since renewing is the first thing to do. The caller
   is not told which fact failed, so a refusal does not reveal what the token
   would have allowed.
+- **Evaluation has explicit limits.** Biscuit's defaults allow 1 ms of
+  evaluation, which ordinary tokens exceeded on a loaded machine: in a test
+  run with the CPU saturated, 6 of 200 runs refused a valid request. The
+  time limit is now 50 ms, only to stop tokens built to be expensive; the
+  limits on facts and iterations, which do not depend on the machine, stay
+  at biscuit's defaults. A request that reaches a limit is refused.
 - **Keys are strings for now.** Biscuit can test a string for a prefix but
   not a byte string; the database's keys are bytes, so they will need an
   encoding, such as hex, that keeps prefixes.
@@ -255,3 +276,12 @@ verified once per session and the decision cached per scope, not repeated
 for every key. This is a problem to solve, not a reason to leave biscuit:
 macaroons, the other well-known scheme that narrows offline, need every
 checker to hold the shared secret that mints tokens.
+
+## The store
+
+- **The log is the truth and the tree is rebuilt from it.** A commit is
+  applied to the tree only after its record is synced, and opening the
+  store replays the log into a new tree. Nothing the tree holds can be
+  missing from the log.
+- **A failed commit leaves the tree unchanged**, and the store, like the
+  log, refuses further commits until it is reopened.
