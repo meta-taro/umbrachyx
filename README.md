@@ -14,9 +14,10 @@ that is already there before the light arrives.
 > **Status: concept.** A first single-node core exists so the design can be
 > tried: a durable log, a tree with branches, diffs and merges, and a
 > command-line tool. [`docs/demo.md`](docs/demo.md) walks through the first
-> four questions below with it. Nothing has been measured against other
-> databases yet, and no format is stable. Do not build on it. The design
-> starts at [`docs/concept.md`](docs/concept.md).
+> four questions below with it. A first comparison with Valkey and Dolt,
+> and what it shows still needs work, is in
+> [`docs/comparison.md`](docs/comparison.md). No format is stable. Do not
+> build on it. The design starts at [`docs/concept.md`](docs/concept.md).
 
 ## What it is for
 
