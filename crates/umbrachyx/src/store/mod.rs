@@ -67,6 +67,14 @@ pub struct Provenance {
     pub approved_by: Option<String>,
 }
 
+/// One commit asked of [`Store::commit_all`].
+#[derive(Debug, Clone)]
+pub struct CommitRequest {
+    pub branch: String,
+    pub edits: Vec<Edit>,
+    pub provenance: Provenance,
+}
+
 /// A key's value at some commit, and the commit that last changed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
@@ -184,6 +192,34 @@ impl<S: Storage, C: Clock> Store<S, C> {
         self.commit_with(branch, edits, provenance, None)
     }
 
+    /// Writes several commits with one sync and returns once all of them
+    /// are durable: a crash keeps all or none. They apply in order, each a
+    /// commit of its own, so two to one branch follow each other. A request
+    /// to an unknown branch is refused on its own; the result for each
+    /// request is in its place. If the log fails, none is written.
+    pub fn commit_all(
+        &mut self,
+        requests: Vec<CommitRequest>,
+    ) -> Result<Vec<Result<CommitId, StoreError>>, StoreError> {
+        let time = self.next_time();
+        let mut commits = Vec::with_capacity(requests.len());
+        let mut refusals = Vec::with_capacity(requests.len());
+        for request in requests {
+            refusals.push(self.require_branch(&request.branch).err());
+            if refusals.last().is_some_and(Option::is_none) {
+                commits.push(new_commit(request, time, None));
+            }
+        }
+        let mut ids = self.write(commits)?.into_iter();
+        Ok(refusals
+            .into_iter()
+            .map(|refusal| match refusal {
+                Some(error) => Err(error),
+                None => Ok(ids.next().expect("one id per accepted request")),
+            })
+            .collect())
+    }
+
     fn commit_with(
         &mut self,
         branch: &str,
@@ -192,18 +228,30 @@ impl<S: Storage, C: Clock> Store<S, C> {
         merged: Option<CommitId>,
     ) -> Result<CommitId, StoreError> {
         self.require_branch(branch)?;
-        let record = Record::Commit(Commit {
+        let request = CommitRequest {
             branch: branch.to_owned(),
-            changes: edits,
-            who: provenance.who,
-            why: provenance.why,
-            approved_by: provenance.approved_by,
-            time: self.clock.now_micros().max(self.last_time),
-            merged,
-        });
+            edits,
+            provenance,
+        };
+        let commit = new_commit(request, self.next_time(), merged);
+        let ids = self.write(vec![commit])?;
+        Ok(ids[0])
+    }
+
+    /// Never earlier than a time already recorded.
+    fn next_time(&mut self) -> u64 {
+        self.clock.now_micros().max(self.last_time)
+    }
+
+    /// Appends the commits as one record, then applies them in order.
+    fn write(&mut self, mut commits: Vec<Commit>) -> Result<Vec<CommitId>, StoreError> {
+        let record = match commits.len() {
+            0 => return Ok(Vec::new()),
+            1 => Record::Commit(commits.pop().expect("one commit")),
+            _ => Record::Group(commits),
+        };
         self.log.append(&record)?;
-        self.apply(&record)?;
-        Ok(self.head(branch).expect("a commit was just applied"))
+        self.apply(&record)
     }
 
     /// Makes a branch that starts where `from` is now.
@@ -220,7 +268,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             from: from.to_owned(),
         });
         self.log.append(&record)?;
-        self.apply(&record)
+        self.apply(&record).map(drop)
     }
 
     /// The live value of `key` on `branch`.
@@ -351,7 +399,8 @@ impl<S: Storage, C: Clock> Store<S, C> {
         }
     }
 
-    fn apply(&mut self, record: &Record) -> Result<(), StoreError> {
+    /// Applies a record and returns the ids of the commits it held.
+    fn apply(&mut self, record: &Record) -> Result<Vec<CommitId>, StoreError> {
         match record {
             Record::Branch(branch) => {
                 let from = self
@@ -362,13 +411,17 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 if self.branches.insert(branch.name.clone(), from).is_some() {
                     return Err(StoreError::BranchExists(branch.name.clone()));
                 }
-                Ok(())
+                Ok(Vec::new())
             }
-            Record::Commit(commit) => self.apply_commit(commit),
+            Record::Commit(commit) => Ok(vec![self.apply_commit(commit)?]),
+            Record::Group(commits) => commits
+                .iter()
+                .map(|commit| self.apply_commit(commit))
+                .collect(),
         }
     }
 
-    fn apply_commit(&mut self, commit: &Commit) -> Result<(), StoreError> {
+    fn apply_commit(&mut self, commit: &Commit) -> Result<CommitId, StoreError> {
         let head = self
             .branches
             .get_mut(&commit.branch)
@@ -394,7 +447,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         };
         self.commits.insert(id, Arc::new(info));
         self.last_time = self.last_time.max(commit.time);
-        Ok(())
+        Ok(id)
     }
 
     #[cfg(test)]
@@ -411,6 +464,18 @@ impl<S: Storage, C: Clock> Store<S, C> {
 const REMOVED: u8 = 0;
 const PRESENT: u8 = 1;
 const COMMIT_ID_LEN: usize = 32;
+
+fn new_commit(request: CommitRequest, time: u64, merged: Option<CommitId>) -> Commit {
+    Commit {
+        branch: request.branch,
+        changes: request.edits,
+        who: request.provenance.who,
+        why: request.provenance.why,
+        approved_by: request.provenance.approved_by,
+        time,
+        merged,
+    }
+}
 
 /// The cells `commit` writes, sorted by key. Edits apply in order, so the
 /// last edit of a key wins, and removing what is not live at that point

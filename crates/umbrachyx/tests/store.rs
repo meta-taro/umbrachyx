@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use umbrachyx::log::{Edit, FileStorage};
-use umbrachyx::store::{MAIN_BRANCH, Provenance, Store, StoreError, SystemClock};
+use umbrachyx::store::{CommitRequest, MAIN_BRANCH, Provenance, Store, StoreError, SystemClock};
 
 type FileStore = Store<FileStorage, SystemClock>;
 
@@ -318,4 +318,66 @@ fn edits_of_one_key_in_one_commit_apply_in_order() {
         Some("4")
     );
     assert!(store.cell(MAIN_BRANCH, b"never-there").is_none());
+}
+
+fn request(branch: &str, edits: Vec<Edit>, who: &str) -> CommitRequest {
+    CommitRequest {
+        branch: branch.to_owned(),
+        edits,
+        provenance: by(who, "grouped"),
+    }
+}
+
+/// Commits written together are acknowledged together and apply in order,
+/// each a commit of its own; one to an unknown branch is refused alone.
+#[test]
+fn commits_written_together_apply_in_order() {
+    let dir = TempDir::new("group");
+    let mut store = open(&dir.log());
+    store.create_branch("event", MAIN_BRANCH).expect("branches");
+
+    let results = store
+        .commit_all(vec![
+            request(MAIN_BRANCH, vec![set("a", "1")], "agent:1"),
+            request("missing", vec![set("a", "x")], "agent:2"),
+            request("event", vec![set("a", "e")], "agent:3"),
+            request(MAIN_BRANCH, vec![set("a", "2"), set("b", "1")], "agent:4"),
+        ])
+        .expect("the group is written");
+
+    assert_eq!(results.len(), 4);
+    assert!(matches!(&results[1], Err(StoreError::UnknownBranch(name)) if name == "missing"));
+    let first = *results[0].as_ref().expect("first commits");
+    let last = *results[3].as_ref().expect("last commits");
+    assert_eq!(store.head(MAIN_BRANCH), Some(last));
+    assert_eq!(store.commit_info(&last).expect("known").parent, Some(first));
+    assert_eq!(store.get_at(&first, b"a").as_deref(), Some(&b"1"[..]));
+    assert_eq!(value(&store, MAIN_BRANCH, "a").as_deref(), Some("2"));
+    assert_eq!(value(&store, "event", "a").as_deref(), Some("e"));
+    let history: Vec<_> = store
+        .history(MAIN_BRANCH, b"a")
+        .iter()
+        .map(|entry| entry.changed_by)
+        .collect();
+    assert_eq!(history, vec![last, first]);
+
+    drop(store);
+    let reopened = open(&dir.log());
+    assert_eq!(reopened.head(MAIN_BRANCH), Some(last));
+    assert_eq!(reopened.head("event"), results[2].as_ref().ok().copied());
+    assert_eq!(value(&reopened, MAIN_BRANCH, "b").as_deref(), Some("1"));
+}
+
+#[test]
+fn an_empty_group_writes_nothing() {
+    let dir = TempDir::new("empty-group");
+    let mut store = open(&dir.log());
+
+    let results = store
+        .commit_all(vec![request("missing", vec![set("a", "1")], "agent:1")])
+        .expect("nothing to write");
+
+    assert!(matches!(&results[..], [Err(StoreError::UnknownBranch(_))]));
+    assert_eq!(std::fs::metadata(dir.log()).expect("log exists").len(), 0);
+    assert!(store.commit_all(Vec::new()).expect("nothing").is_empty());
 }

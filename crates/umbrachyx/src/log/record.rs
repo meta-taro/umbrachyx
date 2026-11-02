@@ -13,6 +13,10 @@ use super::LogError;
 pub enum Record {
     Commit(Commit),
     Branch(Branch),
+    /// Commits acknowledged together by one sync, in the order they apply.
+    /// One frame, so a crash keeps all of them or none: the log has at most
+    /// one frame in flight, which is what tells a torn tail from damage.
+    Group(Vec<Commit>),
 }
 
 /// Changes to one branch, made together, with who made them, why, who
@@ -67,6 +71,7 @@ const LEN_PREFIX: usize = 4;
 const FORMAT_VERSION: u8 = 3;
 const KIND_COMMIT: u8 = 1;
 const KIND_BRANCH: u8 = 2;
+const KIND_GROUP: u8 = 3;
 const ABSENT: u8 = 0;
 const PRESENT: u8 = 1;
 
@@ -79,43 +84,55 @@ pub fn encode(record: &Record) -> Result<Vec<u8>, LogError> {
 }
 
 fn encode_payload(record: &Record) -> Result<Vec<u8>, LogError> {
-    match record {
-        Record::Commit(commit) => encode_commit(commit),
+    let payload = match record {
+        Record::Commit(commit) => {
+            let mut payload = vec![FORMAT_VERSION, KIND_COMMIT];
+            push_commit(&mut payload, commit)?;
+            payload
+        }
         Record::Branch(branch) => {
             let mut payload = vec![FORMAT_VERSION, KIND_BRANCH];
             push_field(&mut payload, branch.name.as_bytes());
             push_field(&mut payload, branch.from.as_bytes());
-            if payload.len() > MAX_PAYLOAD_LEN {
-                return Err(LogError::RecordTooLarge { len: payload.len() });
-            }
-            Ok(payload)
+            payload
         }
+        Record::Group(commits) => {
+            let mut payload = vec![FORMAT_VERSION, KIND_GROUP];
+            push_count(&mut payload, commits.len())?;
+            for commit in commits {
+                push_commit(&mut payload, commit)?;
+            }
+            payload
+        }
+    };
+    if payload.len() > MAX_PAYLOAD_LEN {
+        return Err(LogError::RecordTooLarge { len: payload.len() });
     }
+    Ok(payload)
 }
 
-fn encode_commit(record: &Commit) -> Result<Vec<u8>, LogError> {
-    let mut payload = vec![FORMAT_VERSION, KIND_COMMIT];
-    push_field(&mut payload, record.branch.as_bytes());
-    push_field(&mut payload, record.who.as_bytes());
-    push_field(&mut payload, record.why.as_bytes());
-    push_optional(
-        &mut payload,
-        record.approved_by.as_deref().map(str::as_bytes),
-    );
-    payload.extend_from_slice(&record.time.to_le_bytes());
-    push_optional(&mut payload, record.merged.as_ref().map(|id| &id[..]));
-    let count = u32::try_from(record.changes.len()).map_err(|_| LogError::RecordTooLarge {
-        len: record.changes.len(),
-    })?;
+fn push_count(payload: &mut Vec<u8>, count: usize) -> Result<(), LogError> {
+    let count = u32::try_from(count).map_err(|_| LogError::RecordTooLarge { len: count })?;
     payload.extend_from_slice(&count.to_le_bytes());
+    Ok(())
+}
+
+fn push_commit(payload: &mut Vec<u8>, record: &Commit) -> Result<(), LogError> {
+    push_field(payload, record.branch.as_bytes());
+    push_field(payload, record.who.as_bytes());
+    push_field(payload, record.why.as_bytes());
+    push_optional(payload, record.approved_by.as_deref().map(str::as_bytes));
+    payload.extend_from_slice(&record.time.to_le_bytes());
+    push_optional(payload, record.merged.as_ref().map(|id| &id[..]));
+    push_count(payload, record.changes.len())?;
     for write in &record.changes {
-        push_field(&mut payload, &write.key);
-        push_optional(&mut payload, write.value.as_deref());
+        push_field(payload, &write.key);
+        push_optional(payload, write.value.as_deref());
         if payload.len() > MAX_PAYLOAD_LEN {
             return Err(LogError::RecordTooLarge { len: payload.len() });
         }
     }
-    Ok(payload)
+    Ok(())
 }
 
 fn push_optional(payload: &mut Vec<u8>, field: Option<&[u8]>) {
@@ -234,9 +251,15 @@ fn decode_payload(payload: &[u8]) -> Option<Record> {
             name: cursor.text()?,
             from: cursor.text()?,
         }),
+        KIND_GROUP => Record::Group(decode_group(&mut cursor)?),
         _ => return None,
     };
     cursor.rest.is_empty().then_some(record)
+}
+
+fn decode_group(cursor: &mut Cursor<'_>) -> Option<Vec<Commit>> {
+    let count = read_u32(cursor.take(LEN_PREFIX)?, 0);
+    (0..count).map(|_| decode_commit(cursor)).collect()
 }
 
 fn decode_commit(cursor: &mut Cursor<'_>) -> Option<Commit> {
@@ -515,5 +538,39 @@ mod tests {
         ];
 
         assert_eq!(scan(&frames(&records)).expect("scans").records, records);
+    }
+
+    fn group(keys: &[&str]) -> Record {
+        Record::Group(keys.iter().map(|key| commit(key, None)).collect())
+    }
+
+    #[test]
+    fn group_records_round_trip_between_other_records() {
+        let records = vec![
+            record("a", None),
+            group(&["b", "c", "d"]),
+            Record::Branch(Branch {
+                name: "event/winter".to_owned(),
+                from: "main".to_owned(),
+            }),
+            group(&["e"]),
+        ];
+
+        assert_eq!(scan(&frames(&records)).expect("scans").records, records);
+    }
+
+    /// A group is one frame: cut anywhere inside it, none of its commits
+    /// come back, and nothing before it is lost.
+    #[test]
+    fn a_group_cut_anywhere_comes_back_whole_or_not_at_all() {
+        let before = record("a", None);
+        let bytes = frames(&[before.clone(), group(&["b", "c", "d"])]);
+        let start = encode(&before).expect("encodes").len();
+
+        for cut in start..bytes.len() {
+            let scan = scan(&bytes[..cut]).expect("a cut is a torn tail");
+
+            assert_eq!(scan.records, vec![before.clone()], "cut at {cut}");
+        }
     }
 }

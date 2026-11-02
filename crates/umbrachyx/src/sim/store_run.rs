@@ -5,7 +5,8 @@
 //! The promises, checked after every restart:
 //! - every branch exists and holds exactly what the acknowledged commits
 //!   wrote to it, and branches see nothing of each other's later commits;
-//! - a commit whose sync was interrupted is there whole or not at all;
+//! - a commit whose sync was interrupted is there whole or not at all, and
+//!   so is a group of commits written with one sync;
 //! - recorded times never go backwards, across commits and restarts.
 //!
 //! Damage to the disk is the log's business and is covered by its own run.
@@ -15,7 +16,9 @@ use std::collections::BTreeMap;
 use super::disk::{SimStorage, SyncFault};
 use super::rng::Rng;
 use crate::log::{Edit, LogError};
-use crate::store::{Clock, MAIN_BRANCH, Merged, Provenance, Reverted, Store, StoreError};
+use crate::store::{
+    Clock, CommitRequest, MAIN_BRANCH, Merged, Provenance, Reverted, Store, StoreError,
+};
 
 const STEPS: usize = 64;
 /// Out of 100, per step; the rest cut power.
@@ -33,6 +36,9 @@ const REMOVE_PERCENT: u64 = 20;
 const NEW_BRANCH_PERCENT: u64 = 8;
 const MERGE_PERCENT: u64 = 8;
 const REVERT_PERCENT: u64 = 4;
+/// Out of 100, per plain commit step: write several commits with one sync.
+const GROUP_PERCENT: u64 = 25;
+const MAX_GROUP: u64 = 5;
 /// Out of 100, per reading of the clock.
 const CLOCK_BACK_PERCENT: u64 = 5;
 const START_MICROS: u64 = 1_800_000_000_000_000;
@@ -45,6 +51,8 @@ type Models = BTreeMap<String, Model>;
 pub struct Outcome {
     pub trace: Vec<String>,
     pub commits: usize,
+    /// Groups of commits written with one sync, also counted in `commits`.
+    pub groups: usize,
     pub restarts: usize,
     /// Interrupted commits that came back whole, and that did not.
     pub in_flight_kept: usize,
@@ -90,8 +98,9 @@ struct Run {
     rng: Rng,
     store: Store<SimStorage, SimClock>,
     models: Models,
-    /// The branch and edits of a commit whose sync was interrupted.
-    in_flight: Option<(String, Vec<Edit>)>,
+    /// The branch and edits of each commit whose sync was interrupted, in
+    /// order: one commit, or a group.
+    in_flight: Option<Vec<(String, Vec<Edit>)>>,
     /// The time of the latest acknowledged commit.
     acknowledged_time: u64,
     outcome: Outcome,
@@ -139,8 +148,14 @@ impl Run {
         if self.rng.percent(REVERT_PERCENT) {
             return self.revert_latest(step);
         }
-        let branch = self.random_branch();
-        let edits = self.random_edits();
+        let count = if self.rng.percent(GROUP_PERCENT) {
+            2 + self.rng.below(MAX_GROUP - 1)
+        } else {
+            1
+        };
+        let commits: Vec<(String, Vec<Edit>)> = (0..count)
+            .map(|_| (self.random_branch(), self.random_edits()))
+            .collect();
         let fault = if self.rng.percent(SYNC_FAULT_PERCENT) {
             Some(if self.rng.percent(50) {
                 SyncFault::KeepPending
@@ -153,21 +168,21 @@ impl Run {
         if let Some(fault) = fault {
             self.store.storage_mut().fault_next_sync(fault);
         }
-        match (
-            self.store.commit(&branch, edits.clone(), provenance(step)),
-            fault,
-        ) {
-            (Ok(_), None) => {
-                apply(self.models.get_mut(&branch).expect("known branch"), &edits);
-                self.outcome.commits += 1;
+        match (self.write(step, &commits), fault) {
+            (Ok(()), None) => {
+                for (branch, edits) in &commits {
+                    apply(self.models.get_mut(branch).expect("known branch"), edits);
+                    self.trace(step, format!("commit {} edits to {branch}", edits.len()));
+                }
+                self.outcome.commits += commits.len();
+                self.outcome.groups += usize::from(commits.len() > 1);
                 self.check_time(step)?;
                 self.acknowledged_time = self.store.last_time();
-                self.trace(step, format!("commit {} edits to {branch}", edits.len()));
                 Ok(())
             }
             (Err(StoreError::Log(LogError::Io(_))), Some(fault)) => {
                 if fault == SyncFault::KeepPending {
-                    self.in_flight = Some((branch, edits));
+                    self.in_flight = Some(commits);
                 }
                 self.trace(step, format!("sync fault {fault:?}"));
                 let power = fault == SyncFault::DropPending || self.rng.percent(50);
@@ -177,6 +192,28 @@ impl Run {
                 "step {step}: commit with fault {fault:?} returned {result:?}"
             )),
         }
+    }
+
+    /// One commit through `commit`, several through `commit_all`.
+    fn write(&mut self, step: usize, commits: &[(String, Vec<Edit>)]) -> Result<(), StoreError> {
+        if let [(branch, edits)] = commits {
+            return self
+                .store
+                .commit(branch, edits.clone(), provenance(step))
+                .map(drop);
+        }
+        let requests = commits
+            .iter()
+            .map(|(branch, edits)| CommitRequest {
+                branch: branch.clone(),
+                edits: edits.clone(),
+                provenance: provenance(step),
+            })
+            .collect();
+        for result in self.store.commit_all(requests)? {
+            result?;
+        }
+        Ok(())
     }
 
     fn new_branch(&mut self, step: usize) -> Result<(), String> {
@@ -286,33 +323,32 @@ impl Run {
                 self.models.keys().collect::<Vec<_>>()
             ));
         }
-        let in_flight = self.in_flight.take();
-        for (branch, model) in &mut self.models {
-            let held = entries_of(&self.store, branch);
-            let pending = in_flight
-                .as_ref()
-                .filter(|(target, _)| target == branch)
-                .map(|(_, edits)| edits);
-            if held == *model {
-                if pending.is_some() {
-                    self.outcome.in_flight_lost += 1;
-                }
-                continue;
+        let held: Models = self
+            .models
+            .keys()
+            .map(|branch| (branch.clone(), entries_of(&self.store, branch)))
+            .collect();
+        if held == self.models {
+            if self.in_flight.take().is_some() {
+                self.outcome.in_flight_lost += 1;
             }
-            let Some(edits) = pending else {
+        } else {
+            let Some(in_flight) = self.in_flight.take() else {
                 return Err(format!(
-                    "step {step}: {branch} does not hold what acknowledged commits wrote"
+                    "step {step}: branches do not hold what acknowledged commits wrote"
                 ));
             };
-            let mut with_in_flight = model.clone();
-            apply(&mut with_in_flight, edits);
+            let mut with_in_flight = self.models.clone();
+            for (branch, edits) in &in_flight {
+                apply(with_in_flight.get_mut(branch).expect("known branch"), edits);
+            }
             if held != with_in_flight {
                 return Err(format!(
-                    "step {step}: {branch} is neither the acknowledged state nor that \
-                     state with the whole interrupted commit"
+                    "step {step}: branches hold neither the acknowledged state nor that \
+                     state with every interrupted commit"
                 ));
             }
-            *model = with_in_flight;
+            self.models = with_in_flight;
             self.outcome.in_flight_kept += 1;
         }
         let head = self.store.head(MAIN_BRANCH).map(|id| hex(&id));
@@ -395,6 +431,7 @@ mod tests {
                 )
             });
             total.commits += outcome.commits;
+            total.groups += outcome.groups;
             total.restarts += outcome.restarts;
             total.in_flight_kept += outcome.in_flight_kept;
             total.in_flight_lost += outcome.in_flight_lost;
@@ -418,6 +455,7 @@ mod tests {
         let total = run_seeds(QUICK_SEEDS);
 
         assert!(total.restarts >= 1_000, "{total:?}");
+        assert!(total.groups >= 500, "{total:?}");
         assert!(total.in_flight_kept >= 20, "{total:?}");
         assert!(total.in_flight_lost >= 20, "{total:?}");
         assert!(total.clock_went_back >= 100, "{total:?}");
@@ -436,10 +474,11 @@ mod tests {
             .unwrap_or(FULL_SEEDS);
         let total = run_seeds(seeds);
         println!(
-            "store, {seeds} seeds: {} commits, {} restarts, interrupted commits kept {} \
+            "store, {seeds} seeds: {} commits ({} groups), {} restarts, interrupted commits kept {} \
              and lost {}, clock went back {} times, {} branches made, {} merges, \
              {} merges refused for conflicts, {} reverts",
             total.commits,
+            total.groups,
             total.restarts,
             total.in_flight_kept,
             total.in_flight_lost,

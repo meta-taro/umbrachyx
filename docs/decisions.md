@@ -33,13 +33,22 @@ without an entry here is not adopted.
   whole, checked record anywhere after it: if one exists, acknowledged data
   was damaged and the log refuses to open rather than dropping it. Damage
   inside the very last record cannot be told apart from a torn write.
-- **A record is a commit or a new branch.** A commit holds the branch, the
-  keys it sets or removes, who made it, why, who approved it and when. It is
-  one frame, so a commit that touches many keys is in the log whole or not
-  at all. A new branch names the branch it starts from. The payload starts
-  with a format version; a frame whose checksum holds but which does not
-  decode, whatever its version, stops the log from opening rather than
-  being cut as a torn write, because a torn write cannot pass the checksum.
+- **A record is a commit, a new branch, or a group of commits.** A commit
+  holds the branch, the keys it sets or removes, who made it, why, who
+  approved it and when. It is one frame, so a commit that touches many keys
+  is in the log whole or not at all. A new branch names the branch it
+  starts from. The payload starts with a format version; a frame whose
+  checksum holds but which does not decode, whatever its version, stops the
+  log from opening rather than being cut as a torn write, because a torn
+  write cannot pass the checksum.
+- **Commits acknowledged by one sync share one frame (group commit).**
+  Several commits written together are one group record, applied in
+  order, so a crash keeps all of them or none. Writing them as separate
+  frames with one sync would break the rule above: a power cut could tear
+  one frame in the middle and keep the frames after it, and recovery would
+  read that as damage to acknowledged data and refuse to open. The
+  deterministic simulation finds this at its first seed when the group is
+  split into frames. A single commit is still written as a commit record.
 - **Opening the log always syncs before returning records.** A process that
   died between writing and syncing leaves bytes the kernel still serves but
   the disk may not hold.
