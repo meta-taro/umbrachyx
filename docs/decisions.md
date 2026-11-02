@@ -14,9 +14,14 @@ without an entry here is not adopted.
 
 - **A write is acknowledged only after its record is synced.** The log is the
   source of truth; the tree and the history are rebuilt from it.
-- **Syncing uses `File::sync_data`**, which is `fdatasync` on Linux and
-  `fcntl(F_FULLFSYNC)` on macOS. A plain `fsync` on macOS does not reach the
-  disk.
+- **Syncing uses `File::sync_data`**, which is `fdatasync` on Linux,
+  `fcntl(F_FULLFSYNC)` on macOS and `FlushFileBuffers` on Windows. A plain
+  `fsync` on macOS does not reach the disk.
+- **Durability is tested on Linux, macOS and Windows.** Most machines this is
+  meant to run on are Windows, so it is a target in CI, not inferred from
+  Linux. On Windows the directory entry of a new log file is not flushed
+  separately, because a directory cannot be opened as a file there; NTFS
+  journals it as metadata.
 - **A failed sync stops the log from accepting writes.** After a failed sync
   the state of unsynced bytes is unknown, and retrying could acknowledge data
   that was lost.

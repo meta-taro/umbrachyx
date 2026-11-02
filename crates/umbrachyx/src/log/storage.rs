@@ -21,9 +21,9 @@ pub trait Storage {
 
 /// A log kept in one file.
 ///
-/// `sync` uses [`File::sync_data`]: `fdatasync` on Linux and
+/// `sync` uses [`File::sync_data`]: `fdatasync` on Linux,
 /// `fcntl(F_FULLFSYNC)` on macOS, where a plain `fsync` stops at the drive's
-/// cache and does not reach the disk.
+/// cache and does not reach the disk, and `FlushFileBuffers` on Windows.
 #[derive(Debug)]
 pub struct FileStorage {
     file: File,
@@ -33,11 +33,17 @@ impl FileStorage {
     /// Open or create the log file and take an exclusive lock on it, so two
     /// writers cannot interleave frames. The lock is released when the
     /// storage is dropped or the process dies.
+    ///
+    /// The file is opened for writing rather than in append mode: on Windows
+    /// an append-mode handle cannot be truncated, and recovery needs to cut
+    /// a torn tail. The lock makes this the only writer, so seeking to the
+    /// end before each append is enough.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
-            .append(true)
+            .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
         file.try_lock().map_err(|error| match error {
             TryLockError::WouldBlock => io::Error::new(
@@ -55,6 +61,7 @@ impl FileStorage {
 /// durable too. This runs on every open, not only on create: a crash between
 /// creating the file and syncing the directory would otherwise never be
 /// repaired.
+#[cfg(unix)]
 fn sync_parent_dir(path: &Path) -> io::Result<()> {
     let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) else {
         return File::open(".")?.sync_all();
@@ -62,9 +69,16 @@ fn sync_parent_dir(path: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
+/// Windows cannot open a directory as a file to flush it. NTFS journals the
+/// directory entry as metadata; whether that is enough across a power cut is
+/// left to the simulation disk and real-machine tests to show.
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 impl Storage for FileStorage {
     fn read_all(&mut self) -> io::Result<Vec<u8>> {
-        // Appends leave the cursor at the end, so read from the start.
         let mut bytes = Vec::new();
         self.file.seek(SeekFrom::Start(0))?;
         self.file.read_to_end(&mut bytes)?;
@@ -72,6 +86,7 @@ impl Storage for FileStorage {
     }
 
     fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.file.seek(SeekFrom::End(0))?;
         self.file.write_all(bytes)
     }
 

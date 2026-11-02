@@ -28,8 +28,18 @@ env:
 
 jobs:
   rust:
-    name: rust (fmt / clippy / test)
-    runs-on: ubuntu-latest
+    # Windows is here because most machines this is meant to run on are
+    # Windows: durability has to be shown there, not inferred from Linux.
+    # Its disk is virtual, so its timings are reference values only.
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v6
         with:
@@ -47,7 +57,11 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
-      # The full kill-during-writes run: 1,000 rounds of SIGKILL while the
-      # log is being appended to, checking that no acknowledged write is lost.
+      # The full kill-during-writes run: 1,000 rounds of killing the writer
+      # (SIGKILL, or TerminateProcess on Windows) while the log is being
+      # appended to, checking that no acknowledged write is lost.
       - name: crash test (1,000 rounds)
         run: cargo test --test crash --locked -- --ignored --nocapture
+
+      - name: sync latency (reference only)
+        run: cargo run --release --locked --example sync_latency

@@ -4,7 +4,7 @@
 //! The test binary re-runs itself as the writer: with `UMBRACHYX_CRASH_WRITER`
 //! set, the test body appends records forever and prints the sequence number
 //! of each one only after `append` has returned. The parent kills it with
-//! SIGKILL after a pseudo-random delay, reopens the log and compares.
+//! SIGKILL (TerminateProcess on Windows) after a pseudo-random delay, reopens the log and compares.
 //!
 //! What this proves and what it does not: a killed process loses nothing the
 //! kernel already holds, so this checks that acknowledgement waits for the
