@@ -11,9 +11,12 @@ The name comes from *umbra* (shadow) and *tachyon* (the hypothetical particle
 faster than light). The current value is the light. Its history is the shadow
 that is already there before the light arrives.
 
-> **Status: concept.** Nothing is implemented yet. This repository holds the
-> design while it is worked out, starting with [`docs/concept.md`](docs/concept.md).
-> Do not build on it.
+> **Status: concept.** A first single-node core exists so the design can be
+> tried: a durable log, a tree with branches, diffs and merges, and a
+> command-line tool. [`docs/demo.md`](docs/demo.md) walks through the first
+> four questions below with it. Nothing has been measured against other
+> databases yet, and no format is stable. Do not build on it. The design
+> starts at [`docs/concept.md`](docs/concept.md).
 
 ## What it is for
 

@@ -31,6 +31,8 @@ pub use merge::{Conflict, Merged, Reverted, ValueChange};
 pub const MAIN_BRANCH: &str = "main";
 /// Branch names are short labels, not data.
 const MAX_BRANCH_NAME: usize = 255;
+/// The shortest start of a commit id `resolve` accepts.
+pub const MIN_ID_PREFIX: usize = 4;
 
 /// Names a commit: a BLAKE3 hash of its parent, branch, provenance, time
 /// and edits.
@@ -93,6 +95,10 @@ pub enum StoreError {
     UnknownCommit(CommitId),
     /// The commit is not in the branch's history.
     NotOnBranch(CommitId),
+    /// Names no branch or commit.
+    UnknownName(String),
+    /// The start of an id that more than one commit has.
+    AmbiguousName(String),
     BranchExists(String),
     /// Empty, or longer than a label should be.
     BadBranchName,
@@ -108,6 +114,8 @@ impl fmt::Display for StoreError {
             Self::UnknownBranch(name) => write!(f, "no branch named {name:?}"),
             Self::UnknownCommit(id) => write!(f, "no commit {}", short(id)),
             Self::NotOnBranch(id) => write!(f, "commit {} is not on this branch", short(id)),
+            Self::UnknownName(name) => write!(f, "no branch or commit named {name:?}"),
+            Self::AmbiguousName(name) => write!(f, "more than one commit starts with {name:?}"),
             Self::BranchExists(name) => write!(f, "a branch named {name:?} already exists"),
             Self::BadBranchName => write!(f, "a branch name must be 1 to {MAX_BRANCH_NAME} bytes"),
             Self::Inconsistent(what) => write!(f, "the log cannot be applied: {what}"),
@@ -279,6 +287,53 @@ impl<S: Storage, C: Clock> Store<S, C> {
         self.branches.keys().map(String::as_str)
     }
 
+    /// The commits of `branch`, newest first, following first parents: the
+    /// branch's own line, with each merge as one commit.
+    pub fn log(&self, branch: &str) -> Vec<&CommitInfo> {
+        let mut commits = Vec::new();
+        let mut next = self.head(branch);
+        while let Some(info) = next.and_then(|id| self.commits.get(&id)) {
+            commits.push(info.as_ref());
+            next = info.parent;
+        }
+        commits
+    }
+
+    /// Finds a commit by name: a branch (its latest commit), a branch and
+    /// `~n` for the commit `n` steps back on its own line, or the start of a
+    /// commit id in hex, at least `MIN_ID_PREFIX` characters and matching
+    /// one commit only.
+    pub fn resolve(&self, name: &str) -> Result<CommitId, StoreError> {
+        let (branch, back) = match name.rsplit_once('~') {
+            Some((branch, n)) => match n.parse::<usize>() {
+                Ok(n) => (branch, n),
+                Err(_) => return Err(StoreError::UnknownName(name.to_owned())),
+            },
+            None => (name, 0),
+        };
+        if self.branches.contains_key(branch) {
+            return self
+                .log(branch)
+                .get(back)
+                .map(|info| info.id)
+                .ok_or_else(|| StoreError::UnknownName(name.to_owned()));
+        }
+        let prefix = name.to_ascii_lowercase();
+        let is_hex = prefix.len() >= MIN_ID_PREFIX && prefix.bytes().all(|b| b.is_ascii_hexdigit());
+        if !is_hex {
+            return Err(StoreError::UnknownName(name.to_owned()));
+        }
+        let mut found = self
+            .commits
+            .keys()
+            .filter(|id| hex(id).starts_with(&prefix));
+        match (found.next(), found.next()) {
+            (Some(id), None) => Ok(*id),
+            (Some(_), Some(_)) => Err(StoreError::AmbiguousName(name.to_owned())),
+            (None, _) => Err(StoreError::UnknownName(name.to_owned())),
+        }
+    }
+
     pub fn commit_info(&self, id: &CommitId) -> Option<&CommitInfo> {
         self.commits.get(id).map(Arc::as_ref)
     }
@@ -420,9 +475,13 @@ fn commit_id(parent: Option<CommitId>, commit: &Commit) -> CommitId {
     *hasher.finalize().as_bytes()
 }
 
-/// The first bytes of a commit id, in hex, for messages.
-fn short(id: &CommitId) -> String {
-    id.iter().take(6).map(|b| format!("{b:02x}")).collect()
+/// The first bytes of a commit id, in hex: enough to name it in practice.
+pub fn short(id: &CommitId) -> String {
+    hex(id)[..12].to_owned()
+}
+
+fn hex(id: &CommitId) -> String {
+    id.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn live_entries(state: &Tree) -> Vec<(Bytes, Bytes)> {
