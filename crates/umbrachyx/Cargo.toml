@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 biscuit-auth = { version = "6.0.0", default-features = false, features = ["datalog-macro"] }
+blake3 = "1.8.7"
 crc32fast = "1.5.4"
 
 # Only for the sync latency example: a plain `fsync`, which std does not

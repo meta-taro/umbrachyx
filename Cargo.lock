@@ -960,6 +960,7 @@ name = "umbrachyx"
 version = "0.0.0"
 dependencies = [
  "biscuit-auth",
+ "blake3",
  "crc32fast",
  "rustix",
 ]

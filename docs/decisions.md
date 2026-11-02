@@ -9,7 +9,7 @@ without an entry here is not adopted.
 |---|---|---|
 | `crc32fast` | Checksum on every log record, so a torn or damaged record is detected on recovery | Widely used and maintained, MIT OR Apache-2.0, no dependencies beyond `cfg-if`. Hardware-accelerated where available, so the check costs little on the write path. A checksum is too small a thing to justify writing and verifying our own |
 | `rustix` (dev, Unix only) | A plain `fsync` in the sync latency example, to compare it with `F_FULLFSYNC` | std has no way to call a plain `fsync` on macOS. Maintained by the Bytecode Alliance, Apache-2.0 / MIT, and safe to call, where `libc` would need `unsafe`. Not linked into the library |
-| `blake3` (tree candidates) | The hash that names every node of the tree, so equal hashes mean equal content and a diff can skip shared subtrees | Collision resistance is required: a diff or a sync between replicas trusts that equal hashes mean equal data. CC0 / Apache-2.0, maintained by its authors. Only used by the candidates crate until the chosen tree moves into the database |
+| `blake3` | The hash that names every node of the tree, so equal hashes mean equal content and a diff can skip shared subtrees | Collision resistance is required: a diff or a sync between replicas trusts that equal hashes mean equal data. CC0 / Apache-2.0, maintained by its authors. |
 | `biscuit-auth` | Capability tokens: what a caller may read or write, carried by the caller | Tokens can be narrowed offline by whoever holds them and never widened, and are verified with a public key, so nothing secret sits on the side that checks them. Writing an authorization scheme ourselves would need its own security review. Apache-2.0, maintained under the Eclipse Foundation. Default features are off; `datalog-macro` stays on because 6.0.0 does not build without it |
 
 ## The log
@@ -211,9 +211,13 @@ The same 1,000,000 records with more changes:
 - **The key hash that places boundaries is not keyed**, so keys chosen to
   collide could make nodes large. The database will need a keyed hash
   before it takes keys from untrusted clients.
-- **Deletes are not written yet.** Removing a key that ends a node merges
-  that node with the next one; it is left until the tree moves into the
-  database.
+- **Removing a key that ends a node merges that node with the next one.**
+  Every node but the last on its level ends on a key that ends a node on
+  its own level and on every level below; removing that key leaves the node
+  open, and it is joined to its right neighbour along the seam, level by
+  level, then cut again. The tree in the database (`crates/umbrachyx/src/tree`)
+  has this; the candidates crate, kept as the record of the comparison, does
+  not.
 
 ## Capability tokens
 
