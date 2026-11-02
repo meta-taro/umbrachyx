@@ -54,7 +54,19 @@ on AC power, 2026-11-02:
 | plain `fsync(2)` | 25 | 47 | 79 |
 | `Log::append` (framing, checksum, `F_FULLFSYNC`) | 4,011 | 5,275 | 10,841 |
 
-A plain `fsync` is about 160 times faster on this machine because it stops at
+GitHub Actions runners, CI run 41407766219, 2026-11-02. The disks are
+virtual and shared, so these are reference values only:
+
+| Runner | Method | p50 (µs) | p99 (µs) | max (µs) |
+|---|---|---|---|---|
+| `ubuntu-latest` | `File::sync_data` (`fdatasync`) | 173 | 410 | 2,352 |
+| `ubuntu-latest` | `File::sync_all` (`fsync`) | 180 | 844 | 5,235 |
+| `ubuntu-latest` | `Log::append` | 177 | 419 | 6,160 |
+| `windows-latest` | `File::sync_data` (`FlushFileBuffers`) | 3,796 | 8,897 | 31,092 |
+| `windows-latest` | `File::sync_all` (`FlushFileBuffers`) | 3,916 | 9,107 | 30,876 |
+| `windows-latest` | `Log::append` | 3,999 | 10,881 | 133,301 |
+
+A plain `fsync` is about 160 times faster on the MacBook Air because it stops at
 the drive's cache; it is not durable across a power cut and is not used. The
 log adds nothing measurable on top of the sync itself, so the cost of a
 durable write on macOS is the cost of `F_FULLFSYNC`, about 4 ms. Reaching
