@@ -1,0 +1,48 @@
+# Verification for every change that reaches an integration branch.
+#
+# The Linux runner is the correctness gate. Durability behaves differently
+# per OS (macOS `fsync` does not reach the disk without `F_FULLFSYNC`), and
+# Linux is the platform the project's guarantees are stated against.
+#
+# Security posture: least privilege (`contents: read`), no secrets read, and
+# only first-party actions. The toolchain comes from `rust-toolchain.toml`
+# through the rustup already on the runner, not from a third-party action.
+name: ci
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main, 'feature/**']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked

@@ -1,0 +1,9 @@
+# The toolchain every check runs under, pinned to an exact version.
+#
+# CI runs `cargo clippy -- -D warnings`, so the lint set is part of the build.
+# An unpinned toolchain would let the runner image decide when develop turns
+# red. Bump this on purpose, with any lint fixes the bump needs in the same
+# commit. rustup installs it on first use, CI included.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]
