@@ -1,20 +1,26 @@
 //! Command-line access to a store: write commits, read values and their
-//! history, branch, diff, merge, and undo a commit.
+//! history, branch, diff, merge, undo a commit, and serve a branch over the
+//! Redis protocol.
 //!
 //! The log file is named by `UMBRACHYX_DB`. Exit status is 0 on success, 1
 //! when a merge or undo stopped on conflicts, and 2 on any other error.
 
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, TcpListener};
 use std::process::ExitCode;
 
 use umbrachyx::log::{Edit, FileStorage};
+use umbrachyx::server::Server;
 use umbrachyx::store::{
-    CommitId, Conflict, MAIN_BRANCH, Merged, Provenance, Reverted, Store, SystemClock, short,
+    CommitId, Committer, Conflict, MAIN_BRANCH, Merged, Provenance, Reverted, Store, SystemClock,
+    short,
 };
 use umbrachyx::tree::Bytes;
 
 const DB_ENV: &str = "UMBRACHYX_DB";
 const DEFAULT_DB: &str = "umbrachyx.log";
+/// One past Redis's own, so both can run on one machine.
+const DEFAULT_PORT: u16 = 6380;
 const USAGE: &str = "\
 usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log)
 
@@ -26,6 +32,7 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   diff <from> <to>
   merge <into> <from> --who W --why Y [--approved-by A]
   revert <branch> <commit> --who W --why Y [--approved-by A]
+  serve <branch> [--port P]   Redis protocol (GET, SET, PING) on 127.0.0.1
 
 A commit is named by a branch (its latest commit), <branch>~N (N back on
 its own line), or the start of its id.";
@@ -73,7 +80,7 @@ impl Args {
                 .clone();
             match name {
                 "remove" => parsed.removes.push(value),
-                "who" | "why" | "approved-by" | "from" | "limit" => {
+                "who" | "why" | "approved-by" | "from" | "limit" | "port" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -122,6 +129,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         "diff" => diff(&store, &args),
         "merge" => merge(&mut store, &args),
         "revert" => revert(&mut store, &args),
+        "serve" => serve(store, &args),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     }
 }
@@ -258,6 +266,24 @@ fn revert(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
         Reverted::Conflicts(conflicts) => return Ok(report(&conflicts)),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Serves one branch until stopped. Only on this machine: there is no
+/// authentication yet.
+fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
+    let [branch] = args.exactly()?;
+    let port: u16 = match args.options.get("port") {
+        Some(port) => port
+            .parse()
+            .map_err(|_| format!("--port {port:?} is not a port"))?,
+        None => DEFAULT_PORT,
+    };
+    let committer = Committer::start(store);
+    let server =
+        Server::new(branch, committer.writer(), committer.reader()).map_err(|e| e.to_string())?;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
+    eprintln!("serving {branch} on 127.0.0.1:{port}");
+    server.serve(listener)
 }
 
 /// Prints each conflict; nothing was written.

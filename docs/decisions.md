@@ -351,3 +351,35 @@ checker to hold the shared secret that mints tokens.
   those keys has changed since, nothing is written and each such key is
   reported as a conflict. This is how one wrongly granted reward is taken
   back without touching anything else.
+
+## The server
+
+- **It speaks the Redis protocol (RESP2) for `GET`, `SET` and `PING`.**
+  Existing clients work with it, and `valkey-benchmark` can measure it
+  and Valkey with the same tool over the same loopback socket, which is
+  what makes read latencies comparable.
+- **It serves one branch, never main.** Writes from a client are not
+  trusted, so they land where a person can review the diff before merging
+  it. Each `SET` is one commit, acknowledged once durable, with the
+  client's address as its author.
+- **It listens only on 127.0.0.1**, because nothing authenticates a client
+  yet. Capability tokens are meant to guard it before it listens anywhere
+  else.
+- **One thread per connection, at most 1,024 connections, no async
+  runtime.** It is the simplest design that serves the benchmarks, and it
+  adds no dependency. A connection past the limit is told so and closed.
+  A failure to accept a connection or to start its thread costs that
+  connection only. Idle connections are not timed out yet.
+- **Every length a client sends is checked before anything is allocated
+  for it**: at most 1,024 arguments, and at most 1 MiB for all the
+  arguments of one command together. That bounds what a connection
+  buffers, about 1 GiB over 1,024 connections, and keeps every `SET` well
+  inside one log record. Nothing of a command is copied until all of it
+  has arrived, so a command sent in many pieces costs its length once.
+  Replies are sent whenever 1 MiB of them is waiting. A malformed request
+  is answered with an error and the connection is closed, because where
+  the next request starts is no longer known.
+- **Commands sent together are answered together, in order.** A `SET`
+  among them still waits for its own sync before the next command runs,
+  so writes pipelined on one connection do not yet share a sync the way
+  writes from different connections do.

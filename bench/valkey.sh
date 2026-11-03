@@ -4,7 +4,7 @@
 # without persistence, then with every write fsynced before it is
 # acknowledged (appendfsync always). PING is the round trip with no work.
 # Then SET with appendfsync always from 8, 64 and 256 clients at once, each
-# waiting for its reply before the next request.
+# waiting for its reply before the next request, and GET from 50 clients.
 #
 # Usage: bench/valkey.sh [requests] [concurrent-requests]
 set -euo pipefail
@@ -47,6 +47,8 @@ concurrent() {
     valkey-benchmark -p "$port" -t set -n "$concurrent_requests" -r "$keys" -d 32 -c "$clients" --csv \
       | grep -v '"test"' | sed "s/^/\"appendfsync always, $clients clients\",/"
   done
+  valkey-benchmark -p "$port" -t get -n "$requests" -r "$keys" -d 32 -c 50 --csv \
+    | grep -v '"test"' | sed 's/^/"appendfsync always, 50 clients",/'
   stop
 }
 

@@ -21,6 +21,7 @@ compared, it says that too.
   cargo run --release -p umbrachyx --example concurrent_writes
   bench/dolt.sh /tmp/dolt-input
   bench/valkey.sh
+  bench/umbrachyx.sh
   ```
 
 ## Writes that are durable when acknowledged
@@ -75,19 +76,48 @@ never waits. That brought 8 writers from about 1,070 writes a second and
 
 ## Reads
 
+### Over the Redis protocol
+
+Both servers driven by the same `valkey-benchmark`, over loopback, with
+1,000,000 keys present and 32-byte values. Umbrachyx runs `umbrachyx serve`
+on a branch; its keys were written there with `SET`, each a durable commit.
+One client, one request at a time, 100,000 requests per row.
+
+| | Umbrachyx p50 / p99 (ms) | Valkey p50 / p99 (ms) |
+|---|---|---|
+| `PING`, the round trip alone | 0.015 / 0.023 | 0.047 / 0.063 |
+| `GET` | 0.015 / 0.023 | 0.055 / 0.063 |
+| `SET`, durable when acknowledged | 4.00 / 5.00 | 4.01 / 4.87 |
+
+With 50 clients sending `GET`s at once, Umbrachyx answered 233,100 a
+second (p50 0.119 ms, p99 0.151 ms) and Valkey 217,391 (0.183 ms,
+0.439 ms).
+
+**This still does not compare reading.** For both, `GET` costs what `PING`
+costs: reading the value is lost in the round trip. What differs is the
+round trip itself. Umbrachyx gives each connection its own thread, blocked
+in a read until a request arrives; Valkey serves every connection from one
+event loop. That is a difference in how the servers handle connections,
+measured at one and at 50 of them, not one in how fast data is found; a
+server with a thread per connection is expected to fare worse with
+thousands of connections, which has not been measured. With 50 clients
+the two rates are close, and `valkey-benchmark` itself runs on one thread,
+so that row may show the limit of the client rather than of either server.
+`valkey-benchmark` reports in coarse buckets, so small values are rounded.
+Valkey's numbers are the run without persistence for `PING` and `GET` and
+the `appendfsync always` run for `SET`; its `GET` with `appendfsync always`
+was the same, 0.055 / 0.071 ms.
+
+### In process
+
 | | p50 (µs) | p99 (µs) |
 |---|---|---|
-| Umbrachyx `get`, 100,000 records (in process) | 0.42 | 0.83 |
-| Umbrachyx `get`, 1,000,000 records (in process) | 0.88 | 1.54 |
-| Umbrachyx `get`, 10,000,000 records (in process) | 1.50 | 3.92 |
-| Valkey `GET`, 1,000,000 keys (loopback) | 55 | 63 |
-| Valkey `PING`, the round trip alone (loopback) | 55 | 63 |
+| Umbrachyx `get`, 100,000 records | 0.42 | 0.83 |
+| Umbrachyx `get`, 1,000,000 records | 0.88 | 1.54 |
+| Umbrachyx `get`, 10,000,000 records | 1.50 | 3.92 |
 
-**These cannot be compared yet.** Umbrachyx has no server, so its numbers
-contain no network round trip, and Valkey's are almost entirely the round
-trip: `GET` costs the same as `PING`. A fair comparison needs Umbrachyx
-behind a socket. `valkey-benchmark` reports in coarse buckets, so its
-values are rounded.
+Reading a value in the tree costs about 1 µs, under a tenth of the
+loopback round trip above.
 
 ## Diff of two branches that differ by ten records
 
@@ -141,9 +171,11 @@ it landed in every time: 8.6 s for 1,000,000 records and 103 s for
    with each changed node hashed once, brought a large commit down to
    about 0.7 µs per record. A commit of a single key still rebuilds and
    hashes one node per level.
-3. **Reads cannot be compared until Umbrachyx serves them over a socket.**
-   Speaking enough of the Redis protocol for `valkey-benchmark` to drive
-   it would make the comparison exact.
+3. **Over a socket, a read costs the round trip.** Behind the same
+   protocol and the same client, `GET` costs what `PING` costs for both
+   servers, so the tree is not what limits a read. How connections are
+   served is: the next things to measure are many more connections, and
+   reads while writes are being committed.
 4. **Diffs already cost what the change costs**, 9 µs for ten changes in
    10,000,000 records, which is the property the tree was chosen for.
 

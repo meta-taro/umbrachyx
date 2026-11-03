@@ -12,8 +12,9 @@ faster than light). The current value is the light. Its history is the shadow
 that is already there before the light arrives.
 
 > **Status: concept.** A first single-node core exists so the design can be
-> tried: a durable log, a tree with branches, diffs and merges, and a
-> command-line tool. [`docs/demo.md`](docs/demo.md) walks through the first
+> tried: a durable log, a tree with branches, diffs and merges, a
+> command-line tool, and a server for one branch that speaks enough of the
+> Redis protocol for existing clients. [`docs/demo.md`](docs/demo.md) walks through the first
 > four questions below with it. A first comparison with Valkey and Dolt,
 > and what it shows still needs work, is in
 > [`docs/comparison.md`](docs/comparison.md). No format is stable. Do not
