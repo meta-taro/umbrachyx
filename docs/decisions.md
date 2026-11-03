@@ -308,6 +308,13 @@ checker to hold the shared secret that mints tokens.
   commit, 0.5 ms in all: without that, the writers it just answered miss
   the next sync and the writers split into two groups taking turns, which
   doubled every wait with 8 writers. A single writer never waits.
+- **Readers on other threads read a view the committer publishes.** A view
+  is each branch's name and the root of its tree; trees never change once
+  built, so taking one copies a pointer per branch. After writing a group,
+  and before answering its writers, the committer swaps the shared view
+  for a new one. A reader holds the lock only to copy that pointer, never
+  while the committer syncs, and a writer that has been answered reads its
+  own write back.
 - **Every commit keeps the tree it produced**, so any past state can be
   read. Versions share the nodes they have in common, so keeping all of
   them costs only the paths each commit rewrote.

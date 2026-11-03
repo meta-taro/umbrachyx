@@ -25,9 +25,11 @@ use crate::tree::{Bytes, Tree};
 
 mod committer;
 mod merge;
+mod view;
 
-pub use committer::{Committer, Writer};
+pub use committer::{Committer, Reader, Writer};
 pub use merge::{Conflict, Merged, Reverted, ValueChange};
+pub use view::View;
 
 /// The branch that holds live data. It exists from the start.
 pub const MAIN_BRANCH: &str = "main";
@@ -279,6 +281,16 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// The live value of `key` on `branch`.
     pub fn get(&self, branch: &str, key: &[u8]) -> Option<Bytes> {
         self.cell(branch, key)?.value
+    }
+
+    /// Every branch as it is now, to read from other threads.
+    pub fn view(&self) -> View {
+        View::new(
+            self.branches
+                .iter()
+                .map(|(name, head)| (name.clone(), head.state.clone()))
+                .collect(),
+        )
     }
 
     /// The value of `key` as `commit` left it.

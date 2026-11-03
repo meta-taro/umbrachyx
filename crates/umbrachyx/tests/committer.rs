@@ -12,6 +12,7 @@ use umbrachyx::log::{Edit, FileStorage, LogError, MAX_PAYLOAD_LEN, Storage};
 use umbrachyx::store::{
     CommitId, Committer, MAIN_BRANCH, Provenance, Store, StoreError, SystemClock, Writer,
 };
+use umbrachyx::tree::Bytes;
 
 const WRITERS: usize = 8;
 const COMMITS_PER_WRITER: usize = 40;
@@ -211,4 +212,63 @@ fn errors_reach_the_writer_and_a_stopped_committer_refuses_writes() {
     committer.stop();
     let stopped = handle.commit(MAIN_BRANCH, set("a", b"1"), by("w".to_owned()));
     assert!(matches!(stopped, Err(StoreError::Stopped)));
+}
+
+fn bytes(value: &[u8]) -> Option<Bytes> {
+    Some(Bytes::from(value))
+}
+
+/// A view keeps the state it was taken at while the store writes on.
+#[test]
+fn a_view_holds_the_state_it_was_taken_at() {
+    let dir = TempDir::new("view");
+    let (mut store, _) = open_counting(&dir.log());
+    store
+        .commit(MAIN_BRANCH, set("a", b"1"), by("w".to_owned()))
+        .expect("commits");
+    let before = store.view();
+
+    store
+        .commit(MAIN_BRANCH, set("a", b"2"), by("w".to_owned()))
+        .expect("commits");
+    store.create_branch("draft", MAIN_BRANCH).expect("branches");
+
+    assert_eq!(before.get(MAIN_BRANCH, b"a"), bytes(b"1"));
+    assert_eq!(before.get("draft", b"a"), None);
+    let after = store.view();
+    assert_eq!(after.get(MAIN_BRANCH, b"a"), bytes(b"2"));
+    assert_eq!(after.get("draft", b"a"), bytes(b"2"));
+    assert_eq!(after.get(MAIN_BRANCH, b"missing"), None);
+}
+
+/// Once a writer is answered, every reader sees its write: a client that
+/// writes and then reads gets back what it wrote.
+#[test]
+fn readers_see_a_write_once_its_writer_is_answered() {
+    let dir = TempDir::new("reader");
+    let (store, _) = open_counting(&dir.log());
+    let committer = Committer::start(store);
+    let reader = committer.reader();
+    assert_eq!(reader.view().get(MAIN_BRANCH, b"writer/0/000"), None);
+
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|writer| {
+            let handle = committer.writer();
+            let reader = reader.clone();
+            thread::spawn(move || {
+                for n in 0..COMMITS_PER_WRITER / 4 {
+                    let key = format!("writer/{writer}/{n:03}");
+                    handle
+                        .commit(MAIN_BRANCH, set(&key, b"v"), by(format!("w{writer}")))
+                        .expect("commits");
+                    assert_eq!(reader.view().get(MAIN_BRANCH, key.as_bytes()), bytes(b"v"));
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().expect("every write is seen at once");
+    }
+    drop(committer.stop());
+    assert_eq!(reader.view().get(MAIN_BRANCH, b"writer/0/000"), bytes(b"v"));
 }

@@ -4,13 +4,18 @@
 //! A sync costs the same for one commit as for many, so writers that would
 //! each wait for their own sync share one instead. Each writer is still
 //! answered only once its commit is durable.
+//!
+//! Readers on other threads read a [`View`] the committer publishes after
+//! each group, before it answers the group's writers, so a write is seen by
+//! every reader by the time its writer hears it is durable.
 
 use std::io;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::{Clock, CommitId, CommitRequest, Provenance, Store, StoreError};
+use super::{Clock, CommitId, CommitRequest, Provenance, Store, StoreError, View};
 use crate::log::record::{GROUP_OVERHEAD, commit_len};
 use crate::log::{Edit, LogError, MAX_PAYLOAD_LEN, Storage};
 
@@ -39,13 +44,25 @@ struct Job {
 /// Owns a store on its own thread and groups the commits sent to it.
 pub struct Committer<S: Storage, C: Clock> {
     messages: Sender<Message>,
+    published: Published,
     thread: Option<JoinHandle<Store<S, C>>>,
 }
+
+/// The latest view. Replacing it swaps one pointer, so readers wait on the
+/// lock no longer than that.
+type Published = Arc<RwLock<Arc<View>>>;
 
 /// Sends commits to a [`Committer`]. Cheap to clone, one per writer thread.
 #[derive(Clone)]
 pub struct Writer {
     messages: Sender<Message>,
+}
+
+/// Reads the views a [`Committer`] publishes. Cheap to clone, and still
+/// reads the last view once the committer has stopped.
+#[derive(Clone)]
+pub struct Reader {
+    published: Published,
 }
 
 impl<S, C> Committer<S, C>
@@ -55,9 +72,12 @@ where
 {
     pub fn start(store: Store<S, C>) -> Self {
         let (messages, received) = mpsc::channel();
-        let thread = thread::spawn(move || run(store, &received));
+        let published = Arc::new(RwLock::new(Arc::new(store.view())));
+        let publish_to = Arc::clone(&published);
+        let thread = thread::spawn(move || run(store, &received, &publish_to));
         Self {
             messages,
+            published,
             thread: Some(thread),
         }
     }
@@ -65,6 +85,12 @@ where
     pub fn writer(&self) -> Writer {
         Writer {
             messages: self.messages.clone(),
+        }
+    }
+
+    pub fn reader(&self) -> Reader {
+        Reader {
+            published: Arc::clone(&self.published),
         }
     }
 
@@ -127,7 +153,25 @@ impl Writer {
     }
 }
 
-fn run<S: Storage, C: Clock>(mut store: Store<S, C>, received: &Receiver<Message>) -> Store<S, C> {
+impl Reader {
+    /// Every branch as of the latest group written.
+    pub fn view(&self) -> Arc<View> {
+        // Only a pointer is ever written under the lock, so a writer that
+        // panicked holding it cannot have left it half changed.
+        Arc::clone(
+            &self
+                .published
+                .read()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+}
+
+fn run<S: Storage, C: Clock>(
+    mut store: Store<S, C>,
+    received: &Receiver<Message>,
+    published: &Published,
+) -> Store<S, C> {
     let mut carried = None;
     let mut is_busy = false;
     loop {
@@ -140,7 +184,7 @@ fn run<S: Storage, C: Clock>(mut store: Store<S, C>, received: &Receiver<Message
         };
         let (group, next, is_stopping) = gather(first, received, is_busy);
         is_busy = group.len() > 1;
-        write_group(&mut store, group);
+        write_group(&mut store, group, published);
         if is_stopping {
             return store;
         }
@@ -183,7 +227,11 @@ fn gather(
     (group, None, false)
 }
 
-fn write_group<S: Storage, C: Clock>(store: &mut Store<S, C>, group: Vec<Job>) {
+fn write_group<S: Storage, C: Clock>(
+    store: &mut Store<S, C>,
+    group: Vec<Job>,
+    published: &Published,
+) {
     let (requests, replies): (Vec<_>, Vec<_>) = group
         .into_iter()
         .map(|job| (job.request, job.reply))
@@ -191,6 +239,8 @@ fn write_group<S: Storage, C: Clock>(store: &mut Store<S, C>, group: Vec<Job>) {
     // A writer that stopped waiting is no reason to stop answering others.
     match store.commit_all(requests) {
         Ok(answers) => {
+            let view = Arc::new(store.view());
+            *published.write().unwrap_or_else(PoisonError::into_inner) = view;
             for (reply, answer) in replies.into_iter().zip(answers) {
                 let _ = reply.send(answer);
             }
