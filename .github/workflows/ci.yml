@@ -117,11 +117,19 @@ jobs:
       - name: Valkey
         run: bench/valkey.sh | tee bench-valkey.csv
 
+      # Linux allows a process far more threads than macOS, where Umbrachyx
+      # could not serve 10,000 connections; this shows whether that limit is
+      # the platform's or the design's.
+      - name: Many connections
+        run: |
+          ulimit -n 65536
+          bench/connections.sh | tee bench-connections.csv
+
       - name: Summary
         run: |
           {
             echo "### Benchmarks (shared runner, compare runs of this job only)"
-            for file in bench-umbrachyx.csv bench-valkey.csv; do
+            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv; do
               echo
               echo "\`$file\`"
               echo
