@@ -27,7 +27,7 @@ mod committer;
 mod merge;
 mod view;
 
-pub use committer::{Committer, Reader, Writer};
+pub use committer::{Committer, Pending, Reader, Writer};
 pub use merge::{Conflict, Merged, Reverted, ValueChange};
 pub use view::View;
 

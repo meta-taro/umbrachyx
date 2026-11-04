@@ -126,6 +126,12 @@ impl Writer {
         edits: Vec<Edit>,
         provenance: Provenance,
     ) -> Result<CommitId, StoreError> {
+        self.send(branch, edits, provenance).wait()
+    }
+
+    /// Sends a commit without waiting for it, so commits sent one after
+    /// another can share a sync. They are written in the order sent.
+    pub fn send(&self, branch: &str, edits: Vec<Edit>, provenance: Provenance) -> Pending {
         let len = commit_len(
             branch,
             &provenance.who,
@@ -140,16 +146,28 @@ impl Writer {
             provenance,
         };
         let (reply, answer) = mpsc::sync_channel(1);
-        self.messages
-            .send(Message::Commit(Job {
-                request,
-                len,
-                reply,
-            }))
-            .map_err(|_| StoreError::Stopped)?;
+        // If the committer has stopped, the job comes back in the error and
+        // is dropped with its reply, so waiting gives `Stopped`.
+        let _ = self.messages.send(Message::Commit(Job {
+            request,
+            len,
+            reply,
+        }));
+        Pending { answer }
+    }
+}
+
+/// A commit sent to a [`Committer`] and not yet answered.
+pub struct Pending {
+    answer: Receiver<Answer>,
+}
+
+impl Pending {
+    /// The commit's id once it is durable.
+    pub fn wait(self) -> Result<CommitId, StoreError> {
         // The reply is dropped unanswered only if the committer stopped
         // before reading the job.
-        answer.recv().map_err(|_| StoreError::Stopped)?
+        self.answer.recv().map_err(|_| StoreError::Stopped)?
     }
 }
 

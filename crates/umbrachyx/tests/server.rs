@@ -1,17 +1,22 @@
 //! The Redis-protocol server over a real socket: commands, pipelining, the
 //! branch its writes go to, and what it refuses.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
-use umbrachyx::log::FileStorage;
+use umbrachyx::log::{FileStorage, Storage};
 use umbrachyx::server::{Server, ServerError};
 use umbrachyx::store::{Committer, MAIN_BRANCH, Store, SystemClock};
 use umbrachyx::tree::Bytes;
 
 const BRANCH: &str = "bench";
+/// Long enough that writes pile up behind each sync on any machine.
+const SLOW_SYNC: Duration = Duration::from_millis(5);
 
 /// A fresh directory per test, removed when the test ends.
 struct TempDir(PathBuf);
@@ -43,6 +48,13 @@ fn start_with(
     configure: impl FnOnce(Server) -> Server,
 ) -> (Committer<FileStorage, SystemClock>, SocketAddr) {
     let storage = FileStorage::open(&dir.0.join("log")).expect("opens file");
+    serve_store(storage, configure)
+}
+
+fn serve_store<S: Storage + Send + 'static>(
+    storage: S,
+    configure: impl FnOnce(Server) -> Server,
+) -> (Committer<S, SystemClock>, SocketAddr) {
     let mut store = Store::open(storage, SystemClock).expect("opens store");
     store.create_branch(BRANCH, MAIN_BRANCH).expect("branches");
     let committer = Committer::start(store);
@@ -90,6 +102,65 @@ fn pipelined_commands_are_answered_in_order() {
 
     let expected = b"+PONG\r\n+OK\r\n$3\r\n100\r\n$-1\r\n$5\r\nhello\r\n";
     assert_eq!(read_reply(&mut client, expected), expected);
+}
+
+/// The file, with every sync counted and slowed down.
+struct CountingStorage {
+    file: FileStorage,
+    syncs: Arc<AtomicUsize>,
+}
+
+impl Storage for CountingStorage {
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        self.file.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.file.append(bytes)
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        thread::sleep(SLOW_SYNC);
+        self.syncs.fetch_add(1, Ordering::SeqCst);
+        self.file.sync()
+    }
+
+    fn truncate(&mut self, len: u64) -> io::Result<()> {
+        self.file.truncate(len)
+    }
+}
+
+/// SETs sent together share syncs rather than waiting for one each, and
+/// are answered in order; a command after them sees them all.
+#[test]
+fn pipelined_sets_share_syncs_and_later_commands_see_them() {
+    const SETS: usize = 40;
+    let dir = TempDir::new("pipelined-sets");
+    let syncs = Arc::new(AtomicUsize::new(0));
+    let storage = CountingStorage {
+        file: FileStorage::open(&dir.0.join("log")).expect("opens file"),
+        syncs: Arc::clone(&syncs),
+    };
+    let (_committer, address) = serve_store(storage, |server| server);
+    let mut client = TcpStream::connect(address).expect("connects");
+    let opening_syncs = syncs.load(Ordering::SeqCst);
+
+    let mut requests = Vec::new();
+    for n in 0..SETS {
+        requests.extend(command(&["SET", "player/1/gold", &n.to_string()]));
+    }
+    requests.extend(command(&["GET", "player/1/gold"]));
+    requests.extend(command(&["SET", "player/1/gold", "done"]));
+    requests.extend(command(&["GET", "player/1/gold"]));
+    client.write_all(&requests).expect("sends");
+
+    let last = (SETS - 1).to_string();
+    let mut expected = b"+OK\r\n".repeat(SETS);
+    expected.extend(format!("${}\r\n{last}\r\n", last.len()).as_bytes());
+    expected.extend(b"+OK\r\n$4\r\ndone\r\n");
+    assert_eq!(read_reply(&mut client, &expected), expected);
+    let used = syncs.load(Ordering::SeqCst) - opening_syncs;
+    assert!(used * 4 <= SETS, "{used} syncs for {SETS} SETs");
 }
 
 /// Writes reach the server's branch, never main, with the client named as

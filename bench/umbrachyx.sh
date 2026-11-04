@@ -23,8 +23,7 @@ export UMBRACHYX_DB="$dir/log"
 "$bin" serve "$branch" --port "$port" 2>"$dir/serve.log" &
 server=$!
 until valkey-cli -p "$port" ping >/dev/null 2>&1; do sleep 0.1; done
-# Fill the key space first, so GET finds values. This takes minutes: the
-# writes pipelined on one connection still wait for their syncs one by one.
+# Fill the key space first, so GET finds values.
 valkey-benchmark -p "$port" -t set -n "$keys" -r "$keys" -d 32 -c 50 -P 64 -q >/dev/null 2>&1
 
 echo '"persistence","test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"'

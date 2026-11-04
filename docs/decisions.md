@@ -379,7 +379,8 @@ checker to hold the shared secret that mints tokens.
   Replies are sent whenever 1 MiB of them is waiting. A malformed request
   is answered with an error and the connection is closed, because where
   the next request starts is no longer known.
-- **Commands sent together are answered together, in order.** A `SET`
-  among them still waits for its own sync before the next command runs,
-  so writes pipelined on one connection do not yet share a sync the way
-  writes from different connections do.
+- **Commands sent together are answered together, in order.** The `SET`s
+  among them are sent to the committer without waiting, so they share
+  syncs the way writes from different connections do. Any other command
+  first waits until the `SET`s before it are durable, so a `GET` reads what
+  the same client set just before it, and replies stay in order.

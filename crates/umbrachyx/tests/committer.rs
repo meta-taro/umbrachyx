@@ -155,6 +155,58 @@ fn concurrent_writes_share_syncs_and_all_survive() {
     }
 }
 
+/// Writes one thread sends without waiting for each answer share syncs,
+/// and land in the order they were sent.
+#[test]
+fn writes_sent_without_waiting_share_syncs_and_keep_their_order() {
+    let dir = TempDir::new("sent");
+    let (store, syncs) = open_counting(&dir.log());
+    let opening_syncs = syncs.load(Ordering::SeqCst);
+    let committer = Committer::start(store);
+    let handle = committer.writer();
+
+    let pending: Vec<_> = (0..COMMITS_PER_WRITER)
+        .map(|n| {
+            let value = n.to_string();
+            handle.send(
+                MAIN_BRANCH,
+                set("gold", value.as_bytes()),
+                by("w".to_owned()),
+            )
+        })
+        .collect();
+    let mut ids: Vec<_> = pending
+        .into_iter()
+        .map(|commit| commit.wait().expect("commits"))
+        .collect();
+    let store = committer.stop();
+
+    let used = syncs.load(Ordering::SeqCst) - opening_syncs;
+    assert!(
+        used * 4 <= COMMITS_PER_WRITER,
+        "{used} syncs for {COMMITS_PER_WRITER} commits"
+    );
+    // `log` runs newest first.
+    ids.reverse();
+    let logged: Vec<_> = store.log(MAIN_BRANCH).iter().map(|info| info.id).collect();
+    assert_eq!(logged, ids);
+    let last = (COMMITS_PER_WRITER - 1).to_string();
+    assert_eq!(store.get(MAIN_BRANCH, b"gold"), bytes(last.as_bytes()));
+}
+
+/// A write sent to a stopped committer is refused when waited on.
+#[test]
+fn a_write_sent_after_stopping_is_refused() {
+    let dir = TempDir::new("sent-stopped");
+    let (store, _) = open_counting(&dir.log());
+    let committer = Committer::start(store);
+    let handle = committer.writer();
+    committer.stop();
+
+    let sent = handle.send(MAIN_BRANCH, set("a", b"1"), by("w".to_owned()));
+    assert!(matches!(sent.wait(), Err(StoreError::Stopped)));
+}
+
 /// A write too large for the log fails alone; writes queued with it still
 /// succeed.
 #[test]

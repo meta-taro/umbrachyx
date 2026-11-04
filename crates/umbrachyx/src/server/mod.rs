@@ -11,7 +11,9 @@
 //! machine.
 //!
 //! Each connection has a thread. Commands sent together (pipelined) are
-//! answered together, in order.
+//! answered together, in order. SETs sent together are written together,
+//! sharing syncs, and any other command waits for the SETs before it, so a
+//! GET reads what the same client set just before.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -22,7 +24,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::log::Edit;
-use crate::store::{MAIN_BRANCH, Provenance, Reader, Writer};
+use crate::store::{CommitId, MAIN_BRANCH, Pending, Provenance, Reader, StoreError, Writer};
 
 pub mod resp;
 
@@ -135,6 +137,7 @@ impl Server {
         let who = format!("resp {peer}");
         let mut input = Vec::new();
         let mut out = Vec::new();
+        let mut unanswered = Vec::new();
         let mut chunk = vec![0; READ_CHUNK];
         loop {
             let read = stream.read(&mut chunk)?;
@@ -147,9 +150,7 @@ impl Server {
                 match resp::parse(&input[used..]) {
                     Ok(Some((command, len))) => {
                         used += len;
-                        if let Some(reply) = self.execute(&command, &who) {
-                            reply.write_to(&mut out);
-                        }
+                        self.answer(&command, &who, &mut unanswered, &mut out);
                         if out.len() >= MAX_PENDING_OUT {
                             stream.write_all(&out)?;
                             out.clear();
@@ -160,6 +161,7 @@ impl Server {
                 }
             };
             input.drain(..used);
+            settle(&mut unanswered, &mut out);
             if let Err(error) = result {
                 Reply::Error(format!("ERR {error}")).write_to(&mut out);
                 stream.write_all(&out)?;
@@ -170,18 +172,41 @@ impl Server {
         }
     }
 
+    /// Carries out one command. Its reply goes to `out`, or, for a SET, to
+    /// `unanswered` until the write is durable.
+    fn answer(
+        &self,
+        command: &Command,
+        who: &str,
+        unanswered: &mut Vec<Pending>,
+        out: &mut Vec<u8>,
+    ) {
+        // A read must see the SETs sent before it.
+        if !is_set(command) {
+            settle(unanswered, out);
+        }
+        match self.execute(command, who) {
+            Some(Step::Sent(commit)) => unanswered.push(commit),
+            Some(Step::Reply(reply)) => {
+                settle(unanswered, out);
+                reply.write_to(out);
+            }
+            None => {}
+        }
+    }
+
     /// The reply to one command; none to an empty one, as Redis does.
-    fn execute(&self, command: &Command, who: &str) -> Option<Reply> {
+    fn execute(&self, command: &Command, who: &str) -> Option<Step> {
         let (name, args) = command.split_first()?;
         let name = String::from_utf8_lossy(name).to_ascii_uppercase();
-        Some(match (name.as_str(), args) {
+        Some(Step::Reply(match (name.as_str(), args) {
             ("PING", []) => Reply::Simple("PONG"),
             ("PING", [message]) => Reply::Bulk(Some(message.clone())),
             ("GET", [key]) => {
                 let value = self.reader.view().get(&self.branch, key);
                 Reply::Bulk(value.map(|value| value.to_vec()))
             }
-            ("SET", [key, value]) => self.set(key, value, who),
+            ("SET", [key, value]) => return Some(Step::Sent(self.set(key, value, who))),
             ("SET", [_, _, _, ..]) => Reply::Error("ERR SET options are not supported".to_owned()),
             ("PING" | "GET" | "SET", _) => Reply::Error(format!(
                 "ERR wrong number of arguments for '{}' command",
@@ -191,10 +216,10 @@ impl Server {
                 let shown: String = name.chars().take(MAX_NAME_SHOWN).collect();
                 Reply::Error(format!("ERR unknown command '{}'", shown.escape_default()))
             }
-        })
+        }))
     }
 
-    fn set(&self, key: &[u8], value: &[u8], who: &str) -> Reply {
+    fn set(&self, key: &[u8], value: &[u8], who: &str) -> Pending {
         let edit = Edit {
             key: key.to_vec(),
             value: Some(value.to_vec()),
@@ -204,10 +229,35 @@ impl Server {
             why: "SET".to_owned(),
             approved_by: None,
         };
-        match self.writer.commit(&self.branch, vec![edit], provenance) {
-            Ok(_) => Reply::Simple("OK"),
-            Err(error) => Reply::Error(format!("ERR {error}")),
-        }
+        self.writer.send(&self.branch, vec![edit], provenance)
+    }
+}
+
+/// Where a command's reply comes from.
+enum Step {
+    Reply(Reply),
+    /// A SET, answered once its write is durable.
+    Sent(Pending),
+}
+
+fn is_set(command: &Command) -> bool {
+    command
+        .first()
+        .is_some_and(|name| name.eq_ignore_ascii_case(b"SET"))
+}
+
+/// Waits for the SETs sent so far and adds their replies to `out`, in the
+/// order they were sent.
+fn settle(unanswered: &mut Vec<Pending>, out: &mut Vec<u8>) {
+    for commit in unanswered.drain(..) {
+        set_reply(commit.wait()).write_to(out);
+    }
+}
+
+fn set_reply(answer: Result<CommitId, StoreError>) -> Reply {
+    match answer {
+        Ok(_) => Reply::Simple("OK"),
+        Err(error) => Reply::Error(format!("ERR {error}")),
     }
 }
 
