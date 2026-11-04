@@ -14,7 +14,7 @@
 //! `cargo test --release --test server_crash -- --ignored` runs the full 100
 //! rounds; `UMBRACHYX_SERVER_CRASH_ROUNDS` overrides the count. Run it in
 //! release mode: the log grows every round and the server replays all of it
-//! when it starts, which in a debug build outlasts the wait for it to listen.
+//! when it starts, which in a debug build makes the full run take hours.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -38,7 +38,9 @@ const PIPELINE: usize = 16;
 const MIN_KILL_DELAY_MILLIS: u64 = 20;
 const MAX_KILL_DELAY_MILLIS: u64 = 300;
 const SEED: u64 = 0x5EED_0002;
-const START_TRIES: usize = 400;
+/// The log grows every round and the server replays all of it before it
+/// listens, which by the last rounds takes seconds on a slow CI runner.
+const START_TIMEOUT: Duration = Duration::from_secs(120);
 const START_WAIT: Duration = Duration::from_millis(25);
 
 /// SplitMix64, so the kill delays repeat for a given seed with no dependency.
@@ -122,7 +124,7 @@ fn start_server(log: &Path, errors: &Path) -> (Server, u16) {
             .expect("starts the server"),
     );
     let started = Instant::now();
-    for _ in 0..START_TRIES {
+    while started.elapsed() < START_TIMEOUT {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
             return (server, port);
         }
