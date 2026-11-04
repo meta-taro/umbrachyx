@@ -63,6 +63,13 @@ jobs:
       - name: crash test (1,000 rounds)
         run: cargo test -p umbrachyx --test crash --locked -- --ignored --nocapture
 
+      # The same, end to end: 100 rounds of killing `umbrachyx serve` while
+      # 16 clients send SETs over the Redis protocol, half of them
+      # pipelined, checking that every acknowledged SET is there afterwards.
+      # Release mode, because the server replays the whole log at every start.
+      - name: server crash test (100 rounds)
+        run: cargo test -p umbrachyx --release --test server_crash --locked -- --ignored --nocapture
+
       # Deterministic simulation over a simulated disk and clock, for the log
       # (torn sectors, failed syncs, bit flips) and for the store on top of it
       # (multi-key commits, crashes, a clock that goes back). Release mode,
@@ -73,3 +80,58 @@ jobs:
 
       - name: sync latency (reference only)
         run: cargo run -p umbrachyx --release --locked --example sync_latency
+
+  bench:
+    # Every change is measured against Valkey on the same runner, so a
+    # slowdown shows up in the change that caused it. A shared virtual
+    # machine is noisy: these numbers are for comparing runs of this job,
+    # not for the tables in docs/comparison.md, which come from one quiet
+    # machine. The raw output is kept as an artifact of each run.
+    name: bench (ubuntu-latest)
+    runs-on: ubuntu-latest
+    env:
+      VALKEY_VERSION: 9.1.3
+    defaults:
+      run:
+        # Named explicitly so a pipe into `tee` fails when the script does.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # Built from the release tag rather than taken from the distribution,
+      # so the version matches the one in docs/comparison.md.
+      - name: Build Valkey
+        run: |
+          git clone --quiet --depth 1 --branch "$VALKEY_VERSION" https://github.com/valkey-io/valkey.git "$RUNNER_TEMP/valkey"
+          make -C "$RUNNER_TEMP/valkey" -j"$(nproc)" BUILD_TLS=no >/dev/null
+          echo "$RUNNER_TEMP/valkey/src" >> "$GITHUB_PATH"
+
+      - name: Umbrachyx over the Redis protocol
+        run: bench/umbrachyx.sh | tee bench-umbrachyx.csv
+
+      - name: Valkey
+        run: bench/valkey.sh | tee bench-valkey.csv
+
+      - name: Summary
+        run: |
+          {
+            echo "### Benchmarks (shared runner, compare runs of this job only)"
+            for file in bench-umbrachyx.csv bench-valkey.csv; do
+              echo
+              echo "\`$file\`"
+              echo
+              echo '```'
+              cat "$file"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: bench-*.csv

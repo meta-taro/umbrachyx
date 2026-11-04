@@ -22,7 +22,11 @@ compared, it says that too.
   bench/dolt.sh /tmp/dolt-input
   bench/valkey.sh
   bench/umbrachyx.sh
+  bench/connections.sh
   ```
+
+- The raw output of the latest runs, with the machine and versions, is in
+  [`bench/results/`](../bench/results/).
 
 ## Writes that are durable when acknowledged
 
@@ -133,6 +137,27 @@ Umbrachyx's writers made about 9,500 durable `SET`s a second while the
 rate rose while others wrote (74,738 a second, against 58,106 alone); why
 was not measured.
 
+### Many connections
+
+`GET`s from 1,000, 5,000 and 10,000 clients at once, each waiting for its
+reply before the next request, 500,000 requests per row
+(`bench/connections.sh`). The client runs on four threads. Each row waits
+40 s first, so the ports of the previous row's connections are free again.
+
+| Clients | Umbrachyx (GET/s) | p50 / p99 (ms) | Valkey (GET/s) | p50 / p99 (ms) |
+|---|---|---|---|---|
+| 1,000 | 180,571 | 2.65 / 6.07 | 165,837 | 3.51 / 9.19 |
+| 5,000 | 152,765 | 22.1 / 170 | 179,211 | 21.2 / 35.6 |
+| 10,000 | failed | | 139,782 | 41.5 / 472 |
+
+This is where a thread per connection shows. At 5,000 clients Umbrachyx's
+median matches Valkey's but its p99 is about five times Valkey's: 5,000
+threads take turns on ten cores. At 10,000 it could not serve at all.
+macOS allows a process 8,192 threads, so 1,810 connections got no thread
+and were closed, and the benchmark stopped. Serving many connections needs
+connections that do not each hold a thread; until then, 1,000 or so is
+what Umbrachyx serves well.
+
 ### In process
 
 | | p50 (µs) | p99 (µs) |
@@ -201,8 +226,10 @@ it landed in every time: 8.6 s for 1,000,000 records and 103 s for
    servers, so the tree is not what limits a read. How connections are
    served is. While others write durably, a read in Umbrachyx still costs
    the round trip, because it reads a published view instead of waiting
-   for the committer; in Valkey it waits for a sync, about 10 ms. Many
-   more connections have not been measured yet.
+   for the committer; in Valkey it waits for a sync, about 10 ms. With
+   thousands of connections the thread per connection is the limit: at
+   5,000 the slowest reads are five times Valkey's, and 10,000 cannot be
+   served on macOS.
 4. **Diffs already cost what the change costs**, 9 µs for ten changes in
    10,000,000 records, which is the property the tree was chosen for.
 

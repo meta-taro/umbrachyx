@@ -1,0 +1,7 @@
+"server","test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"umbrachyx, 1000 clients","GET","180570.59","2.977","0.584","2.647","4.495","6.071","16.447"
+"umbrachyx, 5000 clients","GET","152765.05","28.117","8.528","22.127","31.215","169.855","412.159"
+"umbrachyx, 10000 clients","failed: WARNING: Could not fetch server CONFIG Error: Server closed the connection Error: Server closed the connection "
+"valkey, 1000 clients","GET","165837.47","3.752","0.872","3.511","6.407","9.191","15.927"
+"valkey, 5000 clients","GET","179211.47","21.226","6.544","21.151","31.711","35.615","138.879"
+"valkey, 10000 clients","GET","139781.94","64.230","15.016","41.535","190.207","471.807","2121.727"

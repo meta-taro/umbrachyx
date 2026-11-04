@@ -1,0 +1,12 @@
+$ cargo test -p umbrachyx --release --test server_crash -- --ignored --nocapture
+100 rounds, 330912 acknowledged SETs, none lost
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 503.89s
+
+$ cargo test -p umbrachyx --test crash -- --ignored --nocapture
+1000 rounds, 3719 acknowledged writes, none lost
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 24.50s
+
+$ cargo test -p umbrachyx --lib --release ten_thousand_seeds -- --ignored --nocapture
+10000 seeds: 130677 restarts, 307099 records acknowledged at the end, 6867 corruptions refused, 998 last-record damages cut off
+store, 10000 seeds: 635173 commits (97797 groups), 152927 restarts, interrupted commits kept 6065 and lost 6288, clock went back 21924 times, 41343 branches made, 5526 merges, 12075 merges refused for conflicts, 16999 reverts
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 47 filtered out; finished in 24.61s

@@ -369,7 +369,12 @@ checker to hold the shared secret that mints tokens.
   runtime.** It is the simplest design that serves the benchmarks, and it
   adds no dependency. A connection past the limit is told so and closed.
   A failure to accept a connection or to start its thread costs that
-  connection only. Idle connections are not timed out yet.
+  connection only. Idle connections are not timed out yet. The limit can
+  be raised with `serve --max-connections`. Measured against Valkey, this
+  design holds up to about 1,000 connections; at 5,000 its slowest reads
+  are five times Valkey's, and past the operating system's thread limit
+  (8,192 a process on macOS) it cannot serve at all. Serving more needs
+  connections that do not each hold a thread.
 - **Every length a client sends is checked before anything is allocated
   for it**: at most 1,024 arguments, and at most 1 MiB for all the
   arguments of one command together. That bounds what a connection
