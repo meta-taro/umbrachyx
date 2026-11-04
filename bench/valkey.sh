@@ -4,7 +4,8 @@
 # without persistence, then with every write fsynced before it is
 # acknowledged (appendfsync always). PING is the round trip with no work.
 # Then SET with appendfsync always from 8, 64 and 256 clients at once, each
-# waiting for its reply before the next request, and GET from 50 clients.
+# waiting for its reply before the next request, GET from 50 clients, and
+# GET from one client while 50 others keep sending SETs.
 #
 # Usage: bench/valkey.sh [requests] [concurrent-requests]
 set -euo pipefail
@@ -14,7 +15,8 @@ concurrent_requests="${2:-20000}"
 port=6399
 keys=1000000
 dir="$(mktemp -d)"
-trap 'valkey-cli -p "$port" shutdown nosave >/dev/null 2>&1 || true; rm -rf "$dir"' EXIT
+writers=
+trap '[ -n "$writers" ] && kill "$writers" 2>/dev/null; valkey-cli -p "$port" shutdown nosave >/dev/null 2>&1 || true; rm -rf "$dir"' EXIT
 
 start() {
   local appendonly="$1" data
@@ -49,6 +51,14 @@ concurrent() {
   done
   valkey-benchmark -p "$port" -t get -n "$requests" -r "$keys" -d 32 -c 50 --csv \
     | grep -v '"test"' | sed 's/^/"appendfsync always, 50 clients",/'
+  # More SETs than can finish before the GETs do; stopped once they have.
+  valkey-benchmark -p "$port" -t set -n 100000000 -r "$keys" -d 32 -c 50 -q >/dev/null 2>&1 &
+  writers=$!
+  sleep 1
+  valkey-benchmark -p "$port" -t get -n "$requests" -r "$keys" -d 32 -c 1 --csv \
+    | grep -v '"test"' | sed 's/^/"appendfsync always, GET while 50 clients SET",/'
+  kill "$writers"
+  writers=
   stop
 }
 

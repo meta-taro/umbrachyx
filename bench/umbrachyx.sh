@@ -3,7 +3,8 @@
 # same runs as bench/valkey.sh: GET and SET from one client over loopback,
 # with 32-byte values over a space of 1,000,000 keys, and PING as the round
 # trip with no work. Then GET from 50 clients at once. Every SET is a commit,
-# durable before it is acknowledged, so there is one run, not two.
+# durable before it is acknowledged, so there is one run, not two. Last,
+# GET from one client while 50 others keep sending SETs.
 #
 # Usage: bench/umbrachyx.sh [requests]
 set -euo pipefail
@@ -14,7 +15,8 @@ keys=1000000
 branch=bench
 dir="$(mktemp -d)"
 server=
-trap '[ -n "$server" ] && kill "$server" 2>/dev/null; rm -rf "$dir"' EXIT
+writers=
+trap '[ -n "$writers" ] && kill "$writers" 2>/dev/null; [ -n "$server" ] && kill "$server" 2>/dev/null; rm -rf "$dir"' EXIT
 
 cargo build --quiet --release -p umbrachyx
 bin="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/umbrachyx"
@@ -31,3 +33,11 @@ valkey-benchmark -p "$port" -t ping_mbulk,get,set -n "$requests" -r "$keys" -d 3
   | grep -v '"test"' | sed 's/^/"every commit synced",/'
 valkey-benchmark -p "$port" -t get -n "$requests" -r "$keys" -d 32 -c 50 --csv 2>/dev/null \
   | grep -v '"test"' | sed 's/^/"every commit synced, 50 clients",/'
+# More SETs than can finish before the GETs do; stopped once they have.
+valkey-benchmark -p "$port" -t set -n 100000000 -r "$keys" -d 32 -c 50 -q >/dev/null 2>&1 &
+writers=$!
+sleep 1
+valkey-benchmark -p "$port" -t get -n "$requests" -r "$keys" -d 32 -c 1 --csv 2>/dev/null \
+  | grep -v '"test"' | sed 's/^/"every commit synced, GET while 50 clients SET",/'
+kill "$writers"
+writers=

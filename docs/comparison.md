@@ -108,6 +108,31 @@ Valkey's numbers are the run without persistence for `PING` and `GET` and
 the `appendfsync always` run for `SET`; its `GET` with `appendfsync always`
 was the same, 0.055 / 0.071 ms.
 
+### While others write
+
+The same `GET`s from one client, while 50 other clients keep sending
+`SET`s, each durable before it is acknowledged (Valkey with `appendfsync
+always`). The writers start a second before the readers and are stopped
+after them. Both rows of a column come from one run of its script, so
+`GET` alone differs slightly from the table above.
+
+| | Umbrachyx p50 / p99 (ms) | Valkey p50 / p99 (ms) |
+|---|---|---|
+| `GET`, alone | 0.015 / 0.031 | 0.055 / 0.071 |
+| `GET`, while 50 clients `SET` | 0.015 / 0.039 | 9.86 / 11.12 |
+
+Valkey runs every command on one thread, and with `appendfsync always` it
+syncs the writes it has read before it replies to anything read with
+them, so a `GET` waits for the sync of the `SET`s around it. Umbrachyx
+reads from the view the committer last published, on the connection's own
+thread, so a `GET` does not wait for a sync. Its `GET` is still current
+for the client that sends it, because the client's own `SET`s are answered
+only once they are in that view. In a separate check of the same run,
+Umbrachyx's writers made about 9,500 durable `SET`s a second while the
+`GET`s ran, and were still writing when they ended. Umbrachyx's `GET`
+rate rose while others wrote (74,738 a second, against 58,106 alone); why
+was not measured.
+
 ### In process
 
 | | p50 (µs) | p99 (µs) |
@@ -174,8 +199,10 @@ it landed in every time: 8.6 s for 1,000,000 records and 103 s for
 3. **Over a socket, a read costs the round trip.** Behind the same
    protocol and the same client, `GET` costs what `PING` costs for both
    servers, so the tree is not what limits a read. How connections are
-   served is: the next things to measure are many more connections, and
-   reads while writes are being committed.
+   served is. While others write durably, a read in Umbrachyx still costs
+   the round trip, because it reads a published view instead of waiting
+   for the committer; in Valkey it waits for a sync, about 10 ms. Many
+   more connections have not been measured yet.
 4. **Diffs already cost what the change costs**, 9 µs for ten changes in
    10,000,000 records, which is the property the tree was chosen for.
 
