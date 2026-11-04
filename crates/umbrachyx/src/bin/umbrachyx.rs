@@ -10,7 +10,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::process::ExitCode;
 
 use umbrachyx::log::{Edit, FileStorage};
-use umbrachyx::server::Server;
+use umbrachyx::server::{MAX_CONNECTIONS, Server};
 use umbrachyx::store::{
     CommitId, Committer, Conflict, MAIN_BRANCH, Merged, Provenance, Reverted, Store, SystemClock,
     short,
@@ -32,7 +32,8 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   diff <from> <to>
   merge <into> <from> --who W --why Y [--approved-by A]
   revert <branch> <commit> --who W --why Y [--approved-by A]
-  serve <branch> [--port P]   Redis protocol (GET, SET, PING) on 127.0.0.1
+  serve <branch> [--port P] [--max-connections N]
+                              Redis protocol (GET, SET, PING) on 127.0.0.1
 
 A commit is named by a branch (its latest commit), <branch>~N (N back on
 its own line), or the start of its id.";
@@ -80,7 +81,7 @@ impl Args {
                 .clone();
             match name {
                 "remove" => parsed.removes.push(value),
-                "who" | "why" | "approved-by" | "from" | "limit" | "port" => {
+                "who" | "why" | "approved-by" | "from" | "limit" | "port" | "max-connections" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -278,9 +279,18 @@ fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
             .map_err(|_| format!("--port {port:?} is not a port"))?,
         None => DEFAULT_PORT,
     };
+    let max_connections = match args.options.get("max-connections") {
+        Some(max) => max
+            .parse()
+            .ok()
+            .filter(|&max: &usize| max > 0)
+            .ok_or_else(|| format!("--max-connections {max:?} is not a positive number"))?,
+        None => MAX_CONNECTIONS,
+    };
     let committer = Committer::start(store);
-    let server =
-        Server::new(branch, committer.writer(), committer.reader()).map_err(|e| e.to_string())?;
+    let server = Server::new(branch, committer.writer(), committer.reader())
+        .map_err(|e| e.to_string())?
+        .max_connections(max_connections);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
     eprintln!("serving {branch} on 127.0.0.1:{port}");
     server.serve(listener)
