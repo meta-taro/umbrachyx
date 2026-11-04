@@ -154,9 +154,36 @@ This is where a thread per connection shows. At 5,000 clients Umbrachyx's
 median matches Valkey's but its p99 is about five times Valkey's: 5,000
 threads take turns on ten cores. At 10,000 it could not serve at all.
 macOS allows a process 8,192 threads, so 1,810 connections got no thread
-and were closed, and the benchmark stopped. Serving many connections needs
-connections that do not each hold a thread; until then, 1,000 or so is
-what Umbrachyx serves well.
+and were closed, and the benchmark stopped. On macOS, 1,000 or so is what
+Umbrachyx serves well. Linux does not have that limit; see below.
+
+### On a Linux CI runner
+
+The same scripts run in CI on a GitHub-hosted Linux runner (Ubuntu 24.04,
+four virtual CPUs) for every change. That machine is shared with other
+work, so its numbers compare runs of the job rather than serve as the
+tables above; two runs of 2026-11-04 are kept in
+[`bench/results/2026-11-04-linux-ci/`](../bench/results/2026-11-04-linux-ci/).
+Ranges below span both runs; the connection rows are from the second.
+
+| | Umbrachyx | Valkey |
+|---|---|---|
+| `GET`, one client, p50 / p99 (ms) | 0.031 / 0.055–0.063 | 0.031 / 0.055 |
+| `GET` while 50 clients `SET`, p50 / p99 (ms) | 0.031–0.039 / 0.087–0.095 | 0.78–0.86 / 1.53–6.39 |
+| `GET`s a second, 50 clients | 66,138–73,314 | 92,937–127,389 |
+| Durable `SET`s a second, one client | 2,228–2,912 | 3,139–4,351 |
+| `GET`, 1,000 connections: a second, p99 (ms) | 94,020, 10.5 | 99,721, 18.4 |
+| `GET`, 5,000 connections: a second, p99 (ms) | 75,199, 62.2 | 62,112, 147 |
+| `GET`, 10,000 connections: a second, p99 (ms) | 75,838, 133 | 68,157, 279 |
+
+A sync costs about 0.3 ms here against 4 ms on the laptop, so a Valkey
+`GET` that waits for the writes around it waits less, and Umbrachyx's lead
+there is 20 to 28 times rather than 650. Linux let Umbrachyx start a
+thread for each of 10,000 connections, and its slowest reads stayed at
+about half of Valkey's at every size: the limit on macOS was the
+platform's thread cap, not one thread per connection as such. With one
+durable writer and with 50 clients reading, Valkey is ahead on this
+machine; why was not investigated yet.
 
 ### In process
 
@@ -226,10 +253,11 @@ it landed in every time: 8.6 s for 1,000,000 records and 103 s for
    servers, so the tree is not what limits a read. How connections are
    served is. While others write durably, a read in Umbrachyx still costs
    the round trip, because it reads a published view instead of waiting
-   for the committer; in Valkey it waits for a sync, about 10 ms. With
-   thousands of connections the thread per connection is the limit: at
-   5,000 the slowest reads are five times Valkey's, and 10,000 cannot be
-   served on macOS.
+   for the committer; in Valkey it waits for a sync, about 10 ms on the
+   laptop and under 1 ms on the Linux runner. A thread per connection
+   holds up on Linux, where 10,000 connections had slowest reads at about
+   half of Valkey's; on macOS, at 5,000 the slowest reads are five times
+   Valkey's, and the thread cap rules out 10,000.
 4. **Diffs already cost what the change costs**, 9 µs for ten changes in
    10,000,000 records, which is the property the tree was chosen for.
 

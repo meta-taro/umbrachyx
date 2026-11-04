@@ -85,8 +85,8 @@ jobs:
     # Every change is measured against Valkey on the same runner, so a
     # slowdown shows up in the change that caused it. A shared virtual
     # machine is noisy: these numbers are for comparing runs of this job,
-    # not for the tables in docs/comparison.md, which come from one quiet
-    # machine. The raw output is kept as an artifact of each run.
+    # and docs/comparison.md keeps them apart from the laptop's tables.
+    # The raw output is kept as an artifact of each run.
     name: bench (ubuntu-latest)
     runs-on: ubuntu-latest
     env:
