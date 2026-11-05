@@ -13,6 +13,7 @@ without an entry here is not adopted.
 | `biscuit-auth` | Capability tokens: what a caller may read or write, carried by the caller | Tokens can be narrowed offline by whoever holds them and never widened, and are verified with a public key, so nothing secret sits on the side that checks them. Writing an authorization scheme ourselves would need its own security review. Apache-2.0, maintained under the Eclipse Foundation. Default features are off; `datalog-macro` stays on because 6.0.0 does not build without it |
 | `serde_json` | Reading and writing the JSON-RPC messages of the MCP session | The de facto JSON crate for Rust, MIT OR Apache-2.0, maintained by the serde authors. It was already built as a dependency of `biscuit-auth`, so it adds no crate. Used through `Value` only, without derive macros. The MCP protocol itself is written here rather than taken from the official Rust SDK, which runs on an async runtime the server does not use; the part served is four methods |
 | `getrandom` | The random bytes of each subject's encryption key | The operating system's random source, nothing else: the smallest way to get key material. MIT OR Apache-2.0, maintained by the rust-random project, and already built as a dependency of `biscuit-auth` at the same version, so it adds no crate |
+| `aes-siv` | Encrypting each value under its subject's key, so that destroying the key erases the subject | Deterministic authenticated encryption (RFC 5297) from RustCrypto, Apache-2.0 OR MIT, maintained with the rest of its AEADs. Deterministic is what the store needs: equal values must stay equal once encrypted for the tree, diffs and merges to work unchanged, and AES-SIV is built to be used that way rather than with a nonce we would have to invent. Default features are off; the random source is `getrandom`, already a dependency. It brings its RustCrypto building blocks (`aes`, `cmac`, `ctr` and their traits) |
 
 ## The log
 
@@ -449,13 +450,41 @@ checker to hold the shared secret that mints tokens.
 
 ## Erasing a subject
 
-Values are to be encrypted under a key per subject, so that destroying the
-key erases the subject while the history keeps its shape (see
-[`concept.md`](concept.md)). The keys are in place; encrypting values with
-them comes next.
+Values are encrypted under a key per subject, so that destroying the key
+erases the subject while the history keeps its shape (see
+[`concept.md`](concept.md)).
+
+- **Values are sealed where they enter the store and opened where they
+  leave it.** The log, the tree, history, diffs and merges hold only
+  sealed values; a merge or an undo copies them without opening them.
+  The command-line tool, the Redis server and the MCP session all open
+  the store with its key file, `<log>.keys`. Keys stay in the clear,
+  since they are how history and tokens find data; values do not.
+- **Sealing is deterministic** (AES-SIV): one value under one key always
+  seals to the same bytes, so equal values stay equal and the tree,
+  diffs, three-way merges and undo work as before. What this gives away
+  is whether a key's value is the same as at some other point, which the
+  history's shape already shows. The key's bytes are sealed in as
+  associated data, so a sealed value cannot be moved under another key.
+- **A sealed value names its key by fingerprint**, so opening the store
+  checks that every key the log needs is in the key file before anything
+  is written, and refuses the log otherwise. A log written without
+  encryption is refused too: a store holds sealed values only.
 
 - **A subject is the first two parts of a key**: `player/42/gems` belongs
-  to `player/42`. A key with one part is its own subject.
+  to `player/42`. A key with one part, such as `config`, names no subject
+  and shares one key for the whole database, so it cannot be erased on its
+  own. Giving each such key a key of its own would cost a sync of the key
+  file for every new key.
+- **Opening every value costs reads about a fifth of their throughput**
+  with 50 clients on the laptop, and a durable write about a tenth
+  ([`bench/results/2026-11-05-sealed`](../bench/results/2026-11-05-sealed/)).
+  Each read expands its subject's AES key again; keeping expanded keys is
+  the first thing to try.
+- **The first value of a new subject costs a sync of the key file**, on
+  top of the log's, made on the committer's thread. Writes that create
+  many subjects at once pay it once each; batching them is left until it
+  shows in a measurement.
 - **The keys live in their own file next to the log** (`<log>.keys`),
   because the log is append-only and keeps every byte. The key file is the
   one place where something is destroyed: erasing writes it again without

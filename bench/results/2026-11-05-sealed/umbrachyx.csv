@@ -1,0 +1,6 @@
+"persistence","test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"every commit synced","PING_MBULK","88261.25","0.010","0.000","0.015","0.015","0.023","0.239"
+"every commit synced","SET","216.59","4.602","3.208","4.423","5.639","7.503","84.799"
+"every commit synced","GET","58309.04","0.014","0.008","0.015","0.023","0.031","0.135"
+"every commit synced, 50 clients","GET","189753.31","0.147","0.064","0.135","0.215","0.375","0.903"
+"every commit synced, GET while 50 clients SET","GET","72046.11","0.013","0.000","0.015","0.015","0.039","0.191"

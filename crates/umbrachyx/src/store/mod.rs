@@ -14,18 +14,26 @@
 //! its parent and reading the key there gives the change before, so the
 //! history of a key costs the number of times it changed, not the number of
 //! commits.
+//!
+//! A store opened with a key file seals every value under its subject's key
+//! as it comes in and opens it as it goes out (see `seal`), so the log and
+//! the tree hold no value in the clear.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::keys::{KeyError, KeyStorage, Keys};
 use crate::log::{Branch, Commit, Edit, Log, LogError, Record, Storage};
 use crate::tree::{Bytes, Tree};
 
 mod committer;
 mod merge;
+mod seal;
 mod view;
+
+use seal::{Ring, Sealer};
 
 pub use committer::{Committer, Pending, Reader, Writer};
 pub use merge::{Conflict, Merged, Reverted, ValueChange};
@@ -119,6 +127,12 @@ pub enum StoreError {
     Inconsistent(String),
     /// The committer stopped before the commit was written.
     Stopped,
+    Keys(KeyError),
+    /// The log has values sealed under this many keys the key file does
+    /// not hold. Nothing was written.
+    MissingKeys(usize),
+    /// Opened with a key file, the log holds a value that is not sealed.
+    NotSealed,
 }
 
 impl fmt::Display for StoreError {
@@ -134,11 +148,23 @@ impl fmt::Display for StoreError {
             Self::BadBranchName => write!(f, "a branch name must be 1 to {MAX_BRANCH_NAME} bytes"),
             Self::Inconsistent(what) => write!(f, "the log cannot be applied: {what}"),
             Self::Stopped => write!(f, "the committer has stopped; nothing was written"),
+            Self::Keys(error) => write!(f, "{error}"),
+            Self::MissingKeys(count) => write!(
+                f,
+                "the key file lacks {count} key(s) the log needs; nothing was written"
+            ),
+            Self::NotSealed => write!(f, "the log holds values written without encryption"),
         }
     }
 }
 
 impl std::error::Error for StoreError {}
+
+impl From<KeyError> for StoreError {
+    fn from(error: KeyError) -> Self {
+        Self::Keys(error)
+    }
+}
 
 impl From<LogError> for StoreError {
     fn from(error: LogError) -> Self {
@@ -160,12 +186,32 @@ pub struct Store<S: Storage, C: Clock> {
     commits: HashMap<CommitId, Arc<CommitInfo>>,
     /// The time of the latest commit, so times never go backwards.
     last_time: u64,
+    /// Present when values are encrypted.
+    sealer: Option<Sealer>,
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
-    /// Opens the log and replays every record.
+    /// Opens the log and replays every record. Values are kept as given.
     pub fn open(storage: S, clock: C) -> Result<Self, StoreError> {
+        Self::open_with(storage, clock, None)
+    }
+
+    /// Opens the log with its key file, and encrypts every value from here
+    /// on. Refuses a log whose values are not all sealed under keys the key
+    /// file holds, before anything is written.
+    pub fn open_sealed(
+        storage: S,
+        keys: Keys<Box<dyn KeyStorage + Send>>,
+        clock: C,
+    ) -> Result<Self, StoreError> {
+        Self::open_with(storage, clock, Some(Sealer::new(keys)))
+    }
+
+    fn open_with(storage: S, clock: C, sealer: Option<Sealer>) -> Result<Self, StoreError> {
         let (log, records) = Log::open(storage)?;
+        if let Some(sealer) = &sealer {
+            check_sealed(&records, &sealer.ring())?;
+        }
         let mut store = Self {
             log,
             clock,
@@ -178,6 +224,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             )]),
             commits: HashMap::new(),
             last_time: 0,
+            sealer,
         };
         for record in &records {
             store
@@ -196,6 +243,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         edits: Vec<Edit>,
         provenance: Provenance,
     ) -> Result<CommitId, StoreError> {
+        let edits = self.seal(edits)?;
         self.commit_with(branch, edits, provenance, None)
     }
 
@@ -211,7 +259,8 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let time = self.next_time();
         let mut commits = Vec::with_capacity(requests.len());
         let mut refusals = Vec::with_capacity(requests.len());
-        for request in requests {
+        for mut request in requests {
+            request.edits = self.seal(request.edits)?;
             refusals.push(self.require_branch(&request.branch).err());
             if refusals.last().is_some_and(Option::is_none) {
                 commits.push(new_commit(request, time, None));
@@ -243,6 +292,32 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let commit = new_commit(request, self.next_time(), merged);
         let ids = self.write(vec![commit])?;
         Ok(ids[0])
+    }
+
+    /// Seals the values of edits coming in, if values are encrypted.
+    /// Merges and undo copy values already sealed and do not come here.
+    fn seal(&mut self, edits: Vec<Edit>) -> Result<Vec<Edit>, StoreError> {
+        let Some(sealer) = &mut self.sealer else {
+            return Ok(edits);
+        };
+        edits
+            .into_iter()
+            .map(|edit| {
+                let value = match edit.value {
+                    Some(value) => Some(sealer.seal(&edit.key, &value)?),
+                    None => None,
+                };
+                Ok(Edit {
+                    key: edit.key,
+                    value,
+                })
+            })
+            .collect()
+    }
+
+    /// Opens a value going out, if values are encrypted.
+    fn reveal(&self, key: &[u8], value: Option<Bytes>) -> Option<Bytes> {
+        reveal(self.sealer.as_ref().map(Sealer::ring).as_ref(), key, value)
     }
 
     /// Never earlier than a time already recorded.
@@ -290,17 +365,24 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 .iter()
                 .map(|(name, head)| (name.clone(), head.state.clone()))
                 .collect(),
+            self.sealer.as_ref().map(Sealer::ring),
         )
     }
 
     /// The value of `key` as `commit` left it.
     pub fn get_at(&self, commit: &CommitId, key: &[u8]) -> Option<Bytes> {
-        decode_cell(self.commits.get(commit)?.state.get(key)?).value
+        let value = decode_cell(self.commits.get(commit)?.state.get(key)?).value;
+        self.reveal(key, value)
     }
 
     /// The cell of `key` on `branch`: its value, or the removal, and the
     /// commit that made it. `None` if the key was never written there.
     pub fn cell(&self, branch: &str, key: &[u8]) -> Option<Cell> {
+        self.raw_cell(branch, key)
+            .map(|cell| self.revealed(key, cell))
+    }
+
+    fn raw_cell(&self, branch: &str, key: &[u8]) -> Option<Cell> {
         self.branches
             .get(branch)?
             .state
@@ -308,10 +390,17 @@ impl<S: Storage, C: Clock> Store<S, C> {
             .map(|bytes| decode_cell(bytes))
     }
 
+    fn revealed(&self, key: &[u8], cell: Cell) -> Cell {
+        Cell {
+            value: self.reveal(key, cell.value),
+            changed_by: cell.changed_by,
+        }
+    }
+
     /// Every change to `key` that `branch` can see, newest first.
     pub fn history(&self, branch: &str, key: &[u8]) -> Vec<Cell> {
         let mut history = Vec::new();
-        let mut cell = self.cell(branch, key);
+        let mut cell = self.raw_cell(branch, key);
         while let Some(current) = cell {
             let parent = self
                 .commits
@@ -321,7 +410,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             cell = parent
                 .and_then(|parent| parent.state.get(key))
                 .map(|bytes| decode_cell(bytes));
-            history.push(current);
+            history.push(self.revealed(key, current));
         }
         history
     }
@@ -331,14 +420,14 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let Some(head) = self.branches.get(branch) else {
             return Vec::new();
         };
-        live_entries(&head.state)
+        self.live_entries(&head.state)
     }
 
     /// Every live key and value as `commit` left it, in key order.
     pub fn entries_at(&self, commit: &CommitId) -> Vec<(Bytes, Bytes)> {
         self.commits
             .get(commit)
-            .map(|info| live_entries(&info.state))
+            .map(|info| self.live_entries(&info.state))
             .unwrap_or_default()
     }
 
@@ -467,6 +556,16 @@ impl<S: Storage, C: Clock> Store<S, C> {
         Ok(id)
     }
 
+    fn live_entries(&self, state: &Tree) -> Vec<(Bytes, Bytes)> {
+        state
+            .iter()
+            .filter_map(|(key, bytes)| {
+                let value = self.reveal(key, decode_cell(bytes).value)?;
+                Some((key.clone(), value))
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn storage_mut(&mut self) -> &mut S {
         self.log.storage_mut()
@@ -576,9 +675,41 @@ fn hex(id: &CommitId) -> String {
     id.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn live_entries(state: &Tree) -> Vec<(Bytes, Bytes)> {
-    state
-        .iter()
-        .filter_map(|(key, bytes)| Some((key.clone(), decode_cell(bytes).value?)))
-        .collect()
+/// Opens `value` for `key` with the keys in `ring`, or passes it through
+/// when values are not encrypted. A value whose key is gone reads as
+/// absent.
+fn reveal(ring: Option<&Ring>, key: &[u8], value: Option<Bytes>) -> Option<Bytes> {
+    match ring {
+        None => value,
+        Some(ring) => seal::open(ring, key, &value?),
+    }
+}
+
+/// Every value in the log must be sealed under a key the key file holds.
+/// Checked before anything is written, since a write could cut a key file
+/// that only looks torn.
+fn check_sealed(records: &[Record], ring: &Ring) -> Result<(), StoreError> {
+    let ring = ring
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut missing = HashSet::new();
+    let commits = records.iter().flat_map(|record| match record {
+        Record::Branch(_) => &[][..],
+        Record::Commit(commit) => std::slice::from_ref(commit),
+        Record::Group(commits) => commits.as_slice(),
+    });
+    for value in commits
+        .flat_map(|c| &c.changes)
+        .filter_map(|e| e.value.as_ref())
+    {
+        let fingerprint = seal::key_fingerprint(value).ok_or(StoreError::NotSealed)?;
+        if !ring.contains_key(&fingerprint) {
+            missing.insert(fingerprint);
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(StoreError::MissingKeys(missing.len()))
+    }
 }

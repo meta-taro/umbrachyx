@@ -52,6 +52,21 @@ pub trait KeyStorage {
     fn replace(&mut self, bytes: &[u8]) -> io::Result<()>;
 }
 
+/// So a store can hold a key file without naming its type.
+impl KeyStorage for Box<dyn KeyStorage + Send> {
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        (**self).read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        (**self).append(bytes)
+    }
+
+    fn replace(&mut self, bytes: &[u8]) -> io::Result<()> {
+        (**self).replace(bytes)
+    }
+}
+
 /// A key file next to the log. Only the owner can read it on Unix.
 #[derive(Debug)]
 pub struct FileKeyStorage {
@@ -178,6 +193,11 @@ impl<S: KeyStorage> Keys<S> {
 
     pub fn get(&self, subject: &[u8]) -> Option<&Key> {
         self.keys.get(subject)
+    }
+
+    /// Every key, in no particular order.
+    pub fn all(&self) -> impl Iterator<Item = &Key> {
+        self.keys.values()
     }
 
     pub fn by_fingerprint(&self, fingerprint: &Fingerprint) -> Option<&Key> {

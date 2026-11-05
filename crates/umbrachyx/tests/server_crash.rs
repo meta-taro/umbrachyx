@@ -3,7 +3,7 @@
 //!
 //! Each round starts `umbrachyx serve`, lets clients write, kills the server
 //! with SIGKILL (TerminateProcess on Windows) at a pseudo-random moment, and
-//! reopens the log. Half the clients send one SET at a time; the other half
+//! reopens the log with its key file, as the server does. Half the clients send one SET at a time; the other half
 //! pipeline several, so writes that share a sync are cut too. A client keeps
 //! a write only once it has read the `+OK` for it.
 //!
@@ -24,6 +24,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
 use umbrachyx::log::FileStorage;
 use umbrachyx::store::{MAIN_BRANCH, Store, SystemClock};
 use umbrachyx::tree::Bytes;
@@ -222,7 +223,14 @@ fn kill_rounds(name: &str, rounds: u32) {
         }
 
         let storage = FileStorage::open(&dir.log()).expect("opens storage");
-        let store = Store::open(storage, SystemClock).unwrap_or_else(|e| {
+        let mut keys_path = dir.log().into_os_string();
+        keys_path.push(".keys");
+        let key_storage: Box<dyn KeyStorage + Send> =
+            Box::new(FileKeyStorage::new(Path::new(&keys_path)));
+        let keys = Keys::open(key_storage).unwrap_or_else(|e| {
+            panic!("round {round} (seed {SEED:#x}): the key file fails to open: {e}")
+        });
+        let store = Store::open_sealed(storage, keys, SystemClock).unwrap_or_else(|e| {
             panic!("round {round} (seed {SEED:#x}): the store fails to open: {e}")
         });
         for (key, value) in &acknowledged {

@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+aes-siv = { version = "0.8.0", default-features = false, features = ["alloc"] }
 biscuit-auth = { version = "6.0.0", default-features = false, features = ["datalog-macro"] }
 blake3 = "1.8.7"
 crc32fast = "1.5.4"

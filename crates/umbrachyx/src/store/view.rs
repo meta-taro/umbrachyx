@@ -6,17 +6,21 @@
 
 use std::collections::BTreeMap;
 
-use super::decode_cell;
+use super::seal::Ring;
+use super::{decode_cell, reveal};
 use crate::tree::{Bytes, Tree};
 
 #[derive(Debug, Clone)]
 pub struct View {
     states: BTreeMap<String, Tree>,
+    /// The store's keys when values are encrypted. Shared, not copied: a
+    /// subject erased after the view was taken is unreadable through it too.
+    ring: Option<Ring>,
 }
 
 impl View {
-    pub(super) fn new(states: BTreeMap<String, Tree>) -> Self {
-        Self { states }
+    pub(super) fn new(states: BTreeMap<String, Tree>, ring: Option<Ring>) -> Self {
+        Self { states, ring }
     }
 
     pub fn has_branch(&self, branch: &str) -> bool {
@@ -25,6 +29,7 @@ impl View {
 
     /// The live value of `key` on `branch` at this moment.
     pub fn get(&self, branch: &str, key: &[u8]) -> Option<Bytes> {
-        decode_cell(self.states.get(branch)?.get(key)?).value
+        let value = decode_cell(self.states.get(branch)?.get(key)?).value;
+        reveal(self.ring.as_ref(), key, value)
     }
 }

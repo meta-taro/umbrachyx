@@ -58,7 +58,35 @@ impl<S: Storage, C: Clock> Store<S, C> {
         from: Option<&CommitId>,
         to: Option<&CommitId>,
     ) -> Result<Vec<ValueChange>, StoreError> {
+        Ok(self
+            .changes(from, to)?
+            .into_iter()
+            .map(|change| ValueChange {
+                before: self.reveal(&change.key, change.before),
+                after: self.reveal(&change.key, change.after),
+                key: change.key,
+            })
+            .collect())
+    }
+
+    /// The diff as stored: sealed values stay sealed, so merges and undo
+    /// compare and copy them without opening them.
+    fn changes(
+        &self,
+        from: Option<&CommitId>,
+        to: Option<&CommitId>,
+    ) -> Result<Vec<ValueChange>, StoreError> {
         Ok(value_changes(&self.state_at(from)?, &self.state_at(to)?))
+    }
+
+    /// A conflict as the caller reads it, values opened.
+    fn revealed_conflict(&self, conflict: Conflict) -> Conflict {
+        Conflict {
+            base: self.reveal(&conflict.key, conflict.base),
+            ours: self.reveal(&conflict.key, conflict.ours),
+            theirs: self.reveal(&conflict.key, conflict.theirs),
+            key: conflict.key,
+        }
     }
 
     /// Brings into `into` what `from` changed since they last shared a
@@ -81,13 +109,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
         }
         let base = ours.and_then(|ours| self.merge_base(ours, theirs));
         let ours_changed: BTreeMap<Bytes, Option<Bytes>> = self
-            .diff(base.as_ref(), ours.as_ref())?
+            .changes(base.as_ref(), ours.as_ref())?
             .into_iter()
             .map(|change| (change.key, change.after))
             .collect();
         let mut edits = Vec::new();
         let mut conflicts = Vec::new();
-        for change in self.diff(base.as_ref(), Some(&theirs))? {
+        for change in self.changes(base.as_ref(), Some(&theirs))? {
             match ours_changed.get(&change.key) {
                 None => edits.push(edit_to(&change.key, change.after.as_ref())),
                 Some(ours) if *ours == change.after => {}
@@ -100,6 +128,10 @@ impl<S: Storage, C: Clock> Store<S, C> {
             }
         }
         if !conflicts.is_empty() {
+            let conflicts = conflicts
+                .into_iter()
+                .map(|c| self.revealed_conflict(c))
+                .collect();
             return Ok(Merged::Conflicts(conflicts));
         }
         let id = self.commit_with(into, edits, provenance, Some(theirs))?;
@@ -129,7 +161,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let current = &self.branches[branch].state;
         let mut edits = Vec::new();
         let mut conflicts = Vec::new();
-        for change in self.diff(parent.as_ref(), Some(commit))? {
+        for change in self.changes(parent.as_ref(), Some(commit))? {
             let now = live_value(current, &change.key);
             if now == change.after {
                 edits.push(edit_to(&change.key, change.before.as_ref()));
@@ -143,6 +175,10 @@ impl<S: Storage, C: Clock> Store<S, C> {
             }
         }
         if !conflicts.is_empty() {
+            let conflicts = conflicts
+                .into_iter()
+                .map(|c| self.revealed_conflict(c))
+                .collect();
             return Ok(Reverted::Conflicts(conflicts));
         }
         let id = self.commit_with(branch, edits, provenance, None)?;

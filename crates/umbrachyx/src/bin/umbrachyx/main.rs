@@ -3,13 +3,15 @@
 //! Redis protocol. Also makes the root key and the capability tokens that
 //! agents carry.
 //!
-//! The log file is named by `UMBRACHYX_DB`. Exit status is 0 on success, 1
+//! The log file is named by `UMBRACHYX_DB`. Values are encrypted under a key
+//! per subject, kept in the file next to it with `.keys` added to its name. Exit status is 0 on success, 1
 //! when a merge or undo stopped on conflicts, and 2 on any other error.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, TcpListener};
 use std::process::ExitCode;
 
+use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
 use umbrachyx::log::{Edit, FileStorage};
 use umbrachyx::server::{MAX_CONNECTIONS, Server};
 use umbrachyx::store::{
@@ -25,7 +27,8 @@ const DEFAULT_DB: &str = "umbrachyx.log";
 /// One past Redis's own, so both can run on one machine.
 const DEFAULT_PORT: u16 = 6380;
 const USAGE: &str = "\
-usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log)
+usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log;
+                                  its keys: the same name with .keys added)
 
   commit <branch> [key=value]... [--remove key]... --who W --why Y [--approved-by A]
   get <branch> <key>
@@ -140,7 +143,11 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     }
     let path = std::env::var(DB_ENV).unwrap_or_else(|_| DEFAULT_DB.to_owned());
     let storage = FileStorage::open(path.as_ref()).map_err(|e| format!("{path}: {e}"))?;
-    let mut store = Store::open(storage, SystemClock).map_err(|e| format!("{path}: {e}"))?;
+    let keys_path = format!("{path}.keys");
+    let key_storage: Box<dyn KeyStorage + Send> = Box::new(FileKeyStorage::new(keys_path.as_ref()));
+    let keys = Keys::open(key_storage).map_err(|e| format!("{keys_path}: {e}"))?;
+    let mut store =
+        Store::open_sealed(storage, keys, SystemClock).map_err(|e| format!("{path}: {e}"))?;
     match command.as_str() {
         "commit" => commit(&mut store, &args),
         "get" => get(&store, &args),
