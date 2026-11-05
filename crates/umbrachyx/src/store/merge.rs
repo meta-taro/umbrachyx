@@ -20,6 +20,9 @@ pub struct ValueChange {
     pub key: Bytes,
     pub before: Option<Bytes>,
     pub after: Option<Bytes>,
+    /// A side had a value whose subject has since been erased; it reads as
+    /// `None`.
+    pub erased: bool,
 }
 
 /// A key the two sides disagree on.
@@ -61,10 +64,16 @@ impl<S: Storage, C: Clock> Store<S, C> {
         Ok(self
             .changes(from, to)?
             .into_iter()
-            .map(|change| ValueChange {
-                before: self.reveal(&change.key, change.before),
-                after: self.reveal(&change.key, change.after),
-                key: change.key,
+            .map(|change| {
+                let had_values = (change.before.is_some(), change.after.is_some());
+                let before = self.reveal(&change.key, change.before);
+                let after = self.reveal(&change.key, change.after);
+                ValueChange {
+                    erased: (had_values.0 && before.is_none()) || (had_values.1 && after.is_none()),
+                    key: change.key,
+                    before,
+                    after,
+                }
             })
             .collect())
     }
@@ -254,7 +263,12 @@ fn value_changes(from: &Tree, to: &Tree) -> Vec<ValueChange> {
                     (key, decode_cell(&old).value, decode_cell(&new).value)
                 }
             };
-            (before != after).then_some(ValueChange { key, before, after })
+            (before != after).then_some(ValueChange {
+                key,
+                before,
+                after,
+                erased: false,
+            })
         })
         .collect()
 }

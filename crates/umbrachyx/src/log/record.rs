@@ -17,6 +17,8 @@ pub enum Record {
     /// One frame, so a crash keeps all of them or none: the log has at most
     /// one frame in flight, which is what tells a torn tail from damage.
     Group(Vec<Commit>),
+    /// A subject's key was destroyed. Holds no value.
+    Erase(Erase),
 }
 
 /// Changes to one branch, made together, with who made them, why, who
@@ -33,6 +35,20 @@ pub struct Commit {
     /// For a merge, the head of the branch merged in: the commit's second
     /// parent. The first is the branch's previous head.
     pub merged: Option<[u8; 32]>,
+}
+
+/// A subject erased: which one, which of its keys, who did it, why, who
+/// approved it and when. Written before the key is destroyed, so a crash in
+/// between is finished when the log is next opened.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Erase {
+    pub subject: Vec<u8>,
+    pub key_fingerprint: [u8; 8],
+    pub who: String,
+    pub why: String,
+    pub approved_by: Option<String>,
+    /// Microseconds since the Unix epoch, from the store's clock.
+    pub time: u64,
 }
 
 /// A new branch, starting where `from` is now.
@@ -72,6 +88,7 @@ const FORMAT_VERSION: u8 = 3;
 const KIND_COMMIT: u8 = 1;
 const KIND_BRANCH: u8 = 2;
 const KIND_GROUP: u8 = 3;
+const KIND_ERASE: u8 = 4;
 /// The version and kind bytes that start every payload.
 const KIND_PREFIX: usize = 2;
 /// The bytes in front of a group's commits: the version, kind and count.
@@ -108,6 +125,19 @@ fn encode_payload(record: &Record) -> Result<Vec<u8>, LogError> {
             for commit in commits {
                 push_commit(&mut payload, commit)?;
             }
+            payload
+        }
+        Record::Erase(erase) => {
+            let mut payload = vec![FORMAT_VERSION, KIND_ERASE];
+            push_field(&mut payload, &erase.subject);
+            push_field(&mut payload, &erase.key_fingerprint);
+            push_field(&mut payload, erase.who.as_bytes());
+            push_field(&mut payload, erase.why.as_bytes());
+            push_optional(
+                &mut payload,
+                erase.approved_by.as_deref().map(str::as_bytes),
+            );
+            payload.extend_from_slice(&erase.time.to_le_bytes());
             payload
         }
     };
@@ -285,9 +315,30 @@ fn decode_payload(payload: &[u8]) -> Option<Record> {
             from: cursor.text()?,
         }),
         KIND_GROUP => Record::Group(decode_group(&mut cursor)?),
+        KIND_ERASE => Record::Erase(decode_erase(&mut cursor)?),
         _ => return None,
     };
     cursor.rest.is_empty().then_some(record)
+}
+
+fn decode_erase(cursor: &mut Cursor<'_>) -> Option<Erase> {
+    let subject = cursor.field()?.to_vec();
+    let key_fingerprint = <[u8; 8]>::try_from(cursor.field()?).ok()?;
+    let who = cursor.text()?;
+    let why = cursor.text()?;
+    let approved_by = match cursor.optional()? {
+        None => None,
+        Some(bytes) => Some(bytes_to_text(bytes)?),
+    };
+    let time = cursor.u64()?;
+    Some(Erase {
+        subject,
+        key_fingerprint,
+        who,
+        why,
+        approved_by,
+        time,
+    })
 }
 
 fn decode_group(cursor: &mut Cursor<'_>) -> Option<Vec<Commit>> {
@@ -587,6 +638,28 @@ mod tests {
                 from: "main".to_owned(),
             }),
             group(&["e"]),
+        ];
+
+        assert_eq!(scan(&frames(&records)).expect("scans").records, records);
+    }
+
+    #[test]
+    fn erase_records_round_trip_with_and_without_approver() {
+        let erase = |approved_by: Option<&str>| {
+            Record::Erase(Erase {
+                subject: b"player/42".to_vec(),
+                key_fingerprint: [1, 2, 3, 4, 5, 6, 7, 255],
+                who: "ops:privacy".to_owned(),
+                why: "account deletion — 退会".to_owned(),
+                approved_by: approved_by.map(str::to_owned),
+                time: 1_800_000_000_000_001,
+            })
+        };
+        let records = vec![
+            record("a", None),
+            erase(Some("ops:lead")),
+            erase(None),
+            group(&["b"]),
         ];
 
         assert_eq!(scan(&frames(&records)).expect("scans").records, records);

@@ -148,6 +148,7 @@ fn history_diff_and_old_values_read_as_written() {
             key: b"player/42/gems"[..].into(),
             before: Some(b"120"[..].into()),
             after: Some(b"95"[..].into()),
+            erased: false,
         }]
     );
     assert_eq!(old.as_deref(), Some("120"));

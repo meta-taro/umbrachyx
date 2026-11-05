@@ -1,6 +1,6 @@
-# Demo: four questions about a game's data
+# Demo: five questions about a game's data
 
-This walks through four questions that are hard to answer with most
+This walks through five questions that are hard to answer with most
 databases, using a small, made-up game: players with gems and items. Every
 command below is run by the test suite exactly as written (`tests/demo.rs`
 in the `umbrachyx` crate), so the output shown is what the current code
@@ -122,3 +122,38 @@ merged {id}
 $ umbrachyx get main player/7/gems
 530
 ```
+
+## 5. "Delete my account." Make that player's data unreadable for good.
+
+Every value is encrypted under a key for its subject: `player/42/gems`
+belongs to `player/42`. The keys live in a file next to the log
+(`demo.log.keys` here), and erasing a subject destroys its key. Its
+values, current and past, on every branch, can never be read again, while
+the history keeps its shape: which keys changed, when, by whom and why.
+
+```console
+$ umbrachyx erase player/42 --who ops:privacy --why "account deletion request 1207"
+erased player/42
+$ umbrachyx get main player/42/gems
+(erased)
+$ umbrachyx history main player/42/item/sword
+{time}  {id}  removed  by game:trade  "trade between players 42 and 7"
+{time}  {id}  erased  by agent:onboarding  "starter grant"
+```
+
+Other players are untouched, and a diff shows that player 42's gems
+changed without showing what they were. The erasure itself is recorded.
+
+```console
+$ umbrachyx get main player/7/gems
+530
+$ umbrachyx diff main~2 main
+~ player/42/gems: erased
+~ player/7/gems: 1030 -> 530
+$ umbrachyx erasures
+{time}  player/42  by ops:privacy  "account deletion request 1207"
+```
+
+Destroying the key removes it from the key file the database reads. It
+does not reach copies kept below the file system, such as blocks a
+solid-state disk has not reused yet, or backups of the key file.

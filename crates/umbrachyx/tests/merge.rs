@@ -97,7 +97,11 @@ fn a_diff_lists_changed_values_and_skips_rewrites() {
 
     let summary: Vec<_> = changes
         .iter()
-        .map(|ValueChange { key, before, after }| (key_text(key), text(before), text(after)))
+        .map(
+            |ValueChange {
+                 key, before, after, ..
+             }| (key_text(key), text(before), text(after)),
+        )
         .collect();
     assert_eq!(
         summary,

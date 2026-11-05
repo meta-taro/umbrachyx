@@ -200,6 +200,11 @@ impl<S: KeyStorage> Keys<S> {
         self.keys.values()
     }
 
+    /// The subject whose key has this fingerprint.
+    pub fn subject_of(&self, fingerprint: &Fingerprint) -> Option<&[u8]> {
+        self.by_fingerprint.get(fingerprint).map(Vec::as_slice)
+    }
+
     pub fn by_fingerprint(&self, fingerprint: &Fingerprint) -> Option<&Key> {
         self.by_fingerprint
             .get(fingerprint)

@@ -1,6 +1,6 @@
 //! Command-line access to a store: write commits, read values and their
-//! history, branch, diff, merge, undo a commit, and serve a branch over the
-//! Redis protocol. Also makes the root key and the capability tokens that
+//! history, branch, diff, merge, undo a commit, erase a subject, and serve a
+//! branch over the Redis protocol. Also makes the root key and the capability tokens that
 //! agents carry.
 //!
 //! The log file is named by `UMBRACHYX_DB`. Values are encrypted under a key
@@ -38,6 +38,9 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   diff <from> <to>
   merge <into> <from> --who W --why Y [--approved-by A]
   revert <branch> <commit> --who W --why Y [--approved-by A]
+  erase <subject> --who W --why Y [--approved-by A]
+                              destroys the key of a subject such as player/42
+  erasures                    every subject erased, with who and why
   serve <branch> [--port P] [--max-connections N]
                               Redis protocol (GET, SET, PING) on 127.0.0.1
   mcp --public-key K --token-file F
@@ -157,6 +160,8 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         "diff" => diff(&store, &args),
         "merge" => merge(&mut store, &args),
         "revert" => revert(&mut store, &args),
+        "erase" => erase(&mut store, &args),
+        "erasures" => erasures(&store, &args),
         "serve" => serve(store, &args),
         "mcp" => tokens::mcp(store, &args),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
@@ -194,7 +199,12 @@ fn commit(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
 fn get(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
     let [branch, key] = args.exactly()?;
     require_branch(store, branch)?;
-    println!("{}", shown(store.get(branch, key.as_bytes()).as_ref()));
+    let cell = store.cell(branch, key.as_bytes());
+    if cell.as_ref().is_some_and(|cell| cell.erased) {
+        println!("(erased)");
+    } else {
+        println!("{}", shown(cell.and_then(|cell| cell.value).as_ref()));
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -205,10 +215,11 @@ fn history(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
         let info = store
             .commit_info(&cell.changed_by)
             .ok_or("a cell names an unknown commit")?;
-        let value = cell
-            .value
-            .as_ref()
-            .map_or_else(|| "removed".to_owned(), |v| shown(Some(v)));
+        let value = match &cell.value {
+            _ if cell.erased => "erased".to_owned(),
+            None => "removed".to_owned(),
+            Some(value) => shown(Some(value)),
+        };
         println!(
             "{}  {}  {value}  by {}  {:?}{}",
             utc(info.time),
@@ -216,6 +227,36 @@ fn history(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
             info.provenance.who,
             info.provenance.why,
             approval(&info.provenance)
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Destroys a subject's key: its values, current and past, cannot be read
+/// again, and its history keeps its shape.
+fn erase(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
+    let [subject] = args.exactly()?;
+    let erased = store
+        .erase(subject.as_bytes(), args.provenance()?)
+        .map_err(|e| e.to_string())?;
+    if erased {
+        println!("erased {subject}");
+    } else {
+        println!("{subject} has no key; nothing was erased");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn erasures(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
+    let [] = args.exactly()?;
+    for erasure in store.erasures() {
+        println!(
+            "{}  {}  by {}  {:?}{}",
+            utc(erasure.time),
+            String::from_utf8_lossy(&erasure.subject),
+            erasure.provenance.who,
+            erasure.provenance.why,
+            approval(&erasure.provenance)
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -258,6 +299,10 @@ fn diff(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
         .map_err(|e| e.to_string())?;
     for change in changes {
         let key = String::from_utf8_lossy(&change.key);
+        if change.erased {
+            println!("~ {key}: erased");
+            continue;
+        }
         match (&change.before, &change.after) {
             (None, after) => println!("+ {key}: {}", shown(after.as_ref())),
             (before, None) => println!("- {key}: {}", shown(before.as_ref())),

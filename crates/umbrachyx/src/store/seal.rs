@@ -59,6 +59,31 @@ impl Sealer {
     }
 }
 
+impl Sealer {
+    pub(crate) fn fingerprint_of(&self, subject: &[u8]) -> Option<Fingerprint> {
+        self.keys.get(subject).map(fingerprint)
+    }
+
+    /// Takes the key out of the ring first, so nothing opens under it from
+    /// here on even if the key file cannot be written; the store finishes
+    /// the file when it next opens.
+    pub(crate) fn erase(&mut self, subject: &[u8], key: &Fingerprint) -> Result<(), KeyError> {
+        self.ring
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key);
+        self.keys.erase(subject).map(drop)
+    }
+
+    /// Destroys the key with this fingerprint if the key file still has it.
+    pub(crate) fn erase_fingerprint(&mut self, key: &Fingerprint) -> Result<(), KeyError> {
+        let Some(subject) = self.keys.subject_of(key).map(<[u8]>::to_vec) else {
+            return Ok(());
+        };
+        self.erase(&subject, key)
+    }
+}
+
 fn seal_with(subject_key: &Key, key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut cipher = Aes256Siv::new_from_slice(subject_key).expect("keys are KEY_LEN bytes");
     let sealed = cipher

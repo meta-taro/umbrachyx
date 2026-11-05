@@ -26,13 +26,14 @@ faster than light). The current value is the light. Its history is the shadow
 that is already there before the light arrives.
 
 > **Status: prototype.** A first single-node core exists so the design can be
-> tried: a durable log, a tree with branches, diffs and merges, a
-> command-line tool, a server for one branch that speaks enough of the
-> Redis protocol for existing clients, and an MCP session through which an
-> agent reads only what its capability token allows and writes only to its
-> own branch ([`docs/agents.md`](docs/agents.md) shows what a hijacked
-> agent cannot do). [`docs/demo.md`](docs/demo.md) walks through the first
-> four questions below with it. A first comparison with Valkey and Dolt,
+> tried: a durable log, a tree with branches, diffs and merges, values
+> encrypted per subject so that a subject can be erased, a command-line
+> tool, a server for one branch that speaks enough of the Redis protocol
+> for existing clients, and an MCP session through which an agent reads
+> only what its capability token allows and writes only to its own branch
+> ([`docs/agents.md`](docs/agents.md) shows what a hijacked agent cannot
+> do). [`docs/demo.md`](docs/demo.md) walks through all five questions
+> below with it. A first comparison with Valkey and Dolt,
 > and what it shows still needs work, is in
 > [`docs/comparison.md`](docs/comparison.md). No format is stable. Do not
 > build on it. The design starts at [`docs/concept.md`](docs/concept.md).

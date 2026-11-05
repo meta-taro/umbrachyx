@@ -24,8 +24,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::keys::{KeyError, KeyStorage, Keys};
-use crate::log::{Branch, Commit, Edit, Log, LogError, Record, Storage};
+use crate::keys::{Fingerprint, KeyError, KeyStorage, Keys};
+use crate::log::{Branch, Commit, Edit, Erase, Log, LogError, Record, Storage};
 use crate::tree::{Bytes, Tree};
 
 mod committer;
@@ -90,9 +90,19 @@ pub struct CommitRequest {
 /// A key's value at some commit, and the commit that last changed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
-    /// `None` when the change was a removal.
+    /// `None` when the change was a removal, or the value was erased.
     pub value: Option<Bytes>,
     pub changed_by: CommitId,
+    /// A value was written here, and its subject has since been erased.
+    pub erased: bool,
+}
+
+/// A subject erased, as the log records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Erasure {
+    pub subject: Vec<u8>,
+    pub provenance: Provenance,
+    pub time: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +143,8 @@ pub enum StoreError {
     MissingKeys(usize),
     /// Opened with a key file, the log holds a value that is not sealed.
     NotSealed,
+    /// Erasing needs encrypted values; the store was opened without keys.
+    NoKeys,
 }
 
 impl fmt::Display for StoreError {
@@ -154,6 +166,7 @@ impl fmt::Display for StoreError {
                 "the key file lacks {count} key(s) the log needs; nothing was written"
             ),
             Self::NotSealed => write!(f, "the log holds values written without encryption"),
+            Self::NoKeys => write!(f, "values are not encrypted, so nothing can be erased"),
         }
     }
 }
@@ -188,6 +201,7 @@ pub struct Store<S: Storage, C: Clock> {
     last_time: u64,
     /// Present when values are encrypted.
     sealer: Option<Sealer>,
+    erasures: Vec<Erasure>,
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
@@ -212,6 +226,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
         if let Some(sealer) = &sealer {
             check_sealed(&records, &sealer.ring())?;
         }
+        let erased: Vec<Fingerprint> = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Erase(erase) => Some(erase.key_fingerprint),
+                _ => None,
+            })
+            .collect();
         let mut store = Self {
             log,
             clock,
@@ -225,11 +246,20 @@ impl<S: Storage, C: Clock> Store<S, C> {
             commits: HashMap::new(),
             last_time: 0,
             sealer,
+            erasures: Vec::new(),
         };
         for record in &records {
             store
                 .apply(record)
                 .map_err(|e| StoreError::Inconsistent(e.to_string()))?;
+        }
+        // An erasure is logged before its key is destroyed; finish any a
+        // crash cut short. Only now, after the log checked out against the
+        // key file, is the key file written.
+        if let Some(sealer) = &mut store.sealer {
+            for fingerprint in &erased {
+                sealer.erase_fingerprint(fingerprint)?;
+            }
         }
         Ok(store)
     }
@@ -320,6 +350,38 @@ impl<S: Storage, C: Clock> Store<S, C> {
         reveal(self.sealer.as_ref().map(Sealer::ring).as_ref(), key, value)
     }
 
+    /// Destroys the subject's key, so none of its values, current or past,
+    /// on any branch, can be read again. The history keeps its shape: the
+    /// commits, who made them and why, and which keys they changed. The
+    /// erasure is logged first, with who did it and why, so a crash before
+    /// the key is destroyed is finished when the store next opens. Returns
+    /// whether the subject had a key.
+    pub fn erase(&mut self, subject: &[u8], provenance: Provenance) -> Result<bool, StoreError> {
+        let time = self.next_time();
+        let sealer = self.sealer.as_mut().ok_or(StoreError::NoKeys)?;
+        let Some(key_fingerprint) = sealer.fingerprint_of(subject) else {
+            return Ok(false);
+        };
+        let record = Record::Erase(Erase {
+            subject: subject.to_vec(),
+            key_fingerprint,
+            who: provenance.who,
+            why: provenance.why,
+            approved_by: provenance.approved_by,
+            time,
+        });
+        self.log.append(&record)?;
+        self.apply(&record)?;
+        let sealer = self.sealer.as_mut().ok_or(StoreError::NoKeys)?;
+        sealer.erase(subject, &key_fingerprint)?;
+        Ok(true)
+    }
+
+    /// Every subject erased, oldest first.
+    pub fn erasures(&self) -> &[Erasure] {
+        &self.erasures
+    }
+
     /// Never earlier than a time already recorded.
     fn next_time(&mut self) -> u64 {
         self.clock.now_micros().max(self.last_time)
@@ -391,8 +453,11 @@ impl<S: Storage, C: Clock> Store<S, C> {
     }
 
     fn revealed(&self, key: &[u8], cell: Cell) -> Cell {
+        let was_written = cell.value.is_some();
+        let value = self.reveal(key, cell.value);
         Cell {
-            value: self.reveal(key, cell.value),
+            erased: was_written && value.is_none(),
+            value,
             changed_by: cell.changed_by,
         }
     }
@@ -520,6 +585,19 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 Ok(Vec::new())
             }
             Record::Commit(commit) => Ok(vec![self.apply_commit(commit)?]),
+            Record::Erase(erase) => {
+                self.erasures.push(Erasure {
+                    subject: erase.subject.clone(),
+                    provenance: Provenance {
+                        who: erase.who.clone(),
+                        why: erase.why.clone(),
+                        approved_by: erase.approved_by.clone(),
+                    },
+                    time: erase.time,
+                });
+                self.last_time = self.last_time.max(erase.time);
+                Ok(Vec::new())
+            }
             Record::Group(commits) => commits
                 .iter()
                 .map(|commit| self.apply_commit(commit))
@@ -638,7 +716,11 @@ fn decode_cell(bytes: &[u8]) -> Cell {
         Some((&PRESENT, value)) => Some(Arc::from(value)),
         _ => None,
     };
-    Cell { value, changed_by }
+    Cell {
+        value,
+        changed_by,
+        erased: false,
+    }
 }
 
 /// Every field that makes the commit what it is, each length-prefixed, so
@@ -693,8 +775,15 @@ fn check_sealed(records: &[Record], ring: &Ring) -> Result<(), StoreError> {
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut missing = HashSet::new();
+    let erased: HashSet<Fingerprint> = records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Erase(erase) => Some(erase.key_fingerprint),
+            _ => None,
+        })
+        .collect();
     let commits = records.iter().flat_map(|record| match record {
-        Record::Branch(_) => &[][..],
+        Record::Branch(_) | Record::Erase(_) => &[][..],
         Record::Commit(commit) => std::slice::from_ref(commit),
         Record::Group(commits) => commits.as_slice(),
     });
@@ -703,7 +792,7 @@ fn check_sealed(records: &[Record], ring: &Ring) -> Result<(), StoreError> {
         .filter_map(|e| e.value.as_ref())
     {
         let fingerprint = seal::key_fingerprint(value).ok_or(StoreError::NotSealed)?;
-        if !ring.contains_key(&fingerprint) {
+        if !ring.contains_key(&fingerprint) && !erased.contains(&fingerprint) {
             missing.insert(fingerprint);
         }
     }

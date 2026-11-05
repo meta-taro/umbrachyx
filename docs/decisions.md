@@ -502,6 +502,18 @@ erases the subject while the history keeps its shape (see
 - **Each key has a fingerprint**, eight bytes of a BLAKE3 key derivation
   from it, so ciphertext can name the key it needs without revealing it,
   and a value whose key was erased can be told apart from a damaged one.
+- **Erasing logs first, then destroys the key.** The log records the
+  subject, which key, who erased it, why and who approved it, with no
+  value; then the key file is rewritten without the key. If the rewrite
+  does not happen, the next open finishes it, after the log has checked
+  out against the key file. The key is taken out of memory before the
+  file is rewritten, so nothing opens under it from that moment, on any
+  thread.
+- **An erased value reads as erased, not as removed.** A cell, a history
+  entry and a diff say so, and keep their commit, time, author and
+  reason. Writes to the subject afterwards get a new key; the old values
+  stay unreadable. A merge conflict on an erased value shows it as
+  absent, without saying it was erased.
 - **What erasing does not reach**: copies kept below the file system, such
   as blocks a solid-state disk has not reused yet, and backups of the key
   file. Keeping the key file out of backups, or encrypting it under a key
