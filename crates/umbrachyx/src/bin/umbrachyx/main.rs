@@ -1,6 +1,7 @@
 //! Command-line access to a store: write commits, read values and their
 //! history, branch, diff, merge, undo a commit, and serve a branch over the
-//! Redis protocol.
+//! Redis protocol. Also makes the root key and the capability tokens that
+//! agents carry.
 //!
 //! The log file is named by `UMBRACHYX_DB`. Exit status is 0 on success, 1
 //! when a merge or undo stopped on conflicts, and 2 on any other error.
@@ -16,6 +17,8 @@ use umbrachyx::store::{
     short,
 };
 use umbrachyx::tree::Bytes;
+
+mod tokens;
 
 const DB_ENV: &str = "UMBRACHYX_DB";
 const DEFAULT_DB: &str = "umbrachyx.log";
@@ -34,6 +37,13 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   revert <branch> <commit> --who W --why Y [--approved-by A]
   serve <branch> [--port P] [--max-connections N]
                               Redis protocol (GET, SET, PING) on 127.0.0.1
+
+  keygen <file>               a new root key into <file>; prints its public key
+  token issue --key <file> --subject S --branch B --prefix P --columns C,..
+              --operations read,write --purpose U --expires-in 8h
+  token narrow --public-key K [--operation O] [--prefix P] [--column C]
+               [--expires-in D]       reads a token on stdin, prints it narrowed
+  token show --public-key K   reads a token on stdin, prints who holds it
 
 A commit is named by a branch (its latest commit), <branch>~N (N back on
 its own line), or the start of its id.";
@@ -81,7 +91,9 @@ impl Args {
                 .clone();
             match name {
                 "remove" => parsed.removes.push(value),
-                "who" | "why" | "approved-by" | "from" | "limit" | "port" | "max-connections" => {
+                "who" | "why" | "approved-by" | "from" | "limit" | "port" | "max-connections"
+                | "key" | "subject" | "branch" | "prefix" | "columns" | "column" | "operations"
+                | "operation" | "purpose" | "expires-in" | "public-key" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -118,6 +130,12 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let Some(command) = args.positional.first() else {
         return Err(USAGE.to_owned());
     };
+    // These never touch a log.
+    match command.as_str() {
+        "keygen" => return tokens::keygen(&args),
+        "token" => return tokens::token(&args),
+        _ => {}
+    }
     let path = std::env::var(DB_ENV).unwrap_or_else(|_| DEFAULT_DB.to_owned());
     let storage = FileStorage::open(path.as_ref()).map_err(|e| format!("{path}: {e}"))?;
     let mut store = Store::open(storage, SystemClock).map_err(|e| format!("{path}: {e}"))?;

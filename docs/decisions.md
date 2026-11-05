@@ -254,9 +254,20 @@ request reaches the log or the tree (`crates/umbrachyx/src/capability.rs`,
 a prototype).
 
 - **What a token says.** The issuer's block, signed with the database's
-  root key, names a key prefix, the columns, the operations, a purpose and
-  an expiry. Every token also refuses writes to `main`, so an agent's
-  writes always land on a branch.
+  root key, names who holds it, a key prefix, the columns, the operations,
+  a purpose, an expiry, and the one branch its writes go to. That branch
+  is never `main`: such a token is not issued, and every token also
+  refuses writes to `main`. So an agent's writes always land on a branch,
+  and the agent cannot choose which. Reads are not tied to the branch.
+- **Who holds a token is read from the issuer's block only**, so a holder
+  cannot rename themselves or move their branch by appending facts. The
+  name is what the database records as the author of their commits.
+- **A person makes the root key and issues tokens** with the command-line
+  tool (`umbrachyx keygen`, `umbrachyx token issue`). The private key goes
+  to a file only its owner can read and is never printed; a key file is
+  never overwritten, since every token issued under it would stop
+  working. Tokens travel as base64 text on standard input and output, not
+  on the command line, where other users of the machine could see them.
 - **Narrowing, not widening.** A holder appends a block of checks: a
   shorter key prefix, one column, read only, an earlier expiry. The
   database's allow policy reads only the facts of the issuer's block and the

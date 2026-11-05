@@ -1,5 +1,6 @@
 //! Capability tokens: requests outside a token are refused, a token can be
-//! narrowed but not widened, and an expired token is refused.
+//! narrowed but not widened, an expired token is refused, and writes land
+//! only on the branch the token names.
 //!
 //! Each test makes its own root key pair in memory and drops it at the end.
 
@@ -7,12 +8,15 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use biscuit_auth::{Biscuit, BlockBuilder, KeyPair};
-use umbrachyx::capability::{self, Denied, Grant, MAIN_BRANCH, Narrowing, Operation, Request};
+use umbrachyx::capability::{
+    self, Denied, Grant, Holder, MAIN_BRANCH, Narrowing, Operation, Request,
+};
 
 const PLAYER: &str = "player/00000042/";
 const OTHER_PLAYER_SLOT: &str = "player/00000043/slot/001";
 const PURPOSE: &str = "restock event";
 const BRANCH: &str = "agent/restock";
+const SUBJECT: &str = "agent:restock";
 const HOUR: Duration = Duration::from_secs(3_600);
 
 /// A fixed instant, so expiry does not depend on when the test runs.
@@ -27,6 +31,8 @@ fn grant() -> Grant<'static> {
         columns: &["item", "count"],
         purpose: PURPOSE,
         expires: now() + HOUR,
+        subject: SUBJECT,
+        branch: BRANCH,
     }
 }
 
@@ -305,4 +311,120 @@ fn a_token_from_another_root_or_altered_is_invalid() {
         capability::authorize(b"not a token", root.public(), &read),
         Err(Denied::Invalid)
     );
+}
+
+#[test]
+fn writes_land_only_on_the_tokens_branch() {
+    let root = KeyPair::new();
+    let token = issue(&root, &grant());
+    let key = slot(1);
+    let write_to = |branch| {
+        capability::authorize(
+            &token,
+            root.public(),
+            &Request {
+                branch,
+                ..request(Operation::Write, &key, "count")
+            },
+        )
+    };
+    let read_from = |branch| {
+        capability::authorize(
+            &token,
+            root.public(),
+            &Request {
+                branch,
+                ..request(Operation::Read, &key, "count")
+            },
+        )
+    };
+
+    assert_eq!(write_to(BRANCH), Ok(()));
+    assert_eq!(write_to("agent/other"), Err(Denied::OutOfScope));
+    assert_eq!(write_to(MAIN_BRANCH), Err(Denied::MainBranch));
+    // Reading is not tied to the token's branch: an agent reads live data.
+    assert_eq!(read_from("agent/other"), Ok(()));
+}
+
+#[test]
+fn a_token_cannot_be_issued_for_writes_to_main() {
+    let root = KeyPair::new();
+
+    let issued = capability::issue(
+        &root,
+        &Grant {
+            branch: MAIN_BRANCH,
+            ..grant()
+        },
+    );
+
+    assert!(issued.is_err());
+}
+
+#[test]
+fn the_holder_is_read_from_the_issuers_block() {
+    let root = KeyPair::new();
+    let token = issue(&root, &grant());
+    let narrowed = capability::narrow(
+        &token,
+        root.public(),
+        &Narrowing {
+            operation: Some(Operation::Read),
+            ..Narrowing::default()
+        },
+    )
+    .expect("narrows");
+    let expected = Holder {
+        subject: SUBJECT.to_owned(),
+        branch: BRANCH.to_owned(),
+        purpose: PURPOSE.to_owned(),
+    };
+
+    assert_eq!(
+        capability::holder(&token, root.public()),
+        Ok(expected.clone())
+    );
+    assert_eq!(capability::holder(&narrowed, root.public()), Ok(expected));
+    assert_eq!(
+        capability::holder(&issue(&KeyPair::new(), &grant()), root.public()),
+        Err(Denied::Invalid)
+    );
+}
+
+/// A holder who claims to be someone else, or to write somewhere else, in a
+/// block of their own is still who the issuer said, writing where the
+/// issuer said.
+#[test]
+fn a_holder_cannot_rename_themselves_or_move_their_branch() {
+    let root = KeyPair::new();
+    let token = issue(&root, &grant());
+    let forged = BlockBuilder::new()
+        .code_with_params(
+            r#"
+            subject("ops:lead");
+            write_branch("agent/other");
+            "#,
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .expect("parses");
+    let renamed = Biscuit::from(&token, root.public())
+        .and_then(|token| token.append(forged))
+        .and_then(|token| token.to_vec())
+        .expect("appends");
+    let key = slot(1);
+
+    let holder = capability::holder(&renamed, root.public()).expect("reads");
+    let write = capability::authorize(
+        &renamed,
+        root.public(),
+        &Request {
+            branch: "agent/other",
+            ..request(Operation::Write, &key, "count")
+        },
+    );
+
+    assert_eq!(holder.subject, SUBJECT);
+    assert_eq!(holder.branch, BRANCH);
+    assert_eq!(write, Err(Denied::OutOfScope));
 }

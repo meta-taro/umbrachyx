@@ -1,9 +1,10 @@
 //! Capability tokens: what a caller may touch, carried by the caller and
 //! checked by the database on every request, before any data is read.
 //!
-//! A token names which keys (by prefix), which columns, which operations,
-//! for what purpose and until when. Writes are refused on `main`, so an
-//! agent's writes always land on a branch. Whoever holds a token can narrow
+//! A token names who holds it, which keys (by prefix), which columns, which
+//! operations, for what purpose, until when, and the one branch its writes
+//! go to. That branch is never `main`, so an agent's writes always land on a
+//! branch, and the holder cannot choose another. Whoever holds a token can narrow
 //! it offline by appending a block of checks; nobody can widen it, because
 //! the database's policy reads only the facts in the first block, which the
 //! issuer signed. The token format and its checks are biscuit's; nothing
@@ -20,6 +21,7 @@ use biscuit_auth::builder::Term;
 use biscuit_auth::error::{FailedCheck, Logic, Token};
 use biscuit_auth::{
     AuthorizerBuilder, AuthorizerLimits, Biscuit, BiscuitBuilder, BlockBuilder, KeyPair, PublicKey,
+    UnverifiedBiscuit,
 };
 
 /// The branch that holds live data, which tokens never write to.
@@ -48,6 +50,19 @@ pub struct Grant<'a> {
     pub columns: &'a [&'a str],
     pub purpose: &'a str,
     pub expires: SystemTime,
+    /// Who holds the token, recorded as the author of its commits.
+    pub subject: &'a str,
+    /// The only branch the token writes to. Never `main`.
+    pub branch: &'a str,
+}
+
+/// Who a token was issued to and where its writes go, as the issuer signed
+/// them. Blocks a holder appends cannot change these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Holder {
+    pub subject: String,
+    pub branch: String,
+    pub purpose: String,
 }
 
 /// What a holder takes away before handing a token on. Each field left
@@ -100,11 +115,21 @@ impl std::error::Error for Denied {}
 
 /// A token could not be built or read.
 #[derive(Debug)]
-pub struct TokenError(Token);
+pub enum TokenError {
+    Biscuit(Token),
+    /// A token whose writes would go to `main` is never issued.
+    WritesToMain,
+}
 
 impl fmt::Display for TokenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "capability token: {}", self.0)
+        match self {
+            Self::Biscuit(error) => write!(f, "capability token: {error}"),
+            Self::WritesToMain => write!(
+                f,
+                "capability token: writes must go to a branch, not {MAIN_BRANCH}"
+            ),
+        }
     }
 }
 
@@ -112,7 +137,7 @@ impl std::error::Error for TokenError {}
 
 impl From<Token> for TokenError {
     fn from(error: Token) -> Self {
-        Self(error)
+        Self::Biscuit(error)
     }
 }
 
@@ -133,14 +158,23 @@ const TIME_FACT: &str = "time(";
 const BRANCH_FACT: &str = "branch(";
 
 pub fn issue(root: &KeyPair, grant: &Grant<'_>) -> Result<Vec<u8>, TokenError> {
+    if grant.branch == MAIN_BRANCH {
+        return Err(TokenError::WritesToMain);
+    }
+    // The check on main stays even though the branch is never main: it is
+    // what tells a write to main apart from a write to another branch.
     let mut builder = BiscuitBuilder::new().code_with_params(
         r#"
+        subject({subject});
+        write_branch({branch});
         key_prefix({prefix});
         purpose({purpose});
         check if time($t), $t <= {expires};
         check if operation("read") or branch($b), $b != {main};
         "#,
         params([
+            ("subject", grant.subject.into()),
+            ("branch", grant.branch.into()),
             ("prefix", grant.key_prefix.into()),
             ("purpose", grant.purpose.into()),
             ("expires", grant.expires.into()),
@@ -203,6 +237,40 @@ pub fn narrow(
     Ok(Biscuit::from(token, root)?.append(block)?.to_vec()?)
 }
 
+/// A token as text, for a file or a pipe. Base64, as biscuit's own tools
+/// write it.
+pub fn to_text(token: &[u8]) -> Result<String, TokenError> {
+    Ok(UnverifiedBiscuit::from(token)?.to_base64()?)
+}
+
+/// The token in `text`, surrounding whitespace ignored. Its signatures are
+/// checked later, against the root key, by whatever uses it.
+pub fn from_text(text: &str) -> Result<Vec<u8>, TokenError> {
+    Ok(UnverifiedBiscuit::from_base64(text.trim())?.to_vec()?)
+}
+
+/// Reads who holds `token` and where its writes go. It does not decide any
+/// request: a token that has expired still has a holder.
+pub fn holder(token: &[u8], root: PublicKey) -> Result<Holder, Denied> {
+    let token = Biscuit::from(token, root).map_err(|_| Denied::Invalid)?;
+    // A query sees the authorizer's facts and the first block's only, as
+    // the policy does, so a holder's own blocks cannot change the answer.
+    let (subject, branch, purpose) = AuthorizerBuilder::new()
+        .set_limits(LIMITS)
+        .build(&token)
+        .and_then(|mut authorizer| {
+            authorizer.query_exactly_one(
+                "holder($s, $b, $p) <- subject($s), write_branch($b), purpose($p)",
+            )
+        })
+        .map_err(|_| Denied::Invalid)?;
+    Ok(Holder {
+        subject,
+        branch,
+        purpose,
+    })
+}
+
 /// Decides one request. Runs at the database's boundary, before the request
 /// reaches the log or the tree.
 pub fn authorize(token: &[u8], root: PublicKey, request: &Request<'_>) -> Result<(), Denied> {
@@ -218,7 +286,12 @@ pub fn authorize(token: &[u8], root: PublicKey, request: &Request<'_>) -> Result
             column({column});
             declared_purpose({purpose});
             time({now});
-            allow if operation($o), operation_allowed($o),
+            allow if operation("read"), operation_allowed("read"),
+                     key($k), key_prefix($p), $k.starts_with($p),
+                     column($c), column_allowed($c),
+                     declared_purpose($u), purpose($u);
+            allow if operation("write"), operation_allowed("write"),
+                     branch($b), write_branch($b),
                      key($k), key_prefix($p), $k.starts_with($p),
                      column($c), column_allowed($c),
                      declared_purpose($u), purpose($u);
