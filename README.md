@@ -7,7 +7,7 @@
   every write synced to disk on a laptop, and 20 times sooner on a Linux CI
   runner, where a sync costs less.
 - **Nothing acknowledged is lost.** Killed mid-write 1,100 times with
-  334,631 writes acknowledged, and put through more than 280,000 simulated restarts
+  334,631 writes acknowledged, and put through more than 400,000 simulated restarts
   after power cuts and disk faults: not one acknowledged write went
   missing.
 - **Every change is kept**, with who made it and why, to branch, diff,
@@ -90,12 +90,15 @@ the runner in `2026-11-04-linux-ci/`). The scripts are in
 | Kill a process appending to the log | 1,000 | 3,719 acknowledged, none lost |
 | Simulated disk: power cuts tearing writes at any sector, failed syncs, bit flips | 10,000 seeds | 130,677 restarts; every acknowledged record back, 6,867 corruptions refused |
 | Simulated store: commits, branches, merges and reverts through crashes and a clock that goes back | 10,000 seeds | 635,173 commits, 152,927 restarts; every branch as acknowledged |
+| Simulated encrypted store: commits, erasures and failed key file writes through crashes | 10,000 seeds | 406,678 commits, 70,278 erasures, 120,488 restarts; every value as acknowledged, no erased value read again |
 
-CI runs all four on Linux and Windows for every change. The server test
+CI runs all of them on Linux and Windows for every change. The server test
 and the simulations were also run against deliberately broken versions
 (acknowledging before the write is durable, skipping a sync, misreading
 damage) and caught each of them. Output:
-[`bench/results/2026-11-04/robustness.txt`](bench/results/2026-11-04/robustness.txt).
+[`bench/results/2026-11-04/robustness.txt`](bench/results/2026-11-04/robustness.txt),
+and for the encrypted store
+[`bench/results/2026-11-05-sealed/robustness.txt`](bench/results/2026-11-05-sealed/robustness.txt).
 
 Not tested yet: power cuts on real hardware (only simulated), runs longer
 than minutes, and more than one node. Umbrachyx has no replication yet.

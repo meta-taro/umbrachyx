@@ -1,10 +1,10 @@
 //! The key file: one key per subject, kept across reopening, and gone for
 //! good once the subject is erased.
 
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
-use umbrachyx::keys::{FileKeyStorage, KeyError, Keys};
+use umbrachyx::keys::{FileKeyStorage, KeyError, KeyStorage, Keys};
 
 /// A fresh directory per test, removed when the test ends.
 struct TempDir(PathBuf);
@@ -29,6 +29,49 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The key file, with its next write failing part way: an append leaves
+/// the first half of its bytes, a replacement leaves the old file.
+struct FailNextWrite {
+    file: FileKeyStorage,
+    path: PathBuf,
+    armed: bool,
+}
+
+impl FailNextWrite {
+    fn new(path: &Path) -> Self {
+        Self {
+            file: FileKeyStorage::new(path),
+            path: path.to_owned(),
+            armed: true,
+        }
+    }
+}
+
+impl KeyStorage for FailNextWrite {
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        self.file.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if !std::mem::take(&mut self.armed) {
+            return self.file.append(bytes);
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        file.write_all(&bytes[..bytes.len() / 2])?;
+        Err(io::Error::other("the disk filled up"))
+    }
+
+    fn replace(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if !std::mem::take(&mut self.armed) {
+            return self.file.replace(bytes);
+        }
+        Err(io::Error::other("the disk filled up"))
     }
 }
 
@@ -191,4 +234,53 @@ fn a_subject_longer_than_the_limit_gets_no_key() {
     let made = keys.key_for(&vec![b'p'; umbrachyx::keys::MAX_SUBJECT_LEN + 1]);
 
     assert!(matches!(made, Err(KeyError::SubjectTooLong)), "{made:?}");
+}
+
+/// The torn bytes a failed append leaves are cut before the next key is
+/// written, not buried under it where they would read as damage.
+#[test]
+fn a_failed_append_does_not_strand_its_torn_bytes() {
+    let dir = TempDir::new("failed-append");
+    let kept = dir
+        .open()
+        .expect("opens")
+        .key_for(b"player/42")
+        .expect("makes a key");
+    let mut keys = Keys::open(FailNextWrite::new(&dir.keys())).expect("opens");
+
+    let failed = keys.key_for(b"player/7");
+    let added = keys.key_for(b"player/8").expect("makes a key");
+    drop(keys);
+    let reopened = dir.open().expect("reopens");
+
+    assert!(failed.is_err());
+    assert_eq!(reopened.get(b"player/42"), Some(&kept));
+    assert_eq!(reopened.get(b"player/8"), Some(&added));
+}
+
+/// A key whose erasure was asked for is not handed out again, even when
+/// the file could not be rewritten: the caller recorded the erasure first
+/// and will finish it, and anything sealed under the key would go with it.
+#[test]
+fn a_key_whose_erasure_failed_is_not_used_again() {
+    let dir = TempDir::new("failed-erase");
+    let old = dir
+        .open()
+        .expect("opens")
+        .key_for(b"player/42")
+        .expect("makes a key");
+    let mut keys = Keys::open(FailNextWrite::new(&dir.keys())).expect("opens");
+
+    let failed = keys.erase(b"player/42");
+    let missing = keys.get(b"player/42").copied();
+    let new = keys.key_for(b"player/42").expect("makes a key");
+    drop(keys);
+    let reopened = dir.open().expect("reopens");
+    let bytes = std::fs::read(dir.keys()).expect("reads the key file");
+
+    assert!(failed.is_err());
+    assert_eq!(missing, None);
+    assert_ne!(new, old);
+    assert_eq!(reopened.get(b"player/42"), Some(&new));
+    assert!(!contains(&bytes, &old));
 }

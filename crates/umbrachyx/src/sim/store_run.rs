@@ -73,7 +73,7 @@ pub struct SimClock {
 }
 
 impl SimClock {
-    fn new(rng: &mut Rng) -> Self {
+    pub(super) fn new(rng: &mut Rng) -> Self {
         Self {
             rng: Rng::new(rng.next_u64()),
             now: START_MICROS,
@@ -384,7 +384,7 @@ impl Run {
     }
 }
 
-fn provenance(step: usize) -> Provenance {
+pub(super) fn provenance(step: usize) -> Provenance {
     Provenance {
         who: "agent:sim".to_owned(),
         why: format!("step {step}"),

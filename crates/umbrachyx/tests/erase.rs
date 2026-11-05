@@ -70,6 +70,27 @@ impl KeyStorage for FailingRewrites {
     }
 }
 
+/// A key file whose first rewrite fails and whose later ones work: the
+/// disk was full for a moment.
+struct FailingFirstRewrite(FileKeyStorage, bool);
+
+impl KeyStorage for FailingFirstRewrite {
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        self.0.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.0.append(bytes)
+    }
+
+    fn replace(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if std::mem::replace(&mut self.1, false) {
+            return Err(io::Error::other("the disk was full"));
+        }
+        self.0.replace(bytes)
+    }
+}
+
 fn set(key: &str, value: &str) -> Edit {
     Edit {
         key: key.as_bytes().to_vec(),
@@ -258,6 +279,44 @@ fn an_erasure_cut_short_is_finished_when_the_store_opens() {
     assert_eq!(
         text(reopened.get(MAIN_BRANCH, b"player/7/gems")).as_deref(),
         Some("30")
+    );
+}
+
+/// After an erasure whose key file could not be rewritten, the subject's
+/// next values are sealed under a new key, so finishing the erasure on the
+/// next open does not take them too.
+#[test]
+fn values_written_after_an_erasure_cut_short_survive_its_finish() {
+    let dir = TempDir::new("after-cut-short");
+    let mut store = dir.open();
+    seed(&mut store);
+    drop(store);
+    let storage = FailingFirstRewrite(FileKeyStorage::new(&dir.keys()), true);
+    let mut store = dir.open_with(Box::new(storage));
+    let failed = store.erase(b"player/42", by("ops:privacy", "account deletion request"));
+
+    store
+        .commit(
+            MAIN_BRANCH,
+            vec![set("player/42/gems", "10")],
+            by("game:signup", "new account"),
+        )
+        .expect("commits");
+    let at_once = store.history(MAIN_BRANCH, b"player/42/gems");
+    drop(store);
+    let reopened = dir.open();
+
+    assert!(failed.is_err());
+    assert_eq!(text(at_once[0].value.as_ref()).as_deref(), Some("10"));
+    assert!(at_once[1..].iter().all(|cell| cell.erased));
+    assert_eq!(
+        text(reopened.get(MAIN_BRANCH, b"player/42/gems")).as_deref(),
+        Some("10")
+    );
+    assert!(
+        reopened.history(MAIN_BRANCH, b"player/42/gems")[1..]
+            .iter()
+            .all(|cell| cell.erased)
     );
 }
 

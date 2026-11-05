@@ -104,6 +104,11 @@ impl SimStorage {
         self.next_sync_fault = Some(fault);
     }
 
+    /// Takes back a fault no sync used, so it cannot hit a later one.
+    pub fn clear_sync_fault(&mut self) {
+        self.next_sync_fault = None;
+    }
+
     /// Flip one bit on the disk: damage after acknowledgement. Only for a
     /// disk fresh from a power cut, where what is seen is what is durable.
     pub fn flip_bit(&mut self, bit: usize) {

@@ -13,7 +13,9 @@
 //! Opening only reads. A torn entry at the end, left by a crash while a key
 //! was appended, is cut when the next key is written: by then the store has
 //! checked that every key its log uses is here, so damage that only looks
-//! like a torn end is refused before anything is lost.
+//! like a torn end is refused before anything is lost. A write that fails
+//! leaves the same kind of leftover, a torn append or a key whose erasure
+//! did not reach the file, and the next write replaces the whole file too.
 //!
 //! Destroying a key this way removes it from the file the database reads.
 //! It does not reach copies the operating system or the disk keep on its
@@ -161,8 +163,9 @@ pub struct Keys<S: KeyStorage> {
     storage: S,
     keys: HashMap<Vec<u8>, Key>,
     by_fingerprint: HashMap<Fingerprint, Vec<u8>>,
-    /// The file ends in a torn entry, to be cut by the next write.
-    torn: bool,
+    /// The file holds bytes memory has let go of: a torn entry at its end,
+    /// or a key whose erasure did not reach it. The next write replaces it.
+    stale: bool,
 }
 
 /// Shows how many keys there are, never the keys.
@@ -187,7 +190,7 @@ impl<S: KeyStorage> Keys<S> {
             storage,
             keys,
             by_fingerprint,
-            torn: valid < bytes.len(),
+            stale: valid < bytes.len(),
         })
     }
 
@@ -219,13 +222,16 @@ impl<S: KeyStorage> Keys<S> {
         let mut key = [0; KEY_LEN];
         getrandom::getrandom(&mut key).map_err(|e| KeyError::Io(io::Error::other(e)))?;
         let added = entry(subject, &key)?;
-        if self.torn {
+        if self.stale {
             let mut bytes = self.entries()?;
             bytes.extend(added);
             self.storage.replace(&bytes)?;
-            self.torn = false;
-        } else {
-            self.storage.append(&added)?;
+            self.stale = false;
+        } else if let Err(error) = self.storage.append(&added) {
+            // Part of the entry may be on disk; appending after it would
+            // bury it where it reads as damage.
+            self.stale = true;
+            return Err(error.into());
         }
         self.keys.insert(subject.to_vec(), key);
         self.by_fingerprint
@@ -233,21 +239,20 @@ impl<S: KeyStorage> Keys<S> {
         Ok(key)
     }
 
-    /// Destroys the subject's key. Returns whether there was one. If the
-    /// file cannot be written, the key is kept, so memory and file agree.
+    /// Destroys the subject's key. Returns whether there was one. The key
+    /// is gone from memory even if the file cannot be written: the caller
+    /// records an erasure before asking for it, and a value sealed under the
+    /// key afterwards would be destroyed with it when the erasure is
+    /// finished. The next write replaces the file.
     pub fn erase(&mut self, subject: &[u8]) -> Result<bool, KeyError> {
         let Some(key) = self.keys.remove(subject) else {
             return Ok(false);
         };
-        let replaced = self
-            .entries()
-            .and_then(|bytes| Ok(self.storage.replace(&bytes)?));
-        if let Err(error) = replaced {
-            self.keys.insert(subject.to_vec(), key);
-            return Err(error);
-        }
         self.by_fingerprint.remove(&fingerprint(&key));
-        self.torn = false;
+        self.stale = true;
+        let bytes = self.entries()?;
+        self.storage.replace(&bytes)?;
+        self.stale = false;
         Ok(true)
     }
 

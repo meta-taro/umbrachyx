@@ -142,6 +142,20 @@ memory speed for writes will need group commit: one sync for many writes.
   and a branch's latest commit is undone, which must give back what the
   branch held before it. CI runs 10,000 seeds of each, in release mode; the
   results are the same as in debug mode.
+- **The encrypted store has a run of its own**, with a simulated key file
+  next to the simulated log: commits to the keys of a few subjects,
+  erasures, appends to the key file torn part way, rewrites of it that
+  fail with the old or the new file left, erasures whose log sync is
+  interrupted, process crashes and power cuts. After every step the store
+  must read every acknowledged value, unless its subject was erased since;
+  read every value of an erased subject as erased, in its cells and its
+  history, on every branch; and open again after every restart. An
+  erasure whose sync was interrupted must be there whole or not at all.
+  Its first seeds found two faults in the key file, both fixed (see
+  [Erasing a subject](#erasing-a-subject)). The keys come from the
+  operating system's random source, so the ciphertext differs between
+  runs of a seed; nothing the run decides depends on it. A torn append is
+  simulated as a clean prefix of the entry.
 
 ## The tree
 
@@ -506,6 +520,17 @@ erases the subject while the history keeps its shape (see
   is refused as damage rather than read as a torn end: otherwise one
   flipped bit in a length would make every key after it look torn and be
   cut, which would erase those subjects.
+- **A key file write that fails leaves the file to be replaced whole.**
+  A failed append may have left part of its entry; appending the next key
+  after it would bury the torn bytes where they read as damage, and the
+  store would not open. So the next write replaces the file with the keys
+  in memory instead, as it does after a torn end found when opening.
+- **A torn append whose length bytes came out as garbage is refused as
+  damage**, not cut, if the garbage length is over the limit or does not
+  line up with the end of the file. The store then does not open until a
+  person looks at the key file. Telling such a tail from a flipped bit in
+  an earlier length would need a marker or a second checksum per entry;
+  that is left until it is seen.
 - **Each key has a fingerprint**, eight bytes of a BLAKE3 key derivation
   from it, so ciphertext can name the key it needs without revealing it,
   and a value whose key was erased can be told apart from a damaged one.
@@ -515,7 +540,9 @@ erases the subject while the history keeps its shape (see
   does not happen, the next open finishes it, after the log has checked
   out against the key file. The key is taken out of memory before the
   file is rewritten, so nothing opens under it from that moment, on any
-  thread.
+  thread. It stays out if the rewrite fails: a value written to the
+  subject afterwards gets a new key, rather than one under the old key
+  that finishing the erasure would destroy with the rest.
 - **An erased value reads as erased, not as removed.** A cell, a history
   entry and a diff say so, and keep their commit, time, author and
   reason. Writes to the subject afterwards get a new key; the old values

@@ -17,6 +17,12 @@ Valkey 9.1.3's `valkey-benchmark` as the client. Synthetic data only.
 | File | Script | Code |
 |---|---|---|
 | `umbrachyx.csv` | `bench/umbrachyx.sh` | the commit that adds this folder |
+| `robustness.txt` | the 10,000-seed simulations, command at its top | the commit that adds this file |
+
+`robustness.txt` adds the simulation of the encrypted store, with its
+key file, erasures and failed key file writes, to the two simulations
+run before. The first two lines match 2026-11-04's exactly: the same
+seeds replay the same runs.
 
 The script's standard error was captured into the same file this time;
 one line the shell printed when the script stopped its background
