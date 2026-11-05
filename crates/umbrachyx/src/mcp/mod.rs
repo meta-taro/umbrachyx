@@ -10,7 +10,7 @@
 
 mod tools;
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::time::SystemTime;
 
 use biscuit_auth::PublicKey;
@@ -23,6 +23,9 @@ use crate::store::{Clock, Store};
 /// The newest protocol version spoken, and the older ones still accepted.
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const OLDER_VERSIONS: [&str; 2] = ["2025-03-26", "2024-11-05"];
+
+/// The longest message read, as for a command to the Redis server.
+pub const MAX_LINE: usize = 1 << 20;
 
 // JSON-RPC error codes.
 const PARSE_ERROR: i64 = -32700;
@@ -50,19 +53,36 @@ impl<S: Storage, C: Clock> Session<S, C> {
         })
     }
 
-    /// Answers requests from `input`, one per line, until it ends.
-    pub fn serve(&mut self, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
-        for line in input.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
+    /// Answers requests from `input`, one per line, until it ends. A line
+    /// longer than [`MAX_LINE`] is answered with an error and skipped
+    /// without being held whole.
+    pub fn serve(&mut self, mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let limit = u64::try_from(MAX_LINE + 1).unwrap_or(u64::MAX);
+            if (&mut input).take(limit).read_until(b'\n', &mut line)? == 0 {
+                return Ok(());
             }
-            if let Some(reply) = self.handle(&line) {
+            let reply = if line.len() > MAX_LINE && !line.ends_with(b"\n") {
+                input.skip_until(b'\n')?;
+                Some(error(
+                    &Value::Null,
+                    INVALID_REQUEST,
+                    "a message is limited to 1 MiB",
+                ))
+            } else {
+                match std::str::from_utf8(&line) {
+                    Ok(text) if text.trim().is_empty() => None,
+                    Ok(text) => self.handle(text),
+                    Err(_) => Some(error(&Value::Null, PARSE_ERROR, "not UTF-8")),
+                }
+            };
+            if let Some(reply) = reply {
                 writeln!(output, "{reply}")?;
                 output.flush()?;
             }
         }
-        Ok(())
     }
 
     /// Answers one JSON-RPC message. A notification gets no reply.

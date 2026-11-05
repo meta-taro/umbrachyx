@@ -436,6 +436,11 @@ checker to hold the shared secret that mints tokens.
   branch. A reason is required, since it is the history's answer to
   "why". Merging into `main` is not a tool: a person reviews the branch
   and merges it with the command-line tool, naming who approved it.
+- **A message is at most 1 MiB**, as a command to the Redis server is. A
+  longer line is answered with an error and skipped without being held
+  whole, and the session goes on.
+- **What a hijacked agent cannot do is tested and published** in
+  [`agents.md`](agents.md), with the test for each attack.
 - **The session opens the log itself**, and the log takes one writer at a
   time, so one agent works on a database file at a time for now. Serving
   several agents at once would go through the committer, as the Redis

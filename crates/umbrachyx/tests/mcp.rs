@@ -417,3 +417,30 @@ fn a_read_only_token_cannot_commit() {
     );
     assert_eq!(read.0["value"], "95");
 }
+
+#[test]
+fn a_line_past_the_size_limit_is_refused_and_the_session_goes_on() {
+    let dir = TempDir::new("size");
+    let mut session = session(store(&dir), SystemTime::now() + HOUR);
+    let huge = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"get","arguments":{{"key":"{}"}}}}}}"#,
+        "x".repeat(umbrachyx::mcp::MAX_LINE)
+    );
+    let next = r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#;
+    let input = format!("{huge}\n{next}\n");
+    let mut output = Vec::new();
+
+    session
+        .serve(input.as_bytes(), &mut output)
+        .expect("serves");
+
+    let replies: Vec<Value> = String::from_utf8(output)
+        .expect("text")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("JSON"))
+        .collect();
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert_eq!(replies[0]["error"]["code"], -32600);
+    assert_eq!(replies[1]["id"], 2);
+    assert_eq!(replies[1]["result"], json!({}));
+}

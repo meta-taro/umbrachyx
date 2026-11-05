@@ -30,7 +30,8 @@ that is already there before the light arrives.
 > command-line tool, a server for one branch that speaks enough of the
 > Redis protocol for existing clients, and an MCP session through which an
 > agent reads only what its capability token allows and writes only to its
-> own branch. [`docs/demo.md`](docs/demo.md) walks through the first
+> own branch ([`docs/agents.md`](docs/agents.md) shows what a hijacked
+> agent cannot do). [`docs/demo.md`](docs/demo.md) walks through the first
 > four questions below with it. A first comparison with Valkey and Dolt,
 > and what it shows still needs work, is in
 > [`docs/comparison.md`](docs/comparison.md). No format is stable. Do not
