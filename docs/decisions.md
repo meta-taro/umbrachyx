@@ -523,3 +523,22 @@ erases the subject while the history keeps its shape (see
   as blocks a solid-state disk has not reused yet, and backups of the key
   file. Keeping the key file out of backups, or encrypting it under a key
   held elsewhere, is left to the operator for now.
+
+## Retention per column (not built yet)
+
+The concept keeps every change of some columns, compacts others to one
+entry per interval, and keeps only the current value of others. None of
+that is built, for one reason: the log is the truth and is append-only,
+so a value written to it stays in it. Keeping less history than the log
+holds means writing a new log without the dropped changes and switching
+to it (compaction), which touches the one part everything else rests on.
+
+- **Until then, a column that must not keep its history can be erased.**
+  A subject's values become unreadable without rewriting the log, which
+  covers "this must be gone", though not "this takes too much space".
+- **Compaction would come with its own crash tests**, like the log's: a
+  kill at every step of writing the new log and switching to it must
+  leave either the old log or the new one, and every acknowledged write
+  that the policy keeps.
+- **What a policy means across branches is open**: whether compacting a
+  column on `main` also compacts it on a branch that has not merged yet.
