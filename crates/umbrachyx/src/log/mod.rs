@@ -11,6 +11,7 @@ use std::fmt;
 use std::io;
 
 pub use record::{Branch, Commit, Edit, MAX_PAYLOAD_LEN, Record};
+pub(crate) use storage::sync_parent_dir;
 pub use storage::{FileStorage, Storage};
 
 #[derive(Debug)]

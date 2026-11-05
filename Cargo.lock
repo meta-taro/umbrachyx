@@ -962,6 +962,7 @@ dependencies = [
  "biscuit-auth",
  "blake3",
  "crc32fast",
+ "getrandom",
  "rustix",
  "serde_json",
 ]

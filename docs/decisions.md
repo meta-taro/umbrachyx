@@ -12,6 +12,7 @@ without an entry here is not adopted.
 | `blake3` | The hash that names every node of the tree, so equal hashes mean equal content and a diff can skip shared subtrees | Collision resistance is required: a diff or a sync between replicas trusts that equal hashes mean equal data. CC0 / Apache-2.0, maintained by its authors. |
 | `biscuit-auth` | Capability tokens: what a caller may read or write, carried by the caller | Tokens can be narrowed offline by whoever holds them and never widened, and are verified with a public key, so nothing secret sits on the side that checks them. Writing an authorization scheme ourselves would need its own security review. Apache-2.0, maintained under the Eclipse Foundation. Default features are off; `datalog-macro` stays on because 6.0.0 does not build without it |
 | `serde_json` | Reading and writing the JSON-RPC messages of the MCP session | The de facto JSON crate for Rust, MIT OR Apache-2.0, maintained by the serde authors. It was already built as a dependency of `biscuit-auth`, so it adds no crate. Used through `Value` only, without derive macros. The MCP protocol itself is written here rather than taken from the official Rust SDK, which runs on an async runtime the server does not use; the part served is four methods |
+| `getrandom` | The random bytes of each subject's encryption key | The operating system's random source, nothing else: the smallest way to get key material. MIT OR Apache-2.0, maintained by the rust-random project, and already built as a dependency of `biscuit-auth` at the same version, so it adds no crate |
 
 ## The log
 
@@ -445,3 +446,34 @@ checker to hold the shared secret that mints tokens.
   time, so one agent works on a database file at a time for now. Serving
   several agents at once would go through the committer, as the Redis
   server does.
+
+## Erasing a subject
+
+Values are to be encrypted under a key per subject, so that destroying the
+key erases the subject while the history keeps its shape (see
+[`concept.md`](concept.md)). The keys are in place; encrypting values with
+them comes next.
+
+- **A subject is the first two parts of a key**: `player/42/gems` belongs
+  to `player/42`. A key with one part is its own subject.
+- **The keys live in their own file next to the log** (`<log>.keys`),
+  because the log is append-only and keeps every byte. The key file is the
+  one place where something is destroyed: erasing writes it again without
+  the subject and renames it over the old file, so a crash leaves the old
+  file or the new one, never a mix.
+- **A new key is synced before anything is encrypted under it**, so a crash
+  never leaves ciphertext whose key was lost.
+- **Opening the key file only reads it.** A torn entry at the end, left by
+  a crash while a key was appended, is cut when the next key is written,
+  after the store has checked that every key its log uses is present. A
+  damaged entry before the last one, or a subject length over 1,024 bytes,
+  is refused as damage rather than read as a torn end: otherwise one
+  flipped bit in a length would make every key after it look torn and be
+  cut, which would erase those subjects.
+- **Each key has a fingerprint**, eight bytes of a BLAKE3 key derivation
+  from it, so ciphertext can name the key it needs without revealing it,
+  and a value whose key was erased can be told apart from a damaged one.
+- **What erasing does not reach**: copies kept below the file system, such
+  as blocks a solid-state disk has not reused yet, and backups of the key
+  file. Keeping the key file out of backups, or encrypting it under a key
+  held elsewhere, is left to the operator for now.

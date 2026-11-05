@@ -62,7 +62,7 @@ impl FileStorage {
 /// creating the file and syncing the directory would otherwise never be
 /// repaired.
 #[cfg(unix)]
-fn sync_parent_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_dir(path: &Path) -> io::Result<()> {
     let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) else {
         return File::open(".")?.sync_all();
     };
@@ -73,7 +73,7 @@ fn sync_parent_dir(path: &Path) -> io::Result<()> {
 /// directory entry as metadata; whether that is enough across a power cut is
 /// left to the simulation disk and real-machine tests to show.
 #[cfg(not(unix))]
-fn sync_parent_dir(_path: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_dir(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
