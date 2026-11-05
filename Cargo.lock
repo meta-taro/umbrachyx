@@ -963,6 +963,7 @@ dependencies = [
  "blake3",
  "crc32fast",
  "rustix",
+ "serde_json",
 ]
 
 [[package]]

@@ -37,6 +37,8 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   revert <branch> <commit> --who W --why Y [--approved-by A]
   serve <branch> [--port P] [--max-connections N]
                               Redis protocol (GET, SET, PING) on 127.0.0.1
+  mcp --public-key K --token-file F
+                              MCP over stdin and stdout, for one agent's token
 
   keygen <file>               a new root key into <file>; prints its public key
   token issue --key <file> --subject S --branch B --prefix P --columns C,..
@@ -93,7 +95,7 @@ impl Args {
                 "remove" => parsed.removes.push(value),
                 "who" | "why" | "approved-by" | "from" | "limit" | "port" | "max-connections"
                 | "key" | "subject" | "branch" | "prefix" | "columns" | "column" | "operations"
-                | "operation" | "purpose" | "expires-in" | "public-key" => {
+                | "operation" | "purpose" | "expires-in" | "public-key" | "token-file" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -149,6 +151,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         "merge" => merge(&mut store, &args),
         "revert" => revert(&mut store, &args),
         "serve" => serve(store, &args),
+        "mcp" => tokens::mcp(store, &args),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     }
 }

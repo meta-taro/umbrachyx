@@ -1,6 +1,7 @@
 //! Keys and capability tokens: a person makes the database's root key once,
 //! issues a token to each agent, and an agent's operator can narrow a token
-//! before handing it on.
+//! before handing it on. The agent's host then starts `umbrachyx mcp` with
+//! that token.
 //!
 //! The private key is written to a file nobody else can read and never
 //! printed. Tokens are read from standard input and written to standard
@@ -15,8 +16,9 @@ use std::time::{Duration, SystemTime};
 
 use biscuit_auth::{KeyPair, PrivateKey, PublicKey};
 use umbrachyx::capability::{self, Grant, Narrowing, Operation};
+use umbrachyx::mcp::Session;
 
-use super::Args;
+use super::{Args, FileStore};
 
 /// Writes a new root key to `<file>` and prints its public half.
 pub fn keygen(args: &Args) -> Result<ExitCode, String> {
@@ -101,7 +103,21 @@ fn show(args: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn public_key(args: &Args) -> Result<PublicKey, String> {
+/// Serves one agent over standard input and output until its host closes
+/// them. Messages for people go to standard error, which MCP leaves free.
+pub fn mcp(store: FileStore, args: &Args) -> Result<ExitCode, String> {
+    let path = args.option("token-file")?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let token = capability::from_text(&text).map_err(|e| format!("{path}: {e}"))?;
+    let mut session =
+        Session::new(store, &token, public_key(args)?).map_err(|e| format!("{path}: {e}"))?;
+    session
+        .serve(std::io::stdin().lock(), std::io::stdout().lock())
+        .map_err(|e| e.to_string())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn public_key(args: &Args) -> Result<PublicKey, String> {
     let text = args.option("public-key")?;
     PublicKey::from_str(text).map_err(|_| format!("--public-key {text:?} is not a public key"))
 }

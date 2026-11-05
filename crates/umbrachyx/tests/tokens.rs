@@ -1,5 +1,6 @@
 //! The command-line tool's key and token commands, run as a separate
-//! process the way a person would run them.
+//! process the way a person would run them, and `umbrachyx mcp` started
+//! with a token the way an agent's host would start it.
 //!
 //! Every key and token here is made for the test in a temporary directory
 //! and removed with it.
@@ -35,7 +36,16 @@ impl Drop for TempDir {
 }
 
 fn umbrachyx(args: &[&str], stdin: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_umbrachyx"))
+    umbrachyx_on(None, args, stdin)
+}
+
+/// Runs against the log at `db`, or with no log for commands that need none.
+fn umbrachyx_on(db: Option<&Path>, args: &[&str], stdin: &str) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_umbrachyx"));
+    if let Some(db) = db {
+        command.env("UMBRACHYX_DB", db);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -191,4 +201,84 @@ fn a_token_that_would_write_to_main_is_not_issued() {
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn an_agent_reads_through_umbrachyx_mcp_within_its_token() {
+    let dir = TempDir::new("mcp");
+    let key = dir.path("root.key");
+    let db = dir.path("log");
+    let public = keygen(&key);
+    stdout(&umbrachyx_on(
+        Some(&db),
+        &[
+            "commit",
+            "main",
+            "player/42/gems=120",
+            "player/7/gems=30",
+            "--who",
+            "game:onboarding",
+            "--why",
+            "starter grant",
+        ],
+        "",
+    ));
+    let token_file = dir.path("agent.token");
+    std::fs::write(&token_file, stdout(&issue(&key, BRANCH))).expect("writes the token");
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get","arguments":{"key":"player/42/gems"}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get","arguments":{"key":"player/7/email"}}}"#,
+    ];
+
+    let output = umbrachyx_on(
+        Some(&db),
+        &[
+            "mcp",
+            "--public-key",
+            &public,
+            "--token-file",
+            token_file.to_str().expect("utf-8"),
+        ],
+        &(requests.join("\n") + "\n"),
+    );
+
+    let replies = stdout(&output);
+    let replies: Vec<&str> = replies.lines().collect();
+    assert_eq!(replies.len(), 3, "{replies:?}");
+    assert!(replies[0].contains(r#""protocolVersion":"2025-06-18""#));
+    assert!(
+        replies[1].contains(r#"\"value\":\"120\""#),
+        "{}",
+        replies[1]
+    );
+    assert!(replies[2].contains(r#""isError":true"#), "{}", replies[2]);
+}
+
+#[test]
+fn umbrachyx_mcp_does_not_start_with_a_token_from_another_root() {
+    let dir = TempDir::new("mcp-foreign");
+    let key = dir.path("root.key");
+    keygen(&key);
+    let other = keygen(&dir.path("other.key"));
+    let token_file = dir.path("agent.token");
+    std::fs::write(&token_file, stdout(&issue(&key, BRANCH))).expect("writes the token");
+
+    let output = umbrachyx_on(
+        Some(&dir.path("log")),
+        &[
+            "mcp",
+            "--public-key",
+            &other,
+            "--token-file",
+            token_file.to_str().expect("utf-8"),
+        ],
+        "",
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("the token is not valid"), "{stderr}");
 }

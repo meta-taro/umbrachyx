@@ -11,6 +11,7 @@ without an entry here is not adopted.
 | `rustix` (dev, Unix only) | A plain `fsync` in the sync latency example, to compare it with `F_FULLFSYNC` | std has no way to call a plain `fsync` on macOS. Maintained by the Bytecode Alliance, Apache-2.0 / MIT, and safe to call, where `libc` would need `unsafe`. Not linked into the library |
 | `blake3` | The hash that names every node of the tree, so equal hashes mean equal content and a diff can skip shared subtrees | Collision resistance is required: a diff or a sync between replicas trusts that equal hashes mean equal data. CC0 / Apache-2.0, maintained by its authors. |
 | `biscuit-auth` | Capability tokens: what a caller may read or write, carried by the caller | Tokens can be narrowed offline by whoever holds them and never widened, and are verified with a public key, so nothing secret sits on the side that checks them. Writing an authorization scheme ourselves would need its own security review. Apache-2.0, maintained under the Eclipse Foundation. Default features are off; `datalog-macro` stays on because 6.0.0 does not build without it |
+| `serde_json` | Reading and writing the JSON-RPC messages of the MCP session | The de facto JSON crate for Rust, MIT OR Apache-2.0, maintained by the serde authors. It was already built as a dependency of `biscuit-auth`, so it adds no crate. Used through `Value` only, without derive macros. The MCP protocol itself is written here rather than taken from the official Rust SDK, which runs on an async runtime the server does not use; the part served is four methods |
 
 ## The log
 
@@ -402,3 +403,31 @@ checker to hold the shared secret that mints tokens.
   syncs the way writes from different connections do. Any other command
   first waits until the `SET`s before it are durable, so a `GET` reads what
   the same client set just before it, and replies stay in order.
+
+## The MCP session
+
+- **One agent, one token, over standard input and output.** The agent's
+  host starts `umbrachyx mcp --public-key K --token-file F` and exchanges
+  JSON-RPC messages with it, one per line. The token is read once, at the
+  start; a token not signed by the database's root key does not start a
+  session. Nothing listens on the network.
+- **Who the agent is and where it writes come from the token**, never from
+  its requests: the token's holder is the author of every commit, and its
+  branch is the only one written to. The agent is not asked for a
+  purpose; the token's purpose is the one checked.
+- **Every tool call is checked against the token for every key**, before
+  anything is read or written. A check costs about 60 µs, which is small
+  next to an agent's own round trip, so decisions are not cached yet.
+- **The column is the last part of a key**, as in `player/42/gems`, since
+  tokens name columns and the store holds keys.
+- **Refusals are tool results, not protocol errors**, so the agent reads
+  the reason: `refused:` followed by one of the four reasons a token gives.
+  A diff leaves out the keys the token cannot read instead of refusing,
+  so an agent sees its own part of a wider change; a token that allows
+  nothing at all, such as an expired one, is refused.
+- **Reads go to the agent's own branch once it exists**, otherwise to
+  `main`, unless the call names another branch.
+- **The session opens the log itself**, and the log takes one writer at a
+  time, so one agent works on a database file at a time for now. Serving
+  several agents at once would go through the committer, as the Redis
+  server does.
