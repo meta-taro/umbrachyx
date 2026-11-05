@@ -3,7 +3,9 @@
 //! the token's branch.
 //!
 //! Keys must be text, since tokens name keys by text prefixes. Values are
-//! returned as text when they are UTF-8 and as `{"hex": ...}` otherwise.
+//! returned as text when they are UTF-8 and as `{"hex": ...}` otherwise. A
+//! value whose subject was erased is `null` with `"erased": true`. Erasing
+//! is not a tool: a person does it.
 
 use serde_json::{Value, json};
 
@@ -104,8 +106,10 @@ fn get<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> Outc
     session
         .check(Operation::Read, &branch, key)
         .map_err(refused)?;
-    let value = session.store.get(&branch, key.as_bytes());
-    Ok(json!({"branch": branch, "key": key, "value": shown(value.as_deref())}))
+    let cell = session.store.cell(&branch, key.as_bytes());
+    let erased = cell.as_ref().is_some_and(|cell| cell.erased);
+    let value = cell.and_then(|cell| cell.value);
+    Ok(json!({"branch": branch, "key": key, "value": shown(value.as_deref()), "erased": erased}))
 }
 
 fn history<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> Outcome {
@@ -122,6 +126,7 @@ fn history<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> 
             let info = session.store.commit_info(&cell.changed_by)?;
             Some(json!({
                 "value": shown(cell.value.as_deref()),
+                "erased": cell.erased,
                 "commit": short(&info.id),
                 "time_us": info.time,
                 "who": info.provenance.who,
@@ -154,6 +159,7 @@ fn diff<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> Out
                 "key": key,
                 "before": shown(change.before.as_deref()),
                 "after": shown(change.after.as_deref()),
+                "erased": change.erased,
             })),
             Err(Denied::OutOfScope) => {}
             Err(denied) => return Err(refused(denied)),

@@ -326,7 +326,14 @@ fn writing_outside_the_token_writes_nothing_at_all() {
 #[test]
 fn merging_or_any_tool_not_offered_is_refused() {
     attack("no-tool", |agent| {
-        for tool in ["merge", "revert", "branch", "token", "set_approved_by"] {
+        for tool in [
+            "merge",
+            "revert",
+            "branch",
+            "erase",
+            "token",
+            "set_approved_by",
+        ] {
             let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                  "params": {"name": tool, "arguments": {"into": "main", "from": BRANCH}}});
             let reply = agent.send(&request.to_string()).expect("replies");

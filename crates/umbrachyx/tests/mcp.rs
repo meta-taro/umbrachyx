@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use biscuit_auth::KeyPair;
 use serde_json::{Value, json};
 use umbrachyx::capability::{self, Denied, Grant, Narrowing, Operation};
+use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
 use umbrachyx::log::{Edit, FileStorage};
 use umbrachyx::mcp::Session;
 use umbrachyx::store::{MAIN_BRANCH, Provenance, Store, SystemClock};
@@ -170,7 +171,7 @@ fn get_reads_inside_the_token_and_is_refused_outside() {
     assert_eq!(
         gems,
         (
-            json!({"branch": "main", "key": "player/42/gems", "value": "95"}),
+            json!({"branch": "main", "key": "player/42/gems", "value": "95", "erased": false}),
             false
         )
     );
@@ -225,7 +226,7 @@ fn diff_shows_only_the_keys_the_token_can_read() {
     assert!(!is_error, "{diff}");
     assert_eq!(
         diff["changes"],
-        json!([{"key": "player/42/gems", "before": "95", "after": "5095"}])
+        json!([{"key": "player/42/gems", "before": "95", "after": "5095", "erased": false}])
     );
 }
 
@@ -443,4 +444,46 @@ fn a_line_past_the_size_limit_is_refused_and_the_session_goes_on() {
     assert_eq!(replies[0]["error"]["code"], -32600);
     assert_eq!(replies[1]["id"], 2);
     assert_eq!(replies[1]["result"], json!({}));
+}
+
+/// An erased player's values come back as erased, not as absent or removed.
+#[test]
+fn erased_values_read_as_erased() {
+    let dir = TempDir::new("erased");
+    let key_storage: Box<dyn KeyStorage + Send> =
+        Box::new(FileKeyStorage::new(&dir.0.join("log.keys")));
+    let keys = Keys::open(key_storage).expect("opens the key file");
+    let storage = FileStorage::open(&dir.0.join("log")).expect("opens file");
+    let mut store = Store::open_sealed(storage, keys, SystemClock).expect("opens");
+    store
+        .commit(
+            MAIN_BRANCH,
+            vec![set("player/42/gems", "120")],
+            by("game:onboarding", "starter grant"),
+        )
+        .expect("commits");
+    let first = store.head(MAIN_BRANCH).expect("has a head");
+    store
+        .commit(
+            MAIN_BRANCH,
+            vec![set("player/42/gems", "95")],
+            by("game:shop", "bought a potion"),
+        )
+        .expect("commits");
+    store
+        .erase(b"player/42", by("ops:privacy", "account deletion request"))
+        .expect("erases");
+    let mut session = session(store, SystemTime::now() + HOUR);
+    let from = umbrachyx::store::short(&first);
+
+    let get = call(&mut session, "get", json!({"key": "player/42/gems"}));
+    let (history, _) = call(&mut session, "history", json!({"key": "player/42/gems"}));
+    let (diff, _) = call(&mut session, "diff", json!({"from": from, "to": "main"}));
+
+    assert_eq!(get.0["value"], Value::Null);
+    assert_eq!(get.0["erased"], true);
+    assert_eq!(history["changes"][0]["erased"], true);
+    assert_eq!(history["changes"][0]["why"], "bought a potion");
+    assert_eq!(history["changes"][1]["erased"], true);
+    assert_eq!(diff["changes"][0]["erased"], true);
 }

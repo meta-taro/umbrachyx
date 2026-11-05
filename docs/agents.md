@@ -52,8 +52,11 @@ The agent then has four tools:
 | `diff` | What differs between two branches or commits, leaving out keys outside the token |
 | `commit` | Sets and removes keys as one commit, with a reason, on the agent's branch |
 
-There is no tool to merge. A person reviews the agent's branch and merges
-it, naming who approved it:
+A value whose subject was erased comes back as `null` with
+`"erased": true`, so an agent can tell it from a value that was removed.
+
+There is no tool to merge or to erase. A person reviews the agent's branch
+and merges it, naming who approved it:
 
 ```sh
 umbrachyx diff main agent/support
@@ -78,7 +81,7 @@ every branch, key and value with what was there before.
 | Write to `main`, by naming it as the branch | Refused: `commit` takes no branch | `writing_to_main_is_refused` |
 | Write to another agent's branch | Refused: `commit` takes no branch | `writing_to_another_agents_branch_is_refused` |
 | Write another player's row or a column outside the token, alone or mixed with an allowed key | Refused: nothing written, not even the branch | `writing_outside_the_token_writes_nothing_at_all` |
-| Merge, revert, branch, issue tokens or approve: any tool not offered | Protocol error: no such tool | `merging_or_any_tool_not_offered_is_refused` |
+| Merge, revert, branch, erase, issue tokens or approve: any tool not offered | Protocol error: no such tool | `merging_or_any_tool_not_offered_is_refused` |
 | Send malformed messages | Protocol errors; the session goes on | `malformed_messages_change_nothing_and_the_session_goes_on` |
 | Send a message over 1 MiB | Refused without being held whole; the session goes on | `a_line_past_the_size_limit_is_refused_and_the_session_goes_on` in [`tests/mcp.rs`](../crates/umbrachyx/tests/mcp.rs) |
 | Append a block to its own token claiming another name, `main` as its branch, every player and column | Allows nothing more; its one allowed write lands on its own branch under its own name | `a_token_widened_by_its_holder_allows_nothing_more` |

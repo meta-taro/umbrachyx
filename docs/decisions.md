@@ -443,6 +443,11 @@ checker to hold the shared secret that mints tokens.
   whole, and the session goes on.
 - **What a hijacked agent cannot do is tested and published** in
   [`agents.md`](agents.md), with the test for each attack.
+- **Erased values are marked, and erasing is not a tool.** `get`,
+  `history` and `diff` return an erased value as `null` with
+  `"erased": true`. Destroying a subject's key is a person's decision,
+  made with the command-line tool. The Redis server answers an erased
+  value as nil, since its protocol has nothing else to say.
 - **The session opens the log itself**, and the log takes one writer at a
   time, so one agent works on a database file at a time for now. Serving
   several agents at once would go through the committer, as the Redis
