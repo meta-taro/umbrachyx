@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use biscuit_auth::KeyPair;
 use serde_json::{Value, json};
-use umbrachyx::capability::{self, Denied, Grant, Operation};
+use umbrachyx::capability::{self, Denied, Grant, Narrowing, Operation};
 use umbrachyx::log::{Edit, FileStorage};
 use umbrachyx::mcp::Session;
 use umbrachyx::store::{MAIN_BRANCH, Provenance, Store, SystemClock};
@@ -149,7 +149,7 @@ fn initialize_and_list_the_tools() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("named"))
         .collect();
-    for name in ["get", "history", "diff"] {
+    for name in ["get", "history", "diff", "commit"] {
         assert!(names.contains(&name), "{name} in {names:?}");
     }
     for tool in tools["result"]["tools"].as_array().expect("lists tools") {
@@ -299,4 +299,121 @@ fn malformed_and_unknown_requests_get_json_rpc_errors() {
     assert_eq!(unknown["error"]["code"], -32601);
     assert_eq!(no_tool["error"]["code"], -32602);
     assert!(no_key.1);
+}
+
+#[test]
+fn a_commit_lands_on_the_tokens_branch_with_the_agent_as_author() {
+    let dir = TempDir::new("commit");
+    let mut session = session(store(&dir), SystemTime::now() + HOUR);
+
+    let (written, is_error) = call(
+        &mut session,
+        "commit",
+        json!({"set": {"player/42/gems": "100"}, "remove": ["player/42/item"], "why": "refund for ticket 8812"}),
+    );
+    let main = call(
+        &mut session,
+        "get",
+        json!({"key": "player/42/gems", "branch": "main"}),
+    );
+    let own = call(&mut session, "get", json!({"key": "player/42/gems"}));
+    let item = call(&mut session, "get", json!({"key": "player/42/item"}));
+    let (history, _) = call(&mut session, "history", json!({"key": "player/42/gems"}));
+
+    assert!(!is_error, "{written}");
+    assert_eq!(written["branch"], BRANCH);
+    assert_eq!(main.0["value"], "95", "main is untouched");
+    assert_eq!(own.0["value"], "100");
+    assert_eq!(item.0["value"], Value::Null);
+    assert_eq!(history["changes"][0]["who"], SUBJECT);
+    assert_eq!(history["changes"][0]["why"], "refund for ticket 8812");
+    assert_eq!(history["changes"][0]["approved_by"], Value::Null);
+    assert_eq!(history["changes"][0]["commit"], written["commit"]);
+}
+
+#[test]
+fn a_commit_with_one_key_outside_the_token_writes_nothing() {
+    let dir = TempDir::new("commit-scope");
+    let mut session = session(store(&dir), SystemTime::now() + HOUR);
+
+    let refused = call(
+        &mut session,
+        "commit",
+        json!({"set": {"player/42/gems": "100", "player/7/gems": "999999"}, "why": "refund"}),
+    );
+    let own = call(&mut session, "get", json!({"key": "player/42/gems"}));
+
+    assert_eq!(
+        refused,
+        (
+            Value::String(format!("refused: {}", Denied::OutOfScope)),
+            true
+        )
+    );
+    assert_eq!(own.0["branch"], "main", "no branch was made");
+    assert_eq!(own.0["value"], "95");
+}
+
+#[test]
+fn a_commit_names_no_branch_and_needs_a_reason() {
+    let dir = TempDir::new("commit-arguments");
+    let mut session = session(store(&dir), SystemTime::now() + HOUR);
+    let set = json!({"player/42/gems": "100"});
+
+    let to_main = call(
+        &mut session,
+        "commit",
+        json!({"set": set, "why": "refund", "branch": "main"}),
+    );
+    let no_reason = call(&mut session, "commit", json!({"set": set}));
+    let blank_reason = call(&mut session, "commit", json!({"set": set, "why": "  "}));
+    let nothing = call(&mut session, "commit", json!({"why": "refund"}));
+    let not_text = call(
+        &mut session,
+        "commit",
+        json!({"set": {"player/42/gems": 100}, "why": "refund"}),
+    );
+    let main = call(
+        &mut session,
+        "get",
+        json!({"key": "player/42/gems", "branch": "main"}),
+    );
+
+    for refused in [&to_main, &no_reason, &blank_reason, &nothing, &not_text] {
+        assert!(refused.1, "{refused:?}");
+    }
+    assert_eq!(main.0["value"], "95");
+}
+
+#[test]
+fn a_read_only_token_cannot_commit() {
+    let dir = TempDir::new("commit-read-only");
+    let root = KeyPair::new();
+    let token = capability::issue(&root, &grant(SystemTime::now() + HOUR)).expect("issues");
+    let read_only = capability::narrow(
+        &token,
+        root.public(),
+        &Narrowing {
+            operation: Some(Operation::Read),
+            ..Narrowing::default()
+        },
+    )
+    .expect("narrows");
+    let mut session = Session::new(store(&dir), &read_only, root.public()).expect("starts");
+
+    let refused = call(
+        &mut session,
+        "commit",
+        json!({"set": {"player/42/gems": "100"}, "why": "refund"}),
+    );
+    let read = call(&mut session, "get", json!({"key": "player/42/gems"}));
+
+    assert_eq!(
+        refused,
+        (
+            Value::String(format!("refused: {}", Denied::OutOfScope)),
+            true
+        )
+    );
+    assert_eq!(read.0["value"], "95");
 }

@@ -427,6 +427,15 @@ checker to hold the shared secret that mints tokens.
   nothing at all, such as an expired one, is refused.
 - **Reads go to the agent's own branch once it exists**, otherwise to
   `main`, unless the call names another branch.
+- **One tool writes: `commit`.** It takes the values to set, the keys to
+  remove and a reason, and no branch: the commit goes to the token's
+  branch, made from `main` the first time, with the token's holder as
+  author. An argument it does not know, such as a branch, is refused
+  rather than ignored. Every key is checked before anything is written,
+  so a commit with one key outside the token writes nothing, not even the
+  branch. A reason is required, since it is the history's answer to
+  "why". Merging into `main` is not a tool: a person reviews the branch
+  and merges it with the command-line tool, naming who approved it.
 - **The session opens the log itself**, and the log takes one writer at a
   time, so one agent works on a database file at a time for now. Serving
   several agents at once would go through the committer, as the Redis

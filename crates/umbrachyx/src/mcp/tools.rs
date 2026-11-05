@@ -1,5 +1,6 @@
 //! The tools an agent can call. Each checks the token for every key it
-//! touches before reading or writing it.
+//! touches before reading or writing it. Only `commit` writes, and only to
+//! the token's branch.
 //!
 //! Keys must be text, since tokens name keys by text prefixes. Values are
 //! returned as text when they are UTF-8 and as `{"hex": ...}` otherwise.
@@ -8,8 +9,11 @@ use serde_json::{Value, json};
 
 use super::Session;
 use crate::capability::{Denied, Operation};
-use crate::log::Storage;
-use crate::store::{Clock, short};
+use crate::log::{Edit, Storage};
+use crate::store::{Clock, MAIN_BRANCH, Provenance, short};
+
+/// The arguments `commit` takes. There is no branch among them.
+const COMMIT_ARGUMENTS: [&str; 3] = ["set", "remove", "why"];
 
 type Outcome = Result<Value, String>;
 
@@ -55,6 +59,27 @@ pub(super) fn list() -> Value {
                 "required": ["from", "to"],
             },
         },
+        {
+            "name": "commit",
+            "description": "Write values as one commit to the agent's own branch, made from main \
+                            the first time. Nothing is written to main: a person reviews the \
+                            branch and merges it. Every key must be inside the agent's token, \
+                            or nothing is written.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "set": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Keys and their new values",
+                    },
+                    "remove": {"type": "array", "items": {"type": "string"}},
+                    "why": {"type": "string", "description": "The reason, kept with the commit"},
+                },
+                "required": ["why"],
+                "additionalProperties": false,
+            },
+        },
     ])
 }
 
@@ -68,6 +93,7 @@ pub(super) fn call<S: Storage, C: Clock>(
         "get" => get(session, arguments),
         "history" => history(session, arguments),
         "diff" => diff(session, arguments),
+        "commit" => commit(session, arguments),
         _ => return None,
     })
 }
@@ -136,6 +162,88 @@ fn diff<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> Out
     Ok(json!({"from": from_name, "to": to_name, "changes": changes}))
 }
 
+/// Every key is checked before anything is written, so a commit with one
+/// key outside the token writes nothing, not even the branch.
+fn commit<S: Storage, C: Clock>(session: &mut Session<S, C>, arguments: &Value) -> Outcome {
+    let branch = session.holder.branch.clone();
+    if let Some(other) = arguments.as_object().and_then(|fields| {
+        fields
+            .keys()
+            .find(|name| !COMMIT_ARGUMENTS.contains(&name.as_str()))
+    }) {
+        return Err(format!(
+            "commit takes no {other:?}: it writes to the token's branch, {branch}"
+        ));
+    }
+    let why = text(arguments, "why")?.trim();
+    if why.is_empty() {
+        return Err("why must say why".to_owned());
+    }
+    let edits = edits(arguments)?;
+    for edit in &edits {
+        let key = std::str::from_utf8(&edit.key).expect("keys are read from JSON text");
+        session
+            .check(Operation::Write, &branch, key)
+            .map_err(refused)?;
+    }
+    if !session.store.branches().any(|name| name == branch) {
+        session
+            .store
+            .create_branch(&branch, MAIN_BRANCH)
+            .map_err(|e| e.to_string())?;
+    }
+    let provenance = Provenance {
+        who: session.holder.subject.clone(),
+        why: why.to_owned(),
+        approved_by: None,
+    };
+    let id = session
+        .store
+        .commit(&branch, edits, provenance)
+        .map_err(|e| e.to_string())?;
+    Ok(json!({"branch": branch, "commit": short(&id)}))
+}
+
+/// The keys `set` gives values and the keys `remove` takes away, in that
+/// order. At least one.
+fn edits(arguments: &Value) -> Result<Vec<Edit>, String> {
+    let mut edits = Vec::new();
+    match arguments.get("set") {
+        None => {}
+        Some(Value::Object(values)) => {
+            for (key, value) in values {
+                let Value::String(value) = value else {
+                    return Err(format!("the value of {key:?} must be a string"));
+                };
+                edits.push(Edit {
+                    key: key.as_bytes().to_vec(),
+                    value: Some(value.as_bytes().to_vec()),
+                });
+            }
+        }
+        Some(_) => return Err("set must be an object of keys and values".to_owned()),
+    }
+    match arguments.get("remove") {
+        None => {}
+        Some(Value::Array(keys)) => {
+            for key in keys {
+                let Value::String(key) = key else {
+                    return Err("remove must list keys as strings".to_owned());
+                };
+                edits.push(Edit {
+                    key: key.as_bytes().to_vec(),
+                    value: None,
+                });
+            }
+        }
+        Some(_) => return Err("remove must be a list of keys".to_owned()),
+    }
+    if edits.is_empty() {
+        return Err("nothing to commit: give set or remove".to_owned());
+    }
+    Ok(edits)
+}
+
 /// The branch named in the arguments, or else the token's own branch once
 /// it exists, or else main.
 fn read_branch<S: Storage, C: Clock>(
@@ -148,7 +256,7 @@ fn read_branch<S: Storage, C: Clock>(
         Some(Value::String(branch)) => Err(format!("no branch {branch:?}")),
         Some(_) => Err("branch must be a string".to_owned()),
         None if exists(&session.holder.branch) => Ok(session.holder.branch.clone()),
-        None => Ok(crate::store::MAIN_BRANCH.to_owned()),
+        None => Ok(MAIN_BRANCH.to_owned()),
     }
 }
 
