@@ -13,7 +13,9 @@
 //! Opening only reads. A torn entry at the end, left by a crash while a key
 //! was appended, is cut when the next key is written: by then the store has
 //! checked that every key its log uses is here, so damage that only looks
-//! like a torn end is refused before anything is lost. A write that fails
+//! like a torn end is refused before anything is lost. Bytes that do not
+//! make a whole entry are a torn end, garbage included, as long as no whole
+//! entry follows them; with one after them they are damage, and refused. A write that fails
 //! leaves the same kind of leftover, a torn append or a key whose erasure
 //! did not reach the file, and the next write replaces the whole file too.
 //!
@@ -32,8 +34,7 @@ use crate::log::sync_parent_dir;
 /// AES-SIV with AES-256 takes two 256-bit keys.
 pub const KEY_LEN: usize = 64;
 pub type Key = [u8; KEY_LEN];
-/// Subjects are short names such as `player/42`. The limit also means a
-/// damaged length is recognised as damage rather than read as a torn end.
+/// Subjects are short names such as `player/42`.
 pub const MAX_SUBJECT_LEN: usize = 1_024;
 pub const FINGERPRINT_LEN: usize = 8;
 /// Names a key without revealing it, so ciphertext can say which key it
@@ -131,8 +132,8 @@ impl KeyStorage for FileKeyStorage {
 #[derive(Debug)]
 pub enum KeyError {
     Io(io::Error),
-    /// An entry before the last one is damaged. Keys after it may be in
-    /// use, so they are not dropped.
+    /// An entry is damaged and whole keys follow it. They may be in use, so
+    /// they are not dropped.
     Damaged,
     /// Subjects are at most [`MAX_SUBJECT_LEN`] bytes.
     SubjectTooLong,
@@ -293,18 +294,15 @@ fn parse(bytes: &[u8]) -> Result<(HashMap<Vec<u8>, Key>, usize), KeyError> {
     let mut keys = HashMap::new();
     let mut at = 0;
     while at < bytes.len() {
-        let Some(end) = entry_end(bytes, at)? else {
-            // Shorter than its own length says: a torn append.
+        let Some(end) = whole_entry(bytes, at) else {
+            // A torn append, unless a whole key follows: then this is damage
+            // in the middle, and the keys after it must not be cut.
+            if (at + 1..bytes.len()).any(|from| whole_entry(bytes, from).is_some()) {
+                return Err(KeyError::Damaged);
+            }
             break;
         };
         let body = &bytes[at..end - CRC_BYTES];
-        let crc = u32::from_le_bytes(bytes[end - CRC_BYTES..end].try_into().expect("4 bytes"));
-        if crc32fast::hash(body) != crc {
-            if end == bytes.len() {
-                break;
-            }
-            return Err(KeyError::Damaged);
-        }
         let subject = &body[LEN_BYTES..body.len() - KEY_LEN];
         let key: Key = body[body.len() - KEY_LEN..]
             .try_into()
@@ -315,16 +313,17 @@ fn parse(bytes: &[u8]) -> Result<(HashMap<Vec<u8>, Key>, usize), KeyError> {
     Ok((keys, at))
 }
 
-/// Where the entry starting at `at` ends, or `None` if not all of it is
-/// there.
-fn entry_end(bytes: &[u8], at: usize) -> Result<Option<usize>, KeyError> {
-    let Some(len_bytes) = bytes.get(at..at + LEN_BYTES) else {
-        return Ok(None);
-    };
+/// Where the entry starting at `at` ends, if it is all there, its subject
+/// is no longer than the limit, and its checksum matches.
+fn whole_entry(bytes: &[u8], at: usize) -> Option<usize> {
+    let len_bytes = bytes.get(at..at + LEN_BYTES)?;
     let subject_len = usize::from(u16::from_le_bytes([len_bytes[0], len_bytes[1]]));
     if subject_len > MAX_SUBJECT_LEN {
-        return Err(KeyError::Damaged);
+        return None;
     }
     let end = at + LEN_BYTES + subject_len + KEY_LEN + CRC_BYTES;
-    Ok((end <= bytes.len()).then_some(end))
+    let entry = bytes.get(at..end)?;
+    let (body, crc) = entry.split_at(entry.len() - CRC_BYTES);
+    let crc = u32::from_le_bytes(crc.try_into().expect("4 bytes"));
+    (crc32fast::hash(body) == crc).then_some(end)
 }

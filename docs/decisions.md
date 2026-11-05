@@ -154,8 +154,8 @@ memory speed for writes will need group commit: one sync for many writes.
   Its first seeds found two faults in the key file, both fixed (see
   [Erasing a subject](#erasing-a-subject)). The keys come from the
   operating system's random source, so the ciphertext differs between
-  runs of a seed; nothing the run decides depends on it. A torn append is
-  simulated as a clean prefix of the entry.
+  runs of a seed; nothing the run decides depends on it. A torn append
+  leaves a prefix of its entry, or as many bytes of garbage.
 
 ## The tree
 
@@ -516,21 +516,22 @@ erases the subject while the history keeps its shape (see
 - **Opening the key file only reads it.** A torn entry at the end, left by
   a crash while a key was appended, is cut when the next key is written,
   after the store has checked that every key its log uses is present. A
-  damaged entry before the last one, or a subject length over 1,024 bytes,
-  is refused as damage rather than read as a torn end: otherwise one
-  flipped bit in a length would make every key after it look torn and be
-  cut, which would erase those subjects.
+  damaged entry with whole entries after it is refused as damage rather
+  than read as a torn end: otherwise one flipped bit in a length would
+  make every key after it look torn and be cut, which would erase those
+  subjects.
 - **A key file write that fails leaves the file to be replaced whole.**
   A failed append may have left part of its entry; appending the next key
   after it would bury the torn bytes where they read as damage, and the
   store would not open. So the next write replaces the file with the keys
   in memory instead, as it does after a torn end found when opening.
-- **A torn append whose length bytes came out as garbage is refused as
-  damage**, not cut, if the garbage length is over the limit or does not
-  line up with the end of the file. The store then does not open until a
-  person looks at the key file. Telling such a tail from a flipped bit in
-  an earlier length would need a marker or a second checksum per entry;
-  that is left until it is seen.
+- **Bytes that do not make a whole entry are a torn end if no whole entry
+  follows them**, whatever they hold: a torn append can come out as
+  garbage, its length included. If a whole entry, with a length within
+  the limit and a matching checksum, follows them, they are damage, and
+  the file is refused, since the keys after them may be in use. Damage in
+  the last entry therefore reads as a torn end; if the log uses that key,
+  the store refuses to open for the missing key before the file is cut.
 - **Each key has a fingerprint**, eight bytes of a BLAKE3 key derivation
   from it, so ciphertext can name the key it needs without revealing it,
   and a value whose key was erased can be told apart from a damaged one.

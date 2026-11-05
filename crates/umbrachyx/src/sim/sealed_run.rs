@@ -352,6 +352,7 @@ impl Run {
         }
         let fault = KeyFault {
             torn: self.rng.below(MAX_TORN) as usize,
+            garbage: self.rng.percent(50).then(|| self.rng.next_u64()),
             new_survives: self.rng.percent(50),
         };
         self.key_disk.fail_next_write(fault);

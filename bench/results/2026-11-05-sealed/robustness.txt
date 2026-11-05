@@ -5,8 +5,8 @@ running 3 tests
 test sim::run::tests::ten_thousand_seeds ... ok
 store, 10000 seeds: 635173 commits (97797 groups), 152927 restarts, interrupted commits kept 6065 and lost 6288, clock went back 21924 times, 41343 branches made, 5526 merges, 12075 merges refused for conflicts, 16999 reverts
 test sim::store_run::tests::ten_thousand_seeds ... ok
-sealed store, 10000 seeds: 406678 commits, 70278 erasures, 120488 restarts, 16044 commits refused for a failed key write, 9431 erasures whose key file was finished later, interrupted erasures kept 1313 and lost 1297, 242264 commits to erased subjects
+sealed store, 10000 seeds: 406949 commits, 70093 erasures, 120624 restarts, 15984 commits refused for a failed key write, 9561 erasures whose key file was finished later, interrupted erasures kept 1327 and lost 1258, 242569 commits to erased subjects
 test sim::sealed_run::tests::ten_thousand_seeds_sealed ... ok
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 52 filtered out; finished in 27.51s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 52 filtered out; finished in 27.06s
 

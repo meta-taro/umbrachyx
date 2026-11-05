@@ -193,6 +193,35 @@ fn opening_never_changes_the_file() {
     assert_eq!(std::fs::read(dir.keys()).expect("reads"), bytes);
 }
 
+/// A torn append can come out as garbage, length included. With no whole
+/// key after it, it is a torn end: cut by the next write, not refused.
+#[test]
+fn a_torn_append_of_garbage_is_a_torn_end() {
+    for (name, garbage) in [
+        ("long", vec![0xFF, 0xFF, 0x13, 0x37]),
+        ("short", [&[5, 0][..], &[0xA5; 100][..]].concat()),
+    ] {
+        let dir = TempDir::new(&format!("garbage-{name}"));
+        let mut keys = dir.open().expect("opens");
+        let kept = keys.key_for(b"player/42").expect("makes a key");
+        drop(keys);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.keys())
+            .expect("opens the file");
+        file.write_all(&garbage).expect("writes garbage");
+        drop(file);
+
+        let mut keys = dir.open().expect("opens past the garbage");
+        let added = keys.key_for(b"player/7").expect("makes a key");
+        drop(keys);
+        let reopened = dir.open().expect("reopens");
+
+        assert_eq!(reopened.get(b"player/42"), Some(&kept), "{name}");
+        assert_eq!(reopened.get(b"player/7"), Some(&added), "{name}");
+    }
+}
+
 /// A length longer than any subject can be is damage, not a torn append,
 /// so a flipped bit in a length cannot make every key after it look torn.
 #[test]

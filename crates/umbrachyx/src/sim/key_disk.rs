@@ -9,12 +9,16 @@
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use super::rng::Rng;
 use crate::keys::KeyStorage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyFault {
     /// How many bytes of a failed append reach the disk, at most.
     pub torn: usize,
+    /// If set, those bytes come out as garbage drawn from this seed rather
+    /// than as written.
+    pub garbage: Option<u64>,
     /// Whether a failed replacement leaves the new file in place.
     pub new_survives: bool,
 }
@@ -58,7 +62,11 @@ impl KeyStorage for SimKeyStorage {
             return Ok(());
         };
         let kept = fault.torn.min(bytes.len());
-        disk.bytes.extend_from_slice(&bytes[..kept]);
+        if let Some(seed) = fault.garbage {
+            disk.bytes.extend(Rng::new(seed).bytes(kept));
+        } else {
+            disk.bytes.extend_from_slice(&bytes[..kept]);
+        }
         Err(io::Error::other("injected key file failure, append torn"))
     }
 

@@ -300,3 +300,32 @@ fn a_log_written_without_encryption_is_refused() {
         opened.err()
     );
 }
+
+/// Damage in the last key reads like a torn end, since no key follows it.
+/// If the log uses that key, opening refuses before the key file is cut.
+#[test]
+fn a_damaged_last_key_the_log_uses_is_refused() {
+    let dir = TempDir::new("damaged-last");
+    let mut store = dir.open().expect("opens");
+    store
+        .commit(
+            MAIN_BRANCH,
+            vec![set("player/42/gems", "95")],
+            by("a", "grant"),
+        )
+        .expect("commits");
+    drop(store);
+    let mut bytes = std::fs::read(dir.keys()).expect("reads the key file");
+    let last = bytes.len() - 10;
+    bytes[last] ^= 1;
+    std::fs::write(dir.keys(), &bytes).expect("writes the key file");
+
+    let opened = dir.open();
+
+    assert!(
+        matches!(opened, Err(StoreError::MissingKeys(1))),
+        "{:?}",
+        opened.err()
+    );
+    assert_eq!(std::fs::read(dir.keys()).expect("reads"), bytes);
+}
