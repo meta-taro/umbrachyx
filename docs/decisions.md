@@ -484,8 +484,10 @@ erases the subject while the history keeps its shape (see
 - **Opening every value costs reads about a fifth of their throughput**
   with 50 clients on the laptop, and a durable write about a tenth
   ([`bench/results/2026-11-05-sealed`](../bench/results/2026-11-05-sealed/)).
-  Each read expands its subject's AES key again; keeping expanded keys is
-  the first thing to try.
+  Each read sets up AES-SIV for its subject's key, and `aes-siv` expands
+  the counter-mode key inside every operation, so keeping the cipher
+  between reads would save only part of it. Whether to accept the cost,
+  cache opened values, or seal only the columns that need erasing is open.
 - **The first value of a new subject costs a sync of the key file**, on
   top of the log's, made on the committer's thread. Writes that create
   many subjects at once pay it once each; batching them is left until it
