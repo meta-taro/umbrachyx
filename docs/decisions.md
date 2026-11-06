@@ -426,7 +426,8 @@ checker to hold the shared secret that mints tokens.
   server's process is the only one that may open the log: a second process
   opening it would be a second writer, and opening a log repairs a torn
   end, which is a write. The commands read any branch, main included,
-  since a branch is reviewed against main. They write nothing. Like `GET`,
+  since a branch is reviewed against main, and `BRANCHES` names the branch
+  the server writes to. They write nothing. Like `GET`,
   they are guarded only by listening on this machine, so anyone who can
   reach the port also sees who changed what and why; values of erased
   subjects stay unreadable here as everywhere.

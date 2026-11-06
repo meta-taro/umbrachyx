@@ -218,7 +218,7 @@ impl Server {
                 name.to_ascii_lowercase()
             )),
             _ => {
-                if let Some(reply) = history::answer(&self.writer, &name, args) {
+                if let Some(reply) = history::answer(&self.writer, &self.branch, &name, args) {
                     return Some(Step::Reply(reply));
                 }
                 let shown: String = name.chars().take(MAX_NAME_SHOWN).collect();

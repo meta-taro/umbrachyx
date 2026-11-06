@@ -417,6 +417,10 @@ fn branches_log_and_diff_show_what_the_branch_changed() {
         .map(|branch| branch["name"].as_str().expect("name"))
         .collect();
     assert_eq!(names, [BRANCH, MAIN_BRANCH]);
+    assert_eq!(
+        branches["served"], BRANCH,
+        "a client learns which branch it writes to"
+    );
     let commits = log["commits"].as_array().expect("a list of commits");
     assert_eq!(commits.len(), 2);
     assert_eq!(branches["branches"][0]["head"], commits[0]["commit"]);

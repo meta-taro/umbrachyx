@@ -44,17 +44,21 @@ enum Question {
 }
 
 /// The reply to the history command `name`, or `None` if there is none by
-/// that name. `name` is upper case.
-pub(super) fn answer(writer: &Writer, name: &str, args: &[Vec<u8>]) -> Option<Reply> {
+/// that name. `name` is upper case; `served` is the branch this server
+/// writes to.
+pub(super) fn answer(writer: &Writer, served: &str, name: &str, args: &[Vec<u8>]) -> Option<Reply> {
     let question = match read(name, args)? {
         Ok(question) => question,
         Err(error) => return Some(Reply::Error(format!("ERR {error}"))),
     };
-    Some(match writer.ask(move |store| ask(store, &question)) {
-        Ok(Ok(answer)) => Reply::Bulk(Some(answer.to_string().into_bytes())),
-        Ok(Err(error)) => Reply::Error(format!("ERR {error}")),
-        Err(error) => Reply::Error(format!("ERR {error}")),
-    })
+    let served = served.to_owned();
+    Some(
+        match writer.ask(move |store| ask(store, &served, &question)) {
+            Ok(Ok(answer)) => Reply::Bulk(Some(answer.to_string().into_bytes())),
+            Ok(Err(error)) => Reply::Error(format!("ERR {error}")),
+            Err(error) => Reply::Error(format!("ERR {error}")),
+        },
+    )
 }
 
 fn read(name: &str, args: &[Vec<u8>]) -> Option<Result<Question, String>> {
@@ -92,9 +96,9 @@ fn text(arg: &[u8]) -> Result<String, String> {
     String::from_utf8(arg.to_vec()).map_err(|_| "a branch or commit name must be UTF-8".to_owned())
 }
 
-fn ask(store: &dyn Inspect, question: &Question) -> Result<Value, StoreError> {
+fn ask(store: &dyn Inspect, served: &str, question: &Question) -> Result<Value, StoreError> {
     match question {
-        Question::Branches => Ok(branches(store)),
+        Question::Branches => Ok(branches(store, served)),
         Question::Cells { branch, after } => {
             require_branch(store, branch)?;
             Ok(cells(store, branch, after.as_deref()))
@@ -119,7 +123,9 @@ fn require_branch(store: &dyn Inspect, branch: &str) -> Result<(), StoreError> {
     }
 }
 
-fn branches(store: &dyn Inspect) -> Value {
+/// Every branch, and the one this server writes to, so a client knows
+/// which branch its own writes are in.
+fn branches(store: &dyn Inspect, served: &str) -> Value {
     let branches: Vec<Value> = store
         .branches()
         .into_iter()
@@ -132,7 +138,7 @@ fn branches(store: &dyn Inspect) -> Value {
             })
         })
         .collect();
-    json!({"branches": branches})
+    json!({"branches": branches, "served": served})
 }
 
 /// One page of cells. `next` is the last key of the page when more follow,
