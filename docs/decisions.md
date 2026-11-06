@@ -386,6 +386,16 @@ checker to hold the shared secret that mints tokens.
   Existing clients work with it, and `valkey-benchmark` can measure it
   and Valkey with the same tool over the same loopback socket, which is
   what makes read latencies comparable.
+- **`SCAN`, `TYPE` and `TTL` are answered too, so a viewer can list keys.**
+  Database viewers that speak Redis find keys with `SCAN` and open each
+  after asking its type and time to live. Every value is a string and
+  none expires, so `TYPE` and `TTL` answer as Redis does for such a key.
+  They read the latest view, as `GET` does. A `SCAN` cursor counts the
+  entries of the branch's tree already walked, because Redis clients
+  expect a number; finding where it points reads the entries before it,
+  and a key added or removed before it during a walk can make the walk
+  return a key twice or miss one, which Redis allows for keys changed
+  during a walk.
 - **It serves one branch, never main.** Writes from a client are not
   trusted, so they land where a person can review the diff before merging
   it. Each `SET` is one commit, acknowledged once durable, with the

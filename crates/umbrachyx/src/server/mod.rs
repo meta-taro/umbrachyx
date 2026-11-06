@@ -7,8 +7,9 @@
 //! author. Reads come from the latest view the committer published, so a
 //! client reads back what it has written.
 //!
-//! Commands named `UMBRA.` read the history of any branch, for a person's
-//! tools (see `history`).
+//! For a viewer, `SCAN`, `TYPE` and `TTL` list and describe the keys of the
+//! branch (see `keys`), and commands named `UMBRA.` read the history of any
+//! branch (see `history`).
 //!
 //! There is no authentication yet, so a server should listen only on this
 //! machine.
@@ -30,6 +31,7 @@ use crate::log::Edit;
 use crate::store::{CommitId, MAIN_BRANCH, Pending, Provenance, Reader, StoreError, Writer};
 
 mod history;
+mod keys;
 pub mod resp;
 
 pub use history::MAX_PAGE;
@@ -218,6 +220,10 @@ impl Server {
                 name.to_ascii_lowercase()
             )),
             _ => {
+                let view = self.reader.view();
+                if let Some(reply) = keys::answer(&view, &self.branch, &name, args) {
+                    return Some(Step::Reply(reply));
+                }
                 if let Some(reply) = history::answer(&self.writer, &self.branch, &name, args) {
                     return Some(Step::Reply(reply));
                 }

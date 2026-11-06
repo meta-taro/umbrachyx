@@ -42,7 +42,8 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               destroys the key of a subject such as player/42
   erasures                    every subject erased, with who and why
   serve <branch> [--port P] [--max-connections N]
-                              Redis protocol (GET, SET, PING) on 127.0.0.1
+                              Redis protocol on 127.0.0.1: GET, SET, PING,
+                              SCAN, TYPE, TTL, and UMBRA.* to read history
   mcp --public-key K --token-file F
                               MCP over stdin and stdout, for one agent's token
 

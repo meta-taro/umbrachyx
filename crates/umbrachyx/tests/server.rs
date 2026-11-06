@@ -528,3 +528,86 @@ fn a_long_diff_answers_one_page() {
     assert_eq!(changes[0]["key"], "k/00000");
     assert_eq!(diff["more"], true);
 }
+
+/// What a viewer sends to list keys and open one: `SCAN` walks the served
+/// branch in key order a page at a time, and `MATCH` keeps the keys that fit.
+#[test]
+fn scan_walks_the_served_branch_in_pages() {
+    let dir = TempDir::new("scan");
+    let (_committer, mut client) = start(&dir);
+    set_all(
+        &mut client,
+        &[("b/1", "x"), ("a/2", "x"), ("a/1", "x"), ("c", "x")],
+    );
+
+    let mut requests = Vec::new();
+    for args in [
+        &["SCAN", "0", "COUNT", "2"][..],
+        &["SCAN", "2", "COUNT", "10"],
+        &["scan", "0", "MATCH", "a/*"],
+        &["SCAN", "0", "COUNT", "3", "MATCH", "b/*"],
+    ] {
+        requests.extend(command(args));
+    }
+    client.write_all(&requests).expect("sends");
+
+    let expected = b"*2\r\n$1\r\n2\r\n*2\r\n$3\r\na/1\r\n$3\r\na/2\r\n\
+*2\r\n$1\r\n0\r\n*2\r\n$3\r\nb/1\r\n$1\r\nc\r\n\
+*2\r\n$1\r\n0\r\n*2\r\n$3\r\na/1\r\n$3\r\na/2\r\n\
+*2\r\n$1\r\n3\r\n*1\r\n$3\r\nb/1\r\n";
+    assert_eq!(
+        String::from_utf8_lossy(&read_reply(&mut client, expected)),
+        String::from_utf8_lossy(expected)
+    );
+}
+
+/// Every value is a string and none expires, so `TYPE` and `TTL` answer as
+/// Redis does for such a key, and as for a missing one otherwise.
+#[test]
+fn type_and_ttl_answer_for_strings_that_never_expire() {
+    let dir = TempDir::new("type-ttl");
+    let (_committer, mut client) = start(&dir);
+    set_all(&mut client, &[("gold", "1")]);
+
+    let mut requests = Vec::new();
+    for args in [
+        &["TYPE", "gold"][..],
+        &["TYPE", "missing"],
+        &["TTL", "gold"],
+        &["TTL", "missing"],
+    ] {
+        requests.extend(command(args));
+    }
+    client.write_all(&requests).expect("sends");
+
+    let expected = b"+string\r\n+none\r\n:-1\r\n:-2\r\n";
+    assert_eq!(read_reply(&mut client, expected), expected);
+}
+
+#[test]
+fn scan_refuses_what_it_does_not_take() {
+    let dir = TempDir::new("scan-refused");
+    let (_committer, mut client) = start(&dir);
+
+    let mut requests = Vec::new();
+    for args in [
+        &["SCAN", "x"][..],
+        &["SCAN", "0", "COUNT", "0"],
+        &["SCAN", "0", "TYPE", "hash"],
+        &["SCAN"],
+        &["TYPE"],
+    ] {
+        requests.extend(command(args));
+    }
+    client.write_all(&requests).expect("sends");
+
+    let expected = b"-ERR invalid cursor\r\n\
+-ERR syntax error\r\n\
+-ERR syntax error\r\n\
+-ERR wrong number of arguments for 'scan' command\r\n\
+-ERR wrong number of arguments for 'type' command\r\n";
+    assert_eq!(
+        String::from_utf8_lossy(&read_reply(&mut client, expected)),
+        String::from_utf8_lossy(expected)
+    );
+}

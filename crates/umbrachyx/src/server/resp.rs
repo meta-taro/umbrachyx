@@ -133,11 +133,19 @@ pub enum Reply {
     Integer(i64),
     /// A value, or nil when there is none.
     Bulk(Option<Vec<u8>>),
+    Array(Vec<Reply>),
 }
 
 impl Reply {
     /// Appends the reply as RESP to `out`.
     pub fn write_to(&self, out: &mut Vec<u8>) {
+        if let Self::Array(items) = self {
+            out.extend_from_slice(format!("*{}\r\n", items.len()).as_bytes());
+            for item in items {
+                item.write_to(out);
+            }
+            return;
+        }
         match self {
             Self::Simple(text) => {
                 out.push(b'+');
@@ -158,6 +166,7 @@ impl Reply {
                 out.extend_from_slice(format!("${}\r\n", value.len()).as_bytes());
                 out.extend_from_slice(value);
             }
+            Self::Array(_) => unreachable!("written above"),
         }
         out.extend_from_slice(b"\r\n");
     }
