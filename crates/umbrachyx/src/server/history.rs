@@ -191,10 +191,17 @@ fn log(store: &dyn Inspect, branch: &str) -> Value {
     json!({"branch": branch, "commits": commits, "more": log.len() > MAX_PAGE})
 }
 
+/// The first page of keys, in key order, whose values differ; `more` says
+/// others were left out. Working the diff out costs the number of changes,
+/// not the size of the branches.
 fn diff(store: &dyn Inspect, from: &str, to: &str) -> Result<Value, StoreError> {
     let changes = store.diff(named(store, from)?.as_ref(), named(store, to)?.as_ref())?;
-    let changes: Vec<Value> = changes.iter().map(report::value_change).collect();
-    Ok(json!({"from": from, "to": to, "changes": changes}))
+    let shown: Vec<Value> = changes
+        .iter()
+        .take(MAX_PAGE)
+        .map(report::value_change)
+        .collect();
+    Ok(json!({"from": from, "to": to, "changes": shown, "more": changes.len() > MAX_PAGE}))
 }
 
 /// The commit `name` names, or `None` for a branch with no commits yet,

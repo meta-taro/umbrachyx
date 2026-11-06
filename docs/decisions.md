@@ -442,7 +442,9 @@ checker to hold the shared secret that mints tokens.
   whole branch or a whole history. A page of cells names the key to go on
   from, and the next page starts with one walk down the tree to it. A key's
   history and a branch's log give their newest page and say whether older
-  entries were left out.
+  entries were left out. A diff gives its first page of keys and says
+  whether more differ; it is still worked out whole, which costs the
+  number of changes, not the size of the branches.
 
 ## The MCP session
 

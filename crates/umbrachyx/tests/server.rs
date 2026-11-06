@@ -430,6 +430,7 @@ fn branches_log_and_diff_show_what_the_branch_changed() {
         diff["changes"],
         serde_json::json!([{"key": "gold", "before": null, "after": "2", "erased": false}])
     );
+    assert_eq!(diff["more"], false);
 }
 
 #[test]
@@ -504,4 +505,26 @@ fn long_histories_and_logs_answer_one_page() {
     let commits = log["commits"].as_array().expect("commits");
     assert_eq!(commits.len(), umbrachyx::server::MAX_PAGE);
     assert_eq!(log["more"], true);
+}
+
+/// A diff over more keys than a page holds answers with a page and says
+/// the rest were left out.
+#[test]
+fn a_long_diff_answers_one_page() {
+    let dir = TempDir::new("diff-pages");
+    let (_committer, mut client) = start(&dir);
+    let total = umbrachyx::server::MAX_PAGE + 1;
+    let sets: Vec<u8> = (0..total)
+        .flat_map(|n| command(&["SET", &format!("k/{n:05}"), "v"]))
+        .collect();
+    client.write_all(&sets).expect("sends");
+    let all_ok = b"+OK\r\n".repeat(total);
+    assert_eq!(read_reply(&mut client, &all_ok), all_ok);
+
+    let diff = ask_json(&mut client, &["UMBRA.DIFF", MAIN_BRANCH, BRANCH]);
+
+    let changes = diff["changes"].as_array().expect("changes");
+    assert_eq!(changes.len(), umbrachyx::server::MAX_PAGE);
+    assert_eq!(changes[0]["key"], "k/00000");
+    assert_eq!(diff["more"], true);
 }
