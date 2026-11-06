@@ -353,3 +353,28 @@ fn a_diff_marks_erased_values_rather_than_showing_them_absent() {
         (None, None)
     );
 }
+
+/// Listing a branch's cells, as a person's tool does, shows an erased
+/// subject's keys as erased, never their values.
+#[test]
+fn listed_cells_show_erased_values_as_erased() {
+    let dir = TempDir::new("cells");
+    let mut store = dir.open();
+    seed(&mut store);
+    assert!(erase_player_42(&mut store));
+
+    let cells: Vec<_> = store
+        .cells(MAIN_BRANCH, None, usize::MAX)
+        .into_iter()
+        .map(|(key, cell)| (text(Some(key)).expect("key"), text(cell.value), cell.erased))
+        .collect();
+
+    assert_eq!(
+        cells,
+        [
+            ("player/42/email".to_owned(), None, true),
+            ("player/42/gems".to_owned(), None, true),
+            ("player/7/gems".to_owned(), Some("30".to_owned()), false),
+        ]
+    );
+}

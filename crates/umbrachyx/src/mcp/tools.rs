@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use super::Session;
 use crate::capability::{Denied, Operation};
 use crate::log::{Edit, Storage};
+use crate::report::{self, shown};
 use crate::store::{Clock, MAIN_BRANCH, Provenance, short};
 
 /// The arguments `commit` takes. There is no branch among them.
@@ -124,15 +125,7 @@ fn history<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> 
         .into_iter()
         .filter_map(|cell| {
             let info = session.store.commit_info(&cell.changed_by)?;
-            Some(json!({
-                "value": shown(cell.value.as_deref()),
-                "erased": cell.erased,
-                "commit": short(&info.id),
-                "time_us": info.time,
-                "who": info.provenance.who,
-                "why": info.provenance.why,
-                "approved_by": info.provenance.approved_by,
-            }))
+            Some(report::change(&cell, info))
         })
         .collect();
     Ok(json!({"branch": branch, "key": key, "changes": changes}))
@@ -155,12 +148,7 @@ fn diff<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> Out
             continue;
         };
         match session.check(Operation::Read, to_name, key) {
-            Ok(()) => changes.push(json!({
-                "key": key,
-                "before": shown(change.before.as_deref()),
-                "after": shown(change.after.as_deref()),
-                "erased": change.erased,
-            })),
+            Ok(()) => changes.push(report::value_change(&change)),
             Err(Denied::OutOfScope) => {}
             Err(denied) => return Err(refused(denied)),
         }
@@ -271,16 +259,6 @@ fn text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
         .get(name)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("{name} is required and must be a string"))
-}
-
-fn shown(value: Option<&[u8]>) -> Value {
-    match value {
-        None => Value::Null,
-        Some(bytes) => match std::str::from_utf8(bytes) {
-            Ok(text) => Value::String(text.to_owned()),
-            Err(_) => json!({"hex": bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()}),
-        },
-    }
 }
 
 fn refused(denied: Denied) -> String {

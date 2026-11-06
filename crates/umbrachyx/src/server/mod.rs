@@ -7,6 +7,9 @@
 //! author. Reads come from the latest view the committer published, so a
 //! client reads back what it has written.
 //!
+//! Commands named `UMBRA.` read the history of any branch, for a person's
+//! tools (see `history`).
+//!
 //! There is no authentication yet, so a server should listen only on this
 //! machine.
 //!
@@ -26,8 +29,10 @@ use std::time::Duration;
 use crate::log::Edit;
 use crate::store::{CommitId, MAIN_BRANCH, Pending, Provenance, Reader, StoreError, Writer};
 
+mod history;
 pub mod resp;
 
+pub use history::MAX_PAGE;
 use resp::{Command, Reply};
 
 /// Connections served at once unless set otherwise. One more is told so
@@ -213,6 +218,9 @@ impl Server {
                 name.to_ascii_lowercase()
             )),
             _ => {
+                if let Some(reply) = history::answer(&self.writer, &name, args) {
+                    return Some(Step::Reply(reply));
+                }
                 let shown: String = name.chars().take(MAX_NAME_SHOWN).collect();
                 Reply::Error(format!("ERR unknown command '{}'", shown.escape_default()))
             }

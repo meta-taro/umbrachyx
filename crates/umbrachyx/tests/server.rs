@@ -320,3 +320,184 @@ fn commands_before_a_protocol_error_still_count() {
         Some(Bytes::from(&b"100"[..]))
     );
 }
+
+/// Sends one command and reads its reply as JSON in a bulk string.
+fn ask_json(client: &mut TcpStream, args: &[&str]) -> serde_json::Value {
+    client.write_all(&command(args)).expect("sends");
+    let line = read_line(client);
+    let len: usize = line
+        .strip_prefix('$')
+        .and_then(|len| len.parse().ok())
+        .unwrap_or_else(|| panic!("{args:?} answers a bulk string, not {line:?}"));
+    let mut body = vec![0; len + 2];
+    client.read_exact(&mut body).expect("reads the body");
+    serde_json::from_slice(&body[..len]).expect("the body is JSON")
+}
+
+/// One line of a reply, without its `\r\n`.
+fn read_line(client: &mut TcpStream) -> String {
+    let mut line = Vec::new();
+    let mut byte = [0];
+    while !line.ends_with(b"\r\n") {
+        client.read_exact(&mut byte).expect("reads a line");
+        line.push(byte[0]);
+    }
+    line.truncate(line.len() - 2);
+    String::from_utf8(line).expect("a line is text")
+}
+
+fn set_all(client: &mut TcpStream, pairs: &[(&str, &str)]) {
+    for (key, value) in pairs {
+        client
+            .write_all(&command(&["SET", key, value]))
+            .expect("sends");
+        assert_eq!(read_reply(client, b"+OK\r\n"), b"+OK\r\n");
+    }
+}
+
+#[test]
+fn history_shows_every_change_to_a_key_newest_first() {
+    let dir = TempDir::new("history");
+    let (_committer, mut client) = start(&dir);
+    set_all(&mut client, &[("gold", "1"), ("gems", "5"), ("gold", "2")]);
+
+    let history = ask_json(&mut client, &["UMBRA.HISTORY", BRANCH, "gold"]);
+
+    let changes = history["changes"].as_array().expect("a list of changes");
+    let values: Vec<_> = changes.iter().map(|change| &change["value"]).collect();
+    assert_eq!(values, ["2", "1"]);
+    assert_eq!(changes[0]["why"], "SET");
+    assert_eq!(changes[0]["erased"], false);
+    let who = changes[0]["who"].as_str().expect("who is text");
+    assert!(who.starts_with("resp 127.0.0.1:"), "{who}");
+    assert_ne!(changes[0]["commit"], changes[1]["commit"]);
+}
+
+#[test]
+fn cells_list_live_keys_with_their_last_change_in_pages() {
+    let dir = TempDir::new("cells");
+    let (_committer, mut client) = start(&dir);
+    set_all(
+        &mut client,
+        &[("b", "2"), ("a", "1"), ("c", "3"), ("a", "4")],
+    );
+
+    let all = ask_json(&mut client, &["UMBRA.CELLS", BRANCH]);
+    let after_a = ask_json(&mut client, &["UMBRA.CELLS", BRANCH, "a"]);
+
+    let keys = |page: &serde_json::Value| -> Vec<String> {
+        page["cells"]
+            .as_array()
+            .expect("a list of cells")
+            .iter()
+            .map(|cell| cell["key"].as_str().expect("key").to_owned())
+            .collect()
+    };
+    assert_eq!(keys(&all), ["a", "b", "c"]);
+    assert_eq!(keys(&after_a), ["b", "c"]);
+    assert_eq!(all["cells"][0]["value"], "4");
+    assert_eq!(all["cells"][0]["why"], "SET");
+    assert!(all["next"].is_null(), "everything fit in one page");
+}
+
+#[test]
+fn branches_log_and_diff_show_what_the_branch_changed() {
+    let dir = TempDir::new("log-diff");
+    let (_committer, mut client) = start(&dir);
+    set_all(&mut client, &[("gold", "1"), ("gold", "2")]);
+
+    let branches = ask_json(&mut client, &["UMBRA.BRANCHES"]);
+    let log = ask_json(&mut client, &["UMBRA.LOG", BRANCH]);
+    let diff = ask_json(&mut client, &["UMBRA.DIFF", MAIN_BRANCH, BRANCH]);
+
+    let names: Vec<_> = branches["branches"]
+        .as_array()
+        .expect("a list of branches")
+        .iter()
+        .map(|branch| branch["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, [BRANCH, MAIN_BRANCH]);
+    let commits = log["commits"].as_array().expect("a list of commits");
+    assert_eq!(commits.len(), 2);
+    assert_eq!(branches["branches"][0]["head"], commits[0]["commit"]);
+    assert_eq!(commits[0]["parent"], commits[1]["commit"]);
+    assert_eq!(log["more"], false);
+    assert_eq!(
+        diff["changes"],
+        serde_json::json!([{"key": "gold", "before": null, "after": "2", "erased": false}])
+    );
+}
+
+#[test]
+fn history_commands_refuse_unknown_branches_and_wrong_arguments() {
+    let dir = TempDir::new("history-refused");
+    let (_committer, mut client) = start(&dir);
+
+    client
+        .write_all(&command(&["UMBRA.HISTORY", "missing", "gold"]))
+        .expect("sends");
+    assert_eq!(read_line(&mut client), "-ERR no branch named \"missing\"");
+    client
+        .write_all(&command(&["UMBRA.DIFF", MAIN_BRANCH, "nowhere"]))
+        .expect("sends");
+    assert!(read_line(&mut client).starts_with("-ERR "));
+    client
+        .write_all(&command(&["UMBRA.HISTORY", BRANCH]))
+        .expect("sends");
+    assert_eq!(
+        read_line(&mut client),
+        "-ERR wrong number of arguments for 'umbra.history' command"
+    );
+}
+
+/// A branch with more cells than one page answers with where to go on, and
+/// the pages together hold every key once.
+#[test]
+fn cells_past_a_page_say_where_the_next_page_starts() {
+    let dir = TempDir::new("cells-pages");
+    let (_committer, mut client) = start(&dir);
+    let total = umbrachyx::server::MAX_PAGE + 1;
+    let sets: Vec<u8> = (0..total)
+        .flat_map(|n| command(&["SET", &format!("k/{n:05}"), "v"]))
+        .collect();
+    client.write_all(&sets).expect("sends");
+    let all_ok = b"+OK\r\n".repeat(total);
+    assert_eq!(read_reply(&mut client, &all_ok), all_ok);
+
+    let first = ask_json(&mut client, &["UMBRA.CELLS", BRANCH]);
+    let next = first["next"].as_str().expect("more follow").to_owned();
+    let second = ask_json(&mut client, &["UMBRA.CELLS", BRANCH, &next]);
+
+    let count = |page: &serde_json::Value| page["cells"].as_array().expect("cells").len();
+    assert_eq!(count(&first), umbrachyx::server::MAX_PAGE);
+    assert_eq!(next, format!("k/{:05}", umbrachyx::server::MAX_PAGE - 1));
+    assert_eq!(count(&second), 1);
+    assert_eq!(second["cells"][0]["key"], format!("k/{:05}", total - 1));
+    assert!(second["next"].is_null());
+}
+
+/// A key changed more often than a page holds answers with the newest
+/// changes and says older ones were left out; so does a long log.
+#[test]
+fn long_histories_and_logs_answer_one_page() {
+    let dir = TempDir::new("history-pages");
+    let (_committer, mut client) = start(&dir);
+    let total = umbrachyx::server::MAX_PAGE + 1;
+    let sets: Vec<u8> = (0..total)
+        .flat_map(|n| command(&["SET", "gold", &n.to_string()]))
+        .collect();
+    client.write_all(&sets).expect("sends");
+    let all_ok = b"+OK\r\n".repeat(total);
+    assert_eq!(read_reply(&mut client, &all_ok), all_ok);
+
+    let history = ask_json(&mut client, &["UMBRA.HISTORY", BRANCH, "gold"]);
+    let log = ask_json(&mut client, &["UMBRA.LOG", BRANCH]);
+
+    let changes = history["changes"].as_array().expect("changes");
+    assert_eq!(changes.len(), umbrachyx::server::MAX_PAGE);
+    assert_eq!(changes[0]["value"], (total - 1).to_string());
+    assert_eq!(history["more"], true);
+    let commits = log["commits"].as_array().expect("commits");
+    assert_eq!(commits.len(), umbrachyx::server::MAX_PAGE);
+    assert_eq!(log["more"], true);
+}

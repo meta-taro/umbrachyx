@@ -133,6 +133,32 @@ impl Tree {
         }
     }
 
+    /// Every entry with a key greater than `after`, in key order. Finding
+    /// where to start reads one path down the tree, not the keys before it.
+    pub fn iter_after(&self, after: &[u8]) -> Iter<'_> {
+        let mut stack = Vec::new();
+        let mut node = &*self.root;
+        loop {
+            match node {
+                Node::Leaf { entries, .. } => {
+                    let at = entries.partition_point(|(key, _)| **key <= *after);
+                    stack.push((node, at));
+                    return Iter { stack };
+                }
+                Node::Internal { children, .. } => {
+                    // The first child holding a key past `after`; those
+                    // before it hold none.
+                    let at = children.partition_point(|child| *child.last_key <= *after);
+                    stack.push((node, at + 1));
+                    let Some(child) = children.get(at) else {
+                        return Iter { stack };
+                    };
+                    node = &child.node;
+                }
+            }
+        }
+    }
+
     /// What changed going from `self` to `other`.
     pub fn diff(&self, other: &Self) -> Diff {
         diff::diff(&self.root, &other.root)

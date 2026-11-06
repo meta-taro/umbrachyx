@@ -321,3 +321,32 @@ fn inserting_an_empty_batch_changes_nothing() {
     assert_eq!(same.root_hash(), tree.root_hash());
     assert_eq!(same.len(), tree.len());
 }
+
+/// Walking from after a key gives what a full walk gives past it, wherever
+/// the key falls: before every key, on one, between two, past the last.
+#[test]
+fn iter_after_matches_the_model_from_any_key() {
+    for seed in 0..30 {
+        let mut rng = Rng(seed);
+        let key_space = 1 + rng.below(4_000);
+        let model = starting_model(&mut rng, key_space);
+        let tree = build(&model);
+        let mut starts: Vec<Vec<u8>> = vec![Vec::new(), b"zzz".to_vec()];
+        for _ in 0..40 {
+            let on = key(rng.below(key_space)).to_vec();
+            let mut between = on.clone();
+            between.push(0);
+            starts.extend([on, between]);
+        }
+
+        for after in &starts {
+            let walked: Vec<_> = tree.iter_after(after).map(|(k, _)| k.clone()).collect();
+            let expected: Vec<_> = model
+                .keys()
+                .filter(|k| k.as_ref() > after.as_slice())
+                .cloned()
+                .collect();
+            assert_eq!(walked, expected, "seed {seed}, after {after:?}");
+        }
+    }
+}

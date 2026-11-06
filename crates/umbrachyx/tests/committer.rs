@@ -324,3 +324,42 @@ fn readers_see_a_write_once_its_writer_is_answered() {
     drop(committer.stop());
     assert_eq!(reader.view().get(MAIN_BRANCH, b"writer/0/000"), bytes(b"v"));
 }
+
+/// A question is answered after the commits sent before it, so it sees
+/// them even if their writers have not waited yet.
+#[test]
+fn a_question_sees_the_commits_sent_before_it() {
+    let dir = TempDir::new("ask-after");
+    let (store, _) = open_counting(&dir.log());
+    let committer = Committer::start(store);
+    let writer = committer.writer();
+    let first = writer.send(MAIN_BRANCH, set("gold", b"1"), by("a".to_owned()));
+    let second = writer.send(MAIN_BRANCH, set("gold", b"2"), by("b".to_owned()));
+
+    let values = writer
+        .ask(|store| {
+            store
+                .history(MAIN_BRANCH, b"gold", 10)
+                .into_iter()
+                .map(|cell| cell.value)
+                .collect::<Vec<_>>()
+        })
+        .expect("answered");
+
+    assert_eq!(values, vec![bytes(b"2"), bytes(b"1")]);
+    first.wait().expect("first is durable");
+    second.wait().expect("second is durable");
+}
+
+/// A question sent to a stopped committer is refused, not left waiting.
+#[test]
+fn a_question_sent_after_stopping_is_refused() {
+    let dir = TempDir::new("ask-stopped");
+    let (store, _) = open_counting(&dir.log());
+    let committer = Committer::start(store);
+    let writer = committer.writer();
+    committer.stop();
+
+    let answer = writer.ask(|store| store.branches().len());
+    assert!(matches!(answer, Err(StoreError::Stopped)));
+}

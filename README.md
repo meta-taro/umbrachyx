@@ -29,8 +29,9 @@ that is already there before the light arrives.
 > tried: a durable log, a tree with branches, diffs and merges, values
 > encrypted per subject so that a subject can be erased, a command-line
 > tool, a server for one branch that speaks enough of the Redis protocol
-> for existing clients, and an MCP session through which an agent reads
-> only what its capability token allows and writes only to its own branch
+> for existing clients and answers questions about the history, and an MCP
+> session through which an agent reads only what its capability token
+> allows and writes only to its own branch
 > ([`docs/agents.md`](docs/agents.md) shows what a hijacked agent cannot
 > do). [`docs/demo.md`](docs/demo.md) walks through all five questions
 > below with it. A first comparison with Valkey and Dolt,
@@ -142,7 +143,9 @@ cache cannot answer:
 viewer from the same author. The two are separate products in separate
 repositories. dbboard will reach Umbrachyx through an adapter, and its history
 views (a row's history, a cell-level diff, who last changed a row) are being
-designed so that they work against Umbrachyx as well.
+designed so that they work against Umbrachyx as well. The adapter reads them
+from the server, with the `UMBRA.` commands described in
+[`docs/decisions.md`](docs/decisions.md).
 
 ## License
 

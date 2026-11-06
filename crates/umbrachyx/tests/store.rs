@@ -381,3 +381,36 @@ fn an_empty_group_writes_nothing() {
     assert_eq!(std::fs::metadata(dir.log()).expect("log exists").len(), 0);
     assert!(store.commit_all(Vec::new()).expect("nothing").is_empty());
 }
+
+/// Cells come in key order, from after a key and at most as many as asked,
+/// without the keys that were removed.
+#[test]
+fn cells_come_in_pages_without_removed_keys() {
+    let dir = TempDir::new("cells");
+    let mut store = open(&dir.log());
+    store
+        .commit(
+            MAIN_BRANCH,
+            vec![set("a", "1"), set("b", "2"), set("c", "3"), set("d", "4")],
+            by("seed", "four keys"),
+        )
+        .expect("commits");
+    store
+        .commit(MAIN_BRANCH, vec![remove("b")], by("ops", "drop b"))
+        .expect("commits");
+
+    let keys = |after: Option<&[u8]>, limit| -> Vec<String> {
+        store
+            .cells(MAIN_BRANCH, after, limit)
+            .into_iter()
+            .map(|(key, _)| String::from_utf8(key.to_vec()).expect("utf-8"))
+            .collect()
+    };
+
+    assert_eq!(keys(None, 10), ["a", "c", "d"]);
+    assert_eq!(keys(None, 2), ["a", "c"]);
+    assert_eq!(keys(Some(b"a"), 10), ["c", "d"]);
+    assert_eq!(keys(Some(b"b"), 1), ["c"]);
+    assert!(keys(Some(b"d"), 10).is_empty());
+    assert!(store.cells("missing", None, 10).is_empty());
+}

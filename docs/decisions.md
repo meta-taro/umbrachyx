@@ -419,6 +419,29 @@ checker to hold the shared secret that mints tokens.
   syncs the way writes from different connections do. Any other command
   first waits until the `SET`s before it are durable, so a `GET` reads what
   the same client set just before it, and replies stay in order.
+- **History is read over the same server, with commands named `UMBRA.`**
+  (`BRANCHES`, `CELLS`, `HISTORY`, `LOG` and `DIFF`), each answered with
+  one JSON string written as the MCP tools write it. A person's tool, such
+  as a database viewer, needs the history while the server runs, and the
+  server's process is the only one that may open the log: a second process
+  opening it would be a second writer, and opening a log repairs a torn
+  end, which is a write. The commands read any branch, main included,
+  since a branch is reviewed against main. They write nothing. Like `GET`,
+  they are guarded only by listening on this machine, so anyone who can
+  reach the port also sees who changed what and why; values of erased
+  subjects stay unreadable here as everywhere.
+- **The store answers them on the committer's thread, between groups of
+  commits.** A view holds each branch's tree but not the commits, and
+  copying every commit into every view would cost each write group the
+  whole history. A question is sent down the same channel as commits, so
+  it sees every commit sent before it, and waits behind their sync. That
+  is fine for a person reading, and why `GET` still reads from a view.
+- **Cells, changes and commits come a page at a time, 1,000 at most.**
+  Commits wait while a question is answered, so no question may walk a
+  whole branch or a whole history. A page of cells names the key to go on
+  from, and the next page starts with one walk down the tree to it. A key's
+  history and a branch's log give their newest page and say whether older
+  entries were left out.
 
 ## The MCP session
 

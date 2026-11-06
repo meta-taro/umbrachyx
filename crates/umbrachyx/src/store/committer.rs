@@ -8,6 +8,10 @@
 //! Readers on other threads read a [`View`] the committer publishes after
 //! each group, before it answers the group's writers, so a write is seen by
 //! every reader by the time its writer hears it is durable.
+//!
+//! Questions about the history, which a view does not hold, are sent down
+//! the same channel as commits and answered on the committer's thread, so
+//! a question sees every commit sent before it.
 
 use std::io;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
@@ -15,7 +19,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::{Clock, CommitId, CommitRequest, Provenance, Store, StoreError, View};
+use super::{Clock, CommitId, CommitRequest, Inspect, Provenance, Store, StoreError, View};
 use crate::log::record::{GROUP_OVERHEAD, commit_len};
 use crate::log::{Edit, LogError, MAX_PAYLOAD_LEN, Storage};
 
@@ -31,8 +35,12 @@ const MAX_GATHER: Duration = Duration::from_micros(500);
 
 enum Message {
     Commit(Job),
+    Ask(Question),
     Stop,
 }
+
+/// Reads the store and sends the answer back.
+type Question = Box<dyn FnOnce(&dyn Inspect) + Send>;
 
 struct Job {
     request: CommitRequest,
@@ -155,6 +163,25 @@ impl Writer {
         }));
         Pending { answer }
     }
+
+    /// Answers `question` from the store once the commits sent before it
+    /// are written. It waits behind their sync, so it suits a person
+    /// reading the history, not a hot path; reads of live values go
+    /// through a [`Reader`].
+    pub fn ask<T: Send + 'static>(
+        &self,
+        question: impl FnOnce(&dyn Inspect) -> T + Send + 'static,
+    ) -> Result<T, StoreError> {
+        let (reply, answer) = mpsc::sync_channel(1);
+        let question: Question = Box::new(move |store| {
+            // The asker stopped waiting; nobody is left to tell.
+            let _ = reply.send(question(store));
+        });
+        // As for a commit: if the committer has stopped, the question is
+        // dropped with its reply, and waiting gives `Stopped`.
+        let _ = self.messages.send(Message::Ask(question));
+        answer.recv().map_err(|_| StoreError::Stopped)
+    }
 }
 
 /// A commit sent to a [`Committer`] and not yet answered.
@@ -193,32 +220,30 @@ fn run<S: Storage, C: Clock>(
     let mut carried = None;
     let mut is_busy = false;
     loop {
-        let first = match carried.take() {
-            Some(job) => job,
-            None => match received.recv() {
-                Ok(Message::Commit(job)) => job,
-                Ok(Message::Stop) | Err(_) => return store,
-            },
+        let message = carried
+            .take()
+            .unwrap_or_else(|| received.recv().unwrap_or(Message::Stop));
+        let first = match message {
+            Message::Commit(job) => job,
+            Message::Ask(question) => {
+                question(&store);
+                continue;
+            }
+            Message::Stop => return store,
         };
-        let (group, next, is_stopping) = gather(first, received, is_busy);
+        let (group, next) = gather(first, received, is_busy);
         is_busy = group.len() > 1;
         write_group(&mut store, group, published);
-        if is_stopping {
-            return store;
-        }
         carried = next;
     }
 }
 
 /// `first` and every job already waiting, as long as their payload fits in
 /// one record; when `is_busy`, also the jobs that keep arriving, as set out
-/// by `QUIET_GAP` and `MAX_GATHER`. Returns the group, a job that did not
-/// fit, and whether a stop was read.
-fn gather(
-    first: Job,
-    received: &Receiver<Message>,
-    is_busy: bool,
-) -> (Vec<Job>, Option<Job>, bool) {
+/// by `QUIET_GAP` and `MAX_GATHER`. Returns the group, and the message that
+/// ended it: a job that did not fit, a question, or a stop, each of which
+/// must wait for the group to be written.
+fn gather(first: Job, received: &Receiver<Message>, is_busy: bool) -> (Vec<Job>, Option<Message>) {
     let deadline = Instant::now() + MAX_GATHER;
     let next = || {
         if !is_busy {
@@ -232,17 +257,16 @@ fn gather(
     let mut len = GROUP_OVERHEAD + first.len;
     let mut group = vec![first];
     while let Some(message) = next() {
-        let job = match message {
-            Message::Commit(job) => job,
-            Message::Stop => return (group, None, true),
+        let Message::Commit(job) = message else {
+            return (group, Some(message));
         };
         if len + job.len > MAX_PAYLOAD_LEN {
-            return (group, Some(job), false);
+            return (group, Some(Message::Commit(job)));
         }
         len += job.len;
         group.push(job);
     }
-    (group, None, false)
+    (group, None)
 }
 
 fn write_group<S: Storage, C: Clock>(

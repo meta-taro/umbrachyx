@@ -29,6 +29,7 @@ use crate::log::{Branch, Commit, Edit, Erase, Log, LogError, Record, Storage};
 use crate::tree::{Bytes, Tree};
 
 mod committer;
+mod inspect;
 mod merge;
 mod seal;
 mod view;
@@ -36,6 +37,7 @@ mod view;
 use seal::{Ring, Sealer};
 
 pub use committer::{Committer, Pending, Reader, Writer};
+pub use inspect::Inspect;
 pub use merge::{Conflict, Merged, Reverted, ValueChange};
 pub use view::View;
 
@@ -464,20 +466,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
 
     /// Every change to `key` that `branch` can see, newest first.
     pub fn history(&self, branch: &str, key: &[u8]) -> Vec<Cell> {
-        let mut history = Vec::new();
-        let mut cell = self.raw_cell(branch, key);
-        while let Some(current) = cell {
-            let parent = self
-                .commits
-                .get(&current.changed_by)
-                .and_then(|commit| commit.parent)
-                .and_then(|parent| self.commits.get(&parent));
-            cell = parent
-                .and_then(|parent| parent.state.get(key))
-                .map(|bytes| decode_cell(bytes));
-            history.push(self.revealed(key, current));
-        }
-        history
+        self.history_up_to(branch, key, usize::MAX)
     }
 
     /// Every live key and value on `branch`, in key order.
@@ -509,13 +498,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// The commits of `branch`, newest first, following first parents: the
     /// branch's own line, with each merge as one commit.
     pub fn log(&self, branch: &str) -> Vec<&CommitInfo> {
-        let mut commits = Vec::new();
-        let mut next = self.head(branch);
-        while let Some(info) = next.and_then(|id| self.commits.get(&id)) {
-            commits.push(info.as_ref());
-            next = info.parent;
-        }
-        commits
+        self.log_up_to(branch, usize::MAX)
     }
 
     /// Finds a commit by name: a branch (its latest commit), a branch and
