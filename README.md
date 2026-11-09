@@ -94,7 +94,8 @@ How each number was taken, and what it does not show:
 [`docs/comparison.md`](docs/comparison.md). The raw output, machine and
 versions: [`bench/results/`](bench/results/) (the laptop in `2026-11-04/`,
 the runner in `2026-11-04-linux-ci/`, the virtual machine in
-`2026-11-09-linux-vm/` and `2026-11-09-linux-vm-sparse-trees/`). The scripts are in
+`2026-11-09-linux-vm/`, `2026-11-09-linux-vm-sparse-trees/` and
+`2026-11-09-linux-vm-node-hash/`). The scripts are in
 [`bench/`](bench/), and CI runs them against Valkey on every change.
 
 ## Robustness

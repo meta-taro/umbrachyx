@@ -22,6 +22,13 @@ use umbrachyx::tree::Bytes;
 
 mod tokens;
 
+/// jemalloc rather than the system's allocator: each node hash fills a
+/// buffer, and glibc's malloc took twice the time jemalloc does
+/// (`docs/decisions.md`).
+#[cfg(not(windows))]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const DB_ENV: &str = "UMBRACHYX_DB";
 const DEFAULT_DB: &str = "umbrachyx.log";
 /// One past Redis's own, so both can run on one machine.
