@@ -1,0 +1,30 @@
+== base 1
+| Diff, 200000 commits | mean (ms) | slowest (ms) |
+|---|---|---|
+| an old commit against its parent | 0.003 | 0.009 |
+| an old commit against the fifth before | 4.329 | 11.279 |
+== lazy 1
+| Diff, 200000 commits | mean (ms) | slowest (ms) |
+|---|---|---|
+| an old commit against its parent | 0.006 | 0.019 |
+| an old commit against the fifth before | 5.416 | 15.219 |
+== base 2
+| Diff, 200000 commits | mean (ms) | slowest (ms) |
+|---|---|---|
+| an old commit against its parent | 0.004 | 0.011 |
+| an old commit against the fifth before | 4.296 | 10.271 |
+== lazy 2
+| Diff, 200000 commits | mean (ms) | slowest (ms) |
+|---|---|---|
+| an old commit against its parent | 0.005 | 0.025 |
+| an old commit against the fifth before | 5.475 | 14.758 |
+== base 3
+| Diff, 200000 commits | mean (ms) | slowest (ms) |
+|---|---|---|
+| an old commit against its parent | 0.005 | 0.013 |
+| an old commit against the fifth before | 4.219 | 9.949 |
+== lazy 3
+| Diff, 200000 commits | mean (ms) | slowest (ms) |
+|---|---|---|
+| an old commit against its parent | 0.004 | 0.012 |
+| an old commit against the fifth before | 5.233 | 15.051 |

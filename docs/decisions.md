@@ -259,6 +259,18 @@ The same 1,000,000 records with more changes:
   about 50,500 to 61,500 a second there
   ([`bench/results/2026-11-09-linux-vm-node-hash/`](../bench/results/2026-11-09-linux-vm-node-hash/)).
   Nodes under 1 KiB still hash one block at a time.
+- **A node is hashed only when a diff first needs its hash**, and the hash
+  is kept. Most nodes a write makes are replaced by a later write before
+  anything compares them, so they are never hashed. In the same virtual
+  machine, pipelined SETs went from about 68,000 to 168,000 a second and
+  SETs one at a time from about 33,600 to 49,900; memory did not change.
+  The cost moves to diffs: the first diff that reaches a tree hashes what
+  nobody has hashed yet, and a diff between old commits took 5.4 ms on
+  average instead of 4.3 ms on a laptop
+  ([`bench/results/2026-11-09-linux-vm-lazy-hash/`](../bench/results/2026-11-09-linux-vm-lazy-hash/)).
+  No node is hashed more often than before. If a workload that diffs a lot
+  finds the first diff too slow, the hashing can be moved to a background
+  thread or back onto writes.
 - **Node size is not bounded.** A run of keys with no boundary is
   geometric in length, so nodes of a few hundred entries are rare but
   possible. A hard cap can be added if they show up.

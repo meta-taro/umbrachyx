@@ -104,8 +104,9 @@ impl Tree {
     }
 
     /// Inserts or replaces every entry, sorted by key with no key twice,
-    /// returning a new version. Each node above a changed key is rebuilt and
-    /// hashed once, however many of the keys land under it.
+    /// returning a new version. Each node above a changed key is rebuilt
+    /// once, however many of the keys land under it, and hashed only when a
+    /// diff first asks for its hash.
     pub fn insert_sorted(&self, entries: Vec<(Bytes, Bytes)>) -> Self {
         debug_assert!(
             entries.windows(2).all(|pair| pair[0].0 < pair[1].0),

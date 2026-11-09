@@ -230,7 +230,8 @@ records.
 Umbrachyx loads in commits of 50,000 records, each synced to disk. A commit
 is applied to the tree as one sorted batch: every node above a changed key
 is rebuilt and hashed once per commit. That is about 0.7 µs per record at
-10,000,000 records.
+10,000,000 records. (Nodes have since stopped being hashed on writes and
+are hashed when a diff first needs them; the load was not measured again.)
 
 The first measurement applied each record on its own and rehashed the leaf
 it landed in every time: 8.6 s for 1,000,000 records and 103 s for

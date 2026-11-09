@@ -22,9 +22,10 @@ use umbrachyx::tree::Bytes;
 
 mod tokens;
 
-/// jemalloc rather than the system's allocator: each node hash fills a
-/// buffer, and glibc's malloc took twice the time jemalloc does
-/// (`docs/decisions.md`).
+/// jemalloc rather than the system's allocator: when nodes were hashed on
+/// every write, each hash filled a buffer and glibc's malloc took twice the
+/// time jemalloc does (`docs/decisions.md`). Nodes are now hashed only for
+/// diffs; the allocator was not measured again since.
 #[cfg(not(windows))]
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;

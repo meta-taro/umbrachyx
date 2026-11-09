@@ -1,6 +1,6 @@
 //! Nodes, their hashes, and where a run of entries is cut into nodes.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::{Bytes, Digest};
 
@@ -9,10 +9,19 @@ pub(super) type Entry = (Bytes, Bytes);
 /// About one entry in this many ends a node, on every level.
 const TARGET_FANOUT: u64 = 32;
 
+/// A node's hash is worked out the first time it is asked for, by a diff
+/// or a merge, and kept. Most nodes a write makes are replaced by the next
+/// write before anything compares them, and are never hashed.
 #[derive(Debug)]
 pub(super) enum Node {
-    Leaf { entries: Vec<Entry>, hash: Digest },
-    Internal { children: Vec<Child>, hash: Digest },
+    Leaf {
+        entries: Vec<Entry>,
+        hash: OnceLock<Digest>,
+    },
+    Internal {
+        children: Vec<Child>,
+        hash: OnceLock<Digest>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -31,31 +40,43 @@ impl Child {
 
 impl Node {
     pub fn leaf(entries: Vec<Entry>) -> Arc<Self> {
-        let mut hasher = NodeHasher::new(0);
-        for (key, value) in &entries {
-            hasher.field(key);
-            hasher.field(value);
-        }
         Arc::new(Self::Leaf {
-            hash: hasher.finish(),
             entries,
+            hash: OnceLock::new(),
         })
     }
 
     pub fn internal(children: Vec<Child>) -> Arc<Self> {
-        let mut hasher = NodeHasher::new(1);
-        for child in &children {
-            hasher.field(child.node.hash());
-        }
         Arc::new(Self::Internal {
-            hash: hasher.finish(),
             children,
+            hash: OnceLock::new(),
         })
+    }
+
+    #[cfg(test)]
+    pub fn is_hashed(&self) -> bool {
+        match self {
+            Self::Leaf { hash, .. } | Self::Internal { hash, .. } => hash.get().is_some(),
+        }
     }
 
     pub fn hash(&self) -> &Digest {
         match self {
-            Self::Leaf { hash, .. } | Self::Internal { hash, .. } => hash,
+            Self::Leaf { entries, hash } => hash.get_or_init(|| {
+                let mut hasher = NodeHasher::new(0);
+                for (key, value) in entries {
+                    hasher.field(key);
+                    hasher.field(value);
+                }
+                hasher.finish()
+            }),
+            Self::Internal { children, hash } => hash.get_or_init(|| {
+                let mut hasher = NodeHasher::new(1);
+                for child in children {
+                    hasher.field(child.node.hash());
+                }
+                hasher.finish()
+            }),
         }
     }
 
@@ -208,5 +229,24 @@ mod tests {
         let child_hashes: Vec<&[u8]> = children.iter().map(|c| &c.node.hash()[..]).collect();
         let internal = Node::internal(children.clone());
         assert_eq!(internal.hash(), &hashed_field_by_field(1, &child_hashes));
+    }
+
+    fn is_hashed(node: &Node) -> bool {
+        node.is_hashed()
+    }
+
+    #[test]
+    fn a_node_is_hashed_only_when_its_hash_is_asked_for() {
+        let key: Bytes = b"player/0001/gems".to_vec().into();
+        let value: Bytes = b"7".to_vec().into();
+        let leaf = Node::leaf(vec![(key, value)]);
+        let internal = Node::internal(vec![Child::of(leaf.clone())]);
+        assert!(!is_hashed(&leaf));
+        assert!(!is_hashed(&internal));
+
+        let first = *internal.hash();
+        assert!(is_hashed(&internal));
+        assert!(is_hashed(&leaf), "a parent's hash needs its children's");
+        assert_eq!(internal.hash(), &first, "asking again gives the kept hash");
     }
 }
