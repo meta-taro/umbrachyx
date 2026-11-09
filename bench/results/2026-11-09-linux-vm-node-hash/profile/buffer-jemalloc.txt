@@ -1,0 +1,66 @@
+SET: 56022.41 requests per second, p50=56.031 msec
+
+GET: 199600.80 requests per second, p50=0.143 msec
+
+== by library
+    79.58%  buffer-jemalloc 
+    14.58%  [unknown]       
+     5.63%  libc.so.6       
+     0.21%  [vdso]          
+== top libc symbols
+     1.59%  [.] memcmp
+     1.20%  [.] 0x000000000009d200
+     0.72%  [.] 0x000000000009d100
+     0.47%  [.] __send
+     0.14%  [.] 0x000000000009d220
+     0.14%  [.] recv
+     0.13%  [.] 0x000000000009d11c
+     0.11%  [.] 0x000000000009d114
+     0.10%  [.] 0x000000000009d124
+     0.09%  [.] 0x000000000009d190
+     0.07%  [.] 0x000000000009d1c4
+     0.06%  [.] syscall
+== top symbols
+    25.35%  buffer-jemalloc   [.] blake3::portable::compress_in_place
+    13.87%  buffer-jemalloc   [.] <umbrachyx::tree::Tree>::get
+    11.42%  buffer-jemalloc   [.] blake3_hash_many_neon
+     4.88%  buffer-jemalloc   [.] umbrachyx::tree::node::split_internal
+     2.96%  buffer-jemalloc   [.] umbrachyx::tree::insert_into
+     2.38%  buffer-jemalloc   [.] umbrachyx::tree::node::split_leaf
+     2.37%  buffer-jemalloc   [.] <aes::backends::aarch64_aes::Aes<15>>::new
+     2.14%  buffer-jemalloc   [.] __aarch64_ldadd8_relax
+     1.59%  libc.so.6         [.] memcmp
+     1.52%  buffer-jemalloc   [.] <blake3::ChunkState>::update
+     1.20%  libc.so.6         [.] 0x000000000009d200
+     1.00%  [unknown]         [k] 0xffffcfb3bb59a53c
+     0.80%  buffer-jemalloc   [.] <umbrachyx::tree::node::Node>::leaf
+     0.76%  buffer-jemalloc   [.] __aarch64_ldadd8_rel
+     0.75%  buffer-jemalloc   [.] <umbrachyx::tree::node::Node>::internal
+== perf log
+WARNING: Kernel address maps (/proc/{kallsyms,modules}) are restricted,
+check /proc/sys/kernel/kptr_restrict and /proc/sys/kernel/perf_event_paranoid.
+
+Samples in kernel functions may not be resolved if a suitable vmlinux
+file is not found in the buildid cache or in the vmlinux path.
+
+Samples in kernel modules won't be resolved at all.
+
+If some relocation was applied (e.g. kexec) symbols may be misresolved
+even with a suitable vmlinux or kallsyms file.
+
+Couldn't record kernel reference relocation symbol
+Symbol resolution may be skewed if relocation was used (e.g. kexec).
+Check /proc/kallsyms permission or run as root.
+Couldn't synthesize bpf events.
+[ perf record: Woken up 3 times to write data ]
+[ perf record: Captured and wrote 0.768 MB /tmp/tmp.HKoYjyC4Ox/perf.data (19733 samples) ]
+== serve log
+serving bench on 127.0.0.1:6390
+total 53940
+drwx------ 2 root root     4096 Nov  9 12:07 .
+drwxrwxrwt 1 root root     4096 Nov  9 12:08 ..
+-rw-r--r-- 1 root root 54402141 Nov  9 12:08 log
+-rw------- 1 root root       70 Nov  9 12:07 log.keys
+-rw------- 1 root root   808172 Nov  9 12:08 perf.data
+-rw-r--r-- 1 root root      797 Nov  9 12:08 perf.log
+-rw-r--r-- 1 root root       32 Nov  9 12:07 serve.log

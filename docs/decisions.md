@@ -250,6 +250,14 @@ The same 1,000,000 records with more changes:
   The tree is updated after the log has made a write durable, not on the
   path that acknowledges it, and a durable write already costs about 4 ms
   on this machine.
+- **Hashing nodes is most of a write's work**, about 42% of the server's
+  time under SETs in a Linux virtual machine. A node's fields are gathered
+  into one buffer and hashed with one call, which gives the same hash as
+  feeding them one by one: BLAKE3 hashes whole 1 KiB chunks in parallel
+  with SIMD only when given them together. That took pipelined SETs from
+  about 50,500 to 61,500 a second there
+  ([`bench/results/2026-11-09-linux-vm-node-hash/`](../bench/results/2026-11-09-linux-vm-node-hash/)).
+  Nodes under 1 KiB still hash one block at a time.
 - **Node size is not bounded.** A run of keys with no boundary is
   geometric in length, so nodes of a few hundred entries are rare but
   possible. A hard cap can be added if they show up.

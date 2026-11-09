@@ -1,0 +1,5 @@
+"jemalloc","SET, 50 clients, pipelined 64 (first pass)","SET","55096.42","57.587","2.680","57.823","94.143","107.647","126.591"
+"jemalloc","GET, 50 clients","GET","191204.59","0.145","0.000","0.143","0.207","0.271","2.175"
+"jemalloc","SET, 50 clients","SET","26109.66","1.860","0.384","1.727","2.295","3.679","62.879"
+"jemalloc","SET, 50 clients, pipelined 64 (second pass)","SET","27449.90","115.171","6.136","71.487","267.775","417.791","426.751"
+"jemalloc","memory","rss_kib_empty=3688","rss_kib_first=479788","rss_kib_end=1239064","sets_between=250000","bytes_per_set=3109"

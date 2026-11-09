@@ -1,0 +1,5 @@
+"mimalloc","SET, 50 clients, pipelined 64 (first pass)","SET","59435.36","53.407","3.176","53.823","76.799","92.735","105.983"
+"mimalloc","GET, 50 clients","GET","230414.75","0.135","0.008","0.111","0.383","0.487","3.303"
+"mimalloc","SET, 50 clients","SET","31826.86","1.522","0.360","1.519","1.703","1.807","5.351"
+"mimalloc","SET, 50 clients, pipelined 64 (second pass)","SET","53177.35","59.774","2.488","59.679","86.911","106.111","119.935"
+"mimalloc","memory","rss_kib_empty=7032","rss_kib_first=550284","rss_kib_end=1315516","sets_between=250000","bytes_per_set=3134"

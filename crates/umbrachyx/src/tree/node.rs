@@ -143,21 +143,70 @@ fn mix(mut z: u64) -> u64 {
 
 /// BLAKE3 over a node's fields, each prefixed with its length so that no two
 /// different nodes encode to the same bytes.
-struct NodeHasher(blake3::Hasher);
+///
+/// The fields are gathered into one buffer and hashed at once: BLAKE3 hashes
+/// several 1 KiB chunks in parallel only when it is given them together, and
+/// fed a few bytes at a time it compresses one block after another.
+struct NodeHasher(Vec<u8>);
 
 impl NodeHasher {
     fn new(tag: u8) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&[tag]);
-        Self(hasher)
+        let mut bytes = Vec::with_capacity(4096);
+        bytes.push(tag);
+        Self(bytes)
     }
 
     fn field(&mut self, bytes: &[u8]) {
-        self.0.update(&(bytes.len() as u32).to_le_bytes());
-        self.0.update(bytes);
+        self.0
+            .extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        self.0.extend_from_slice(bytes);
     }
 
     fn finish(&self) -> Digest {
-        *self.0.finalize().as_bytes()
+        *blake3::hash(&self.0).as_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The encoding fed field by field, as nodes were first hashed: gathering
+    /// it into one buffer must not change a single hash, or every commit
+    /// name and every stored diff shortcut would change with it.
+    fn hashed_field_by_field(tag: u8, fields: &[&[u8]]) -> Digest {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&[tag]);
+        for field in fields {
+            hasher.update(&(field.len() as u32).to_le_bytes());
+            hasher.update(field);
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    #[test]
+    fn node_hashes_match_the_field_by_field_encoding() {
+        // Enough entries that the encoding spans several 1 KiB chunks.
+        let entries: Vec<Entry> = (0..100_u32)
+            .map(|i| {
+                let key: Bytes = format!("player/{i:04}/gems").into_bytes().into();
+                let value: Bytes = i.to_le_bytes().repeat(9).into();
+                (key, value)
+            })
+            .collect();
+        let fields: Vec<&[u8]> = entries
+            .iter()
+            .flat_map(|(key, value)| [&key[..], &value[..]])
+            .collect();
+        let leaf = Node::leaf(entries.clone());
+        assert_eq!(leaf.hash(), &hashed_field_by_field(0, &fields));
+
+        let children = vec![
+            Child::of(leaf.clone()),
+            Child::of(Node::leaf(entries[..1].to_vec())),
+        ];
+        let child_hashes: Vec<&[u8]> = children.iter().map(|c| &c.node.hash()[..]).collect();
+        let internal = Node::internal(children.clone());
+        assert_eq!(internal.hash(), &hashed_field_by_field(1, &child_hashes));
     }
 }

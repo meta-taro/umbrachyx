@@ -1,0 +1,5 @@
+"system","SET, 50 clients, pipelined 64 (first pass)","SET","48146.37","66.046","5.608","66.239","96.831","120.959","134.143"
+"system","GET, 50 clients","GET","208768.27","0.132","0.000","0.135","0.191","0.255","2.567"
+"system","SET, 50 clients","SET","22321.43","2.185","0.472","2.039","2.999","5.047","11.775"
+"system","SET, 50 clients, pipelined 64 (second pass)","SET","40233.35","79.160","5.456","79.615","115.327","125.311","170.751"
+"system","memory","rss_kib_empty=2824","rss_kib_first=492496","rss_kib_end=1266348","sets_between=250000","bytes_per_set=3169"
