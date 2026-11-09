@@ -23,6 +23,7 @@ compared, it says that too.
   bench/valkey.sh
   bench/umbrachyx.sh
   bench/connections.sh
+  bench/memory.sh
   ```
 
 - The raw output of the latest runs, with the machine and versions, is in
@@ -261,4 +262,29 @@ it landed in every time: 8.6 s for 1,000,000 records and 103 s for
 4. **Diffs already cost what the change costs**, 9 µs for ten changes in
    10,000,000 records, which is the property the tree was chosen for.
 
-Memory use has not been compared yet.
+## Memory
+
+Umbrachyx loses here, by far. The same SETs of 32-byte values over a
+space of 200,000 keys, twice over, as `bench/memory.sh` sends them; the
+resident size of each server process, the median of three runs in a Linux
+virtual machine on the laptop
+([`bench/results/2026-11-09-linux-vm/`](../bench/results/2026-11-09-linux-vm/)):
+
+| | After 200,000 SETs | After 400,000 SETs | Added per SET in the second pass |
+|---|---|---|---|
+| Umbrachyx | 1.4 GiB | 2.9 GiB | about 8 KB (7.7 to 8.2 KB) |
+| Valkey 9.1.3 | 17 MiB | 20 MiB | 17 bytes |
+
+The second pass writes keys that are already there. Valkey replaces the
+value in place, so it barely grows. Umbrachyx keeps every SET as a commit,
+and every commit keeps its own version of the tree: the nodes on the path
+from the root to the changed key are copied, about four nodes of up to a
+few dozen entries each, while the rest is shared with the version before.
+That is what keeping every change costs while nothing is ever dropped. At
+this rate a million SETs, as `bench/umbrachyx.sh` writes to fill its key
+space, need about 8 GB; in this 4 GiB machine they did not fit.
+
+Two things would change this, and neither is built: a retention policy
+that folds old versions together (see "Retention per column" in
+[`decisions.md`](decisions.md)), and nodes laid out to cost less per copy.
+Until then, this table is the price of the history.

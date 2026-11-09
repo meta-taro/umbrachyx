@@ -125,11 +125,16 @@ jobs:
           ulimit -n 65536
           bench/connections.sh | tee bench-connections.csv
 
+      # Umbrachyx keeps every SET as history, so its memory grows with
+      # every write; this keeps that cost in view next to the speed.
+      - name: Memory
+        run: bench/memory.sh | tee bench-memory.csv
+
       - name: Summary
         run: |
           {
             echo "### Benchmarks (shared runner, compare runs of this job only)"
-            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv; do
+            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv bench-memory.csv; do
               echo
               echo "\`$file\`"
               echo

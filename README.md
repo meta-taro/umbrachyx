@@ -73,14 +73,26 @@ costs what a `PING` costs for both servers, so the one-client and
 it finds a value. Umbrachyx serves each connection on its own thread:
 macOS caps a process at 8,192 threads, so 10,000 connections fail there,
 while Linux serves them. Where Valkey is ahead on the runner (one writer,
-50 readers) was not investigated yet. The runner is noisy: its two runs
-differ by up to a third. The 256-writer row measures Umbrachyx in process
-and Valkey over loopback; the diff row includes Dolt's SQL layer.
+50 readers), the same gaps show in a Linux virtual machine, and profiling
+there points at the design rather than at a slip: after its sync, a write
+in Umbrachyx still updates the history's tree and is handed between two
+threads before it is answered, and with 50 readers much of the server's
+time goes to walking the tree from node to node. The runner is noisy: its
+two runs differ by up to a third. The 256-writer row measures Umbrachyx in
+process and Valkey over loopback; the diff row includes Dolt's SQL layer.
+
+Memory is where Umbrachyx loses most. Every SET is kept as a commit with
+its own version of the tree, so each one adds about 8 KB, even when it
+overwrites a key; Valkey adds about 17 bytes. 400,000 SETs over 200,000
+keys left Umbrachyx at 2.9 GiB and Valkey at 20 MiB (a Linux virtual
+machine on the laptop, `bench/memory.sh`). Nothing is dropped yet; a
+retention policy is designed but not built.
 
 How each number was taken, and what it does not show:
 [`docs/comparison.md`](docs/comparison.md). The raw output, machine and
 versions: [`bench/results/`](bench/results/) (the laptop in `2026-11-04/`,
-the runner in `2026-11-04-linux-ci/`). The scripts are in
+the runner in `2026-11-04-linux-ci/`, the virtual machine in
+`2026-11-09-linux-vm/`). The scripts are in
 [`bench/`](bench/), and CI runs them against Valkey on every change.
 
 ## Robustness

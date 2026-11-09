@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Every benchmark and robustness test on a fresh Ubuntu 24.04 machine, for
 # a release. Installs what it needs, builds Valkey from its release tag,
-# runs bench/umbrachyx.sh, bench/valkey.sh and bench/connections.sh several
-# times, then the robustness tests, and writes everything with a
-# description of the machine to ~/umbrachyx-results/<date>-<machine>/.
+# runs bench/umbrachyx.sh, bench/valkey.sh, bench/connections.sh and
+# bench/memory.sh several times, then the robustness tests, and writes
+# everything with a description of the machine to
+# ~/umbrachyx-results/<date>-<machine>/.
 #
 # The logs go to <scratch>, which should be on the machine's local NVMe
 # disk rather than a network disk: what a sync costs decides most of the
@@ -57,6 +58,7 @@ for run in $(seq 1 "$runs"); do
   bench/umbrachyx.sh >"$out/run-$run/umbrachyx.csv"
   bench/valkey.sh >"$out/run-$run/valkey.csv"
   bench/connections.sh >"$out/run-$run/connections.csv" 2>"$out/run-$run/connections.stderr.txt"
+  bench/memory.sh >"$out/run-$run/memory.csv"
 done
 
 {

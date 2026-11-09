@@ -45,6 +45,7 @@
 bench/umbrachyx.sh
 bench/valkey.sh
 bench/connections.sh          # 先に ulimit -n 65536
+bench/memory.sh               # 同じ SET を2回流したときのメモリ（RSS）
 cargo test -p umbrachyx --release --test server_crash -- --ignored --nocapture
 cargo test -p umbrachyx --test crash -- --ignored --nocapture
 cargo test -p umbrachyx --lib --release ten_thousand_seeds -- --ignored --nocapture
