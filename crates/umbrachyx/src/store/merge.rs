@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
-use super::{Clock, CommitId, Provenance, Storage, Store, StoreError, decode_cell};
+use super::{Clock, CommitId, CommitInfo, Provenance, Storage, Store, StoreError, decode_cell};
 use crate::log::Edit;
 use crate::tree::{Bytes, Change, Tree};
 
@@ -85,6 +85,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
         from: Option<&CommitId>,
         to: Option<&CommitId>,
     ) -> Result<Vec<ValueChange>, StoreError> {
+        // A commit against its parent, what a viewer shows most, is read
+        // from the cells the commit wrote, without rebuilding either tree.
+        if let Some(info) = to.and_then(|to| self.commits.get(to))
+            && from.is_some_and(|from| info.parent == Some(*from))
+        {
+            return Ok(written_changes(info));
+        }
         Ok(value_changes(&self.state_at(from)?, &self.state_at(to)?))
     }
 
@@ -197,11 +204,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     fn state_at(&self, commit: Option<&CommitId>) -> Result<Tree, StoreError> {
         match commit {
             None => Ok(Tree::empty()),
-            Some(id) => self
-                .commits
-                .get(id)
-                .map(|info| info.state.clone())
-                .ok_or(StoreError::UnknownCommit(*id)),
+            Some(id) => self.tree_at(id).ok_or(StoreError::UnknownCommit(*id)),
         }
     }
 
@@ -265,6 +268,27 @@ fn value_changes(from: &Tree, to: &Tree) -> Vec<ValueChange> {
             };
             (before != after).then_some(ValueChange {
                 key,
+                before,
+                after,
+                erased: false,
+            })
+        })
+        .collect()
+}
+
+/// What one commit changed, from its cells and the cells they replaced:
+/// the same as the diff of its parent's tree and its own.
+fn written_changes(info: &CommitInfo) -> Vec<ValueChange> {
+    info.written
+        .iter()
+        .filter_map(|written| {
+            let before = written
+                .replaced
+                .as_ref()
+                .and_then(|cell| decode_cell(cell).value);
+            let after = decode_cell(&written.cell).value;
+            (before != after).then(|| ValueChange {
+                key: written.key.clone(),
                 before,
                 after,
                 erased: false,

@@ -56,13 +56,10 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let mut history = Vec::new();
         let mut cell = self.raw_cell(branch, key);
         while let Some(current) = cell.filter(|_| history.len() < limit) {
-            let parent = self
+            cell = self
                 .commits
                 .get(&current.changed_by)
-                .and_then(|commit| commit.parent)
-                .and_then(|parent| self.commits.get(&parent));
-            cell = parent
-                .and_then(|parent| parent.state.get(key))
+                .and_then(|commit| commit.written(key)?.replaced.as_ref())
                 .map(|bytes| decode_cell(bytes));
             history.push(self.revealed(key, current));
         }

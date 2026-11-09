@@ -24,6 +24,7 @@ compared, it says that too.
   bench/umbrachyx.sh
   bench/connections.sh
   bench/memory.sh
+  cargo run --release -p umbrachyx --example old_reads
   ```
 
 - The raw output of the latest runs, with the machine and versions, is in
@@ -267,24 +268,33 @@ it landed in every time: 8.6 s for 1,000,000 records and 103 s for
 Umbrachyx loses here, by far. The same SETs of 32-byte values over a
 space of 200,000 keys, twice over, as `bench/memory.sh` sends them; the
 resident size of each server process, the median of three runs in a Linux
-virtual machine on the laptop
-([`bench/results/2026-11-09-linux-vm/`](../bench/results/2026-11-09-linux-vm/)):
+virtual machine on the laptop. The first row is the store as it was until
+it stopped keeping a whole tree for every commit
+([`2026-11-09-linux-vm/`](../bench/results/2026-11-09-linux-vm/)), the
+second as it is now
+([`2026-11-09-linux-vm-sparse-trees/`](../bench/results/2026-11-09-linux-vm-sparse-trees/)):
 
 | | After 200,000 SETs | After 400,000 SETs | Added per SET in the second pass |
 |---|---|---|---|
-| Umbrachyx | 1.4 GiB | 2.9 GiB | about 8 KB (7.7 to 8.2 KB) |
+| Umbrachyx, a tree per commit | 1.4 GiB | 2.9 GiB | about 8 KB (7.7 to 8.2 KB) |
+| Umbrachyx, a tree per 1,024 commits | 484 MiB | 1.1 GiB | about 3.2 KB (3.1 to 3.2 KB) |
 | Valkey 9.1.3 | 17 MiB | 20 MiB | 17 bytes |
 
 The second pass writes keys that are already there. Valkey replaces the
-value in place, so it barely grows. Umbrachyx keeps every SET as a commit,
-and every commit keeps its own version of the tree: the nodes on the path
-from the root to the changed key are copied, about four nodes of up to a
-few dozen entries each, while the rest is shared with the version before.
-That is what keeping every change costs while nothing is ever dropped. At
-this rate a million SETs, as `bench/umbrachyx.sh` writes to fill its key
-space, need about 8 GB; in this 4 GiB machine they did not fit.
+value in place, so it barely grows. Umbrachyx keeps every SET as a commit
+with the cell it wrote and the one it replaced. A whole tree per commit
+cost more than that: each copied the path from the root to the changed
+key, about four nodes of a few dozen entries each. Now one commit in 1,024
+keeps its tree and past trees are rebuilt from it, so reading the past
+costs more: a diff between two old commits that are not parent and child
+took about 7 ms on average and 16 ms at worst in the same machine, where
+it took under 0.1 ms (`cargo run --release -p umbrachyx --example
+old_reads`, output in the same folder). A commit against its parent is
+read from its own cells and stays under 0.1 ms.
 
-Two things would change this, and neither is built: a retention policy
-that folds old versions together (see "Retention per column" in
-[`decisions.md`](decisions.md)), and nodes laid out to cost less per copy.
-Until then, this table is the price of the history.
+At this rate a million SETs, as `bench/umbrachyx.sh` writes to fill its
+key space, need about 3 GB. Much of what is left is the history itself,
+each commit and its cells, which keeping fewer trees does not remove.
+Only a retention policy that drops or folds old changes would cut that
+(see "Retention per column" in [`decisions.md`](decisions.md)); it is
+designed but not built.

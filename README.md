@@ -81,18 +81,20 @@ time goes to walking the tree from node to node. The runner is noisy: its
 two runs differ by up to a third. The 256-writer row measures Umbrachyx in
 process and Valkey over loopback; the diff row includes Dolt's SQL layer.
 
-Memory is where Umbrachyx loses most. Every SET is kept as a commit with
-its own version of the tree, so each one adds about 8 KB, even when it
-overwrites a key; Valkey adds about 17 bytes. 400,000 SETs over 200,000
-keys left Umbrachyx at 2.9 GiB and Valkey at 20 MiB (a Linux virtual
-machine on the laptop, `bench/memory.sh`). Nothing is dropped yet; a
-retention policy is designed but not built.
+Memory is where Umbrachyx loses most. Every SET is kept as a commit, so
+each one adds about 3.2 KB, even when it overwrites a key; Valkey adds
+about 17 bytes. 400,000 SETs over 200,000 keys left Umbrachyx at 1.1 GiB
+and Valkey at 20 MiB (a Linux virtual machine on the laptop,
+`bench/memory.sh`). It was about 8 KB a SET until commits stopped keeping
+a whole tree each; reading an old state now rebuilds its tree, a few
+milliseconds. Nothing is dropped yet; a retention policy is designed but
+not built.
 
 How each number was taken, and what it does not show:
 [`docs/comparison.md`](docs/comparison.md). The raw output, machine and
 versions: [`bench/results/`](bench/results/) (the laptop in `2026-11-04/`,
 the runner in `2026-11-04-linux-ci/`, the virtual machine in
-`2026-11-09-linux-vm/`). The scripts are in
+`2026-11-09-linux-vm/` and `2026-11-09-linux-vm-sparse-trees/`). The scripts are in
 [`bench/`](bench/), and CI runs them against Valkey on every change.
 
 ## Robustness

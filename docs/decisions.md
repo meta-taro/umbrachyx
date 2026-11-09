@@ -343,9 +343,25 @@ checker to hold the shared secret that mints tokens.
   for a new one. A reader holds the lock only to copy that pointer, never
   while the committer syncs, and a writer that has been answered reads its
   own write back.
-- **Every commit keeps the tree it produced**, so any past state can be
-  read. Versions share the nodes they have in common, so keeping all of
-  them costs only the paths each commit rewrote.
+- **Every past state can be read, but only one commit in 1,024 along each
+  line of history keeps its whole tree.** The others keep the cells they
+  wrote and the cells those replaced. A past tree is rebuilt from the
+  nearest kept tree before it, replaying each key's latest cell once.
+  This replaced a tree per commit: versions share the nodes they have in
+  common, but each commit still copied the path from the root to every key
+  it changed, about 8 KB per one-key commit, more than the history itself
+  holds. Kept every 1,024 commits, the same writes take about 3.2 KB a
+  commit, much of it the commit and its cells, which no spacing removes.
+  The cost moves to reading the past: a diff between two
+  old commits rebuilds two trees, about 7 ms on average and 16 ms at worst
+  where it took under 0.1 ms, measured in a Linux virtual machine on a
+  laptop with 200,000 commits
+  ([`bench/results/2026-11-09-linux-vm-sparse-trees/`](../bench/results/2026-11-09-linux-vm-sparse-trees/)).
+  A commit against its parent, what a viewer shows most, needs no tree:
+  it is read from the commit's cells and is faster than before. Keeping a
+  tree more often trades memory back for those reads: trees kept close
+  together still each hold their own copy of every path changed between
+  them.
 - **A commit is named by a BLAKE3 hash** of its parent, branch, provenance,
   time and edits. The hash of the tree is left out, because each cell in
   the tree names the commit that wrote it.

@@ -5,15 +5,17 @@
 //! is it applied. Opening the store replays the log, so nothing the store
 //! holds can be missing from the log.
 //!
-//! Every commit keeps the tree it produced. Versions share every node they
-//! have in common, so keeping them all costs only the paths each commit
-//! rewrote. A branch is a name for a commit, and making one copies nothing.
+//! Every commit keeps the cells it wrote and the cells they replaced; one
+//! in `TREE_EVERY` along each line of history also keeps its whole tree,
+//! and the tree of any other is rebuilt from the nearest one before it.
+//! Keeping a tree per commit would copy, for every commit, the path from
+//! the root to each key it changed. A branch is a name for a commit, and
+//! making one copies nothing.
 //!
 //! Each value in the tree is a cell: the value, or a mark that it was
-//! removed, and the commit that last changed it. Following that commit to
-//! its parent and reading the key there gives the change before, so the
-//! history of a key costs the number of times it changed, not the number of
-//! commits.
+//! removed, and the commit that last changed it. That commit kept the cell
+//! it replaced, which gives the change before, so the history of a key
+//! costs the number of times it changed, not the number of commits.
 //!
 //! A store opened with a key file seals every value under its subject's key
 //! as it comes in and opens it as it goes out (see `seal`), so the log and
@@ -116,8 +118,35 @@ pub struct CommitInfo {
     pub branch: String,
     pub provenance: Provenance,
     pub time: u64,
-    /// The cells after this commit.
-    state: Tree,
+    /// The cells this commit wrote, sorted by key.
+    written: Vec<Written>,
+    /// The whole tree after this commit, kept for one commit in about
+    /// `TREE_EVERY` along each line of history. The trees of the others
+    /// are rebuilt from the nearest one before them.
+    tree: Option<Tree>,
+}
+
+/// A cell a commit wrote, and the cell it replaced on its branch.
+#[derive(Debug, Clone)]
+struct Written {
+    key: Bytes,
+    cell: Bytes,
+    replaced: Option<Bytes>,
+}
+
+/// How often along a line of history a commit keeps its whole tree.
+/// Rebuilding the tree of any commit then replays at most this many
+/// commits' cells, while memory grows with the cells written rather than
+/// with a copied path of the tree per commit.
+const TREE_EVERY: usize = 1024;
+
+impl CommitInfo {
+    fn written(&self, key: &[u8]) -> Option<&Written> {
+        self.written
+            .binary_search_by(|written| (*written.key).cmp(key))
+            .ok()
+            .map(|index| &self.written[index])
+    }
 }
 
 #[derive(Debug)]
@@ -192,6 +221,9 @@ impl From<LogError> for StoreError {
 struct Head {
     commit: Option<CommitId>,
     state: Tree,
+    /// Commits along this line of history since the last that kept its
+    /// whole tree.
+    since_tree: usize,
 }
 
 pub struct Store<S: Storage, C: Clock> {
@@ -243,6 +275,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 Head {
                     commit: None,
                     state: Tree::empty(),
+                    since_tree: 0,
                 },
             )]),
             commits: HashMap::new(),
@@ -435,7 +468,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
 
     /// The value of `key` as `commit` left it.
     pub fn get_at(&self, commit: &CommitId, key: &[u8]) -> Option<Bytes> {
-        let value = decode_cell(self.commits.get(commit)?.state.get(key)?).value;
+        let value = decode_cell(&self.cell_at(commit, key)?).value;
         self.reveal(key, value)
     }
 
@@ -479,10 +512,56 @@ impl<S: Storage, C: Clock> Store<S, C> {
 
     /// Every live key and value as `commit` left it, in key order.
     pub fn entries_at(&self, commit: &CommitId) -> Vec<(Bytes, Bytes)> {
-        self.commits
-            .get(commit)
-            .map(|info| self.live_entries(&info.state))
+        self.tree_at(commit)
+            .map(|tree| self.live_entries(&tree))
             .unwrap_or_default()
+    }
+
+    /// The cell of `key` as `commit` left it: written by the commit itself
+    /// or one before it, found by walking back no further than the nearest
+    /// commit that keeps its whole tree.
+    fn cell_at(&self, commit: &CommitId, key: &[u8]) -> Option<Bytes> {
+        let mut next = Some(*commit);
+        while let Some(id) = next {
+            let info = self.commits.get(&id)?;
+            if let Some(written) = info.written(key) {
+                return Some(written.cell.clone());
+            }
+            if let Some(tree) = &info.tree {
+                return tree.get(key).cloned();
+            }
+            next = info.parent;
+        }
+        None
+    }
+
+    /// The whole tree as `commit` left it: a branch's head as it is, any
+    /// other rebuilt from the nearest tree kept before it, or from the empty
+    /// tree, by replaying the cells written since.
+    fn tree_at(&self, commit: &CommitId) -> Option<Tree> {
+        if let Some(head) = self.branches.values().find(|h| h.commit == Some(*commit)) {
+            return Some(head.state.clone());
+        }
+        // Walking back from the newest, the first cell seen for a key is the
+        // one that stands, so the replay is one insert of each key once.
+        let mut latest: BTreeMap<Bytes, Bytes> = BTreeMap::new();
+        let mut next = Some(*commit);
+        let base = loop {
+            let Some(id) = next else {
+                break Tree::empty();
+            };
+            let info = self.commits.get(&id)?;
+            if let Some(tree) = &info.tree {
+                break tree.clone();
+            }
+            for written in &info.written {
+                latest
+                    .entry(written.key.clone())
+                    .or_insert_with(|| written.cell.clone());
+            }
+            next = info.parent;
+        };
+        Some(base.insert_sorted(latest.into_iter().collect()))
     }
 
     /// The latest commit on `branch`, or `None` if it has none or does not
@@ -545,6 +624,16 @@ impl<S: Storage, C: Clock> Store<S, C> {
         self.last_time
     }
 
+    /// How many commits keep a whole tree. Tests use this to check that
+    /// memory grows with the edits, not with a tree per commit.
+    #[doc(hidden)]
+    pub fn trees_kept(&self) -> usize {
+        self.commits
+            .values()
+            .filter(|info| info.tree.is_some())
+            .count()
+    }
+
     fn require_branch(&self, name: &str) -> Result<(), StoreError> {
         if self.branches.contains_key(name) {
             Ok(())
@@ -594,7 +683,17 @@ impl<S: Storage, C: Clock> Store<S, C> {
             .get_mut(&commit.branch)
             .ok_or_else(|| StoreError::UnknownBranch(commit.branch.clone()))?;
         let id = commit_id(head.commit, commit);
-        let state = head.state.insert_sorted(cells_of(&head.state, commit, &id));
+        let cells = cells_of(&head.state, commit, &id);
+        let written = cells
+            .iter()
+            .map(|(key, cell)| Written {
+                key: key.clone(),
+                cell: cell.clone(),
+                replaced: head.state.get(key).cloned(),
+            })
+            .collect();
+        let state = head.state.insert_sorted(cells);
+        let since_tree = (head.since_tree + 1) % TREE_EVERY;
         let info = CommitInfo {
             id,
             parent: head.commit,
@@ -606,11 +705,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 approved_by: commit.approved_by.clone(),
             },
             time: commit.time,
-            state: state.clone(),
+            written,
+            tree: (since_tree == 0).then(|| state.clone()),
         };
         *head = Head {
             commit: Some(id),
             state,
+            since_tree,
         };
         self.commits.insert(id, Arc::new(info));
         self.last_time = self.last_time.max(commit.time);
