@@ -16,7 +16,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::disk::{SimStorage, SyncFault};
 use super::rng::Rng;
-use crate::log::{Branch, Commit, Edit, Log, LogError, Record, Storage, record};
+use crate::log::{Branch, Commit, Edit, Engine, Log, LogError, Record, Storage, Table, record};
 
 const STEPS: usize = 64;
 
@@ -316,8 +316,25 @@ fn frame_ends(records: &[Record]) -> Vec<usize> {
 }
 
 /// Mostly commits of one small write, sometimes several writes, removes,
-/// large values that span many sectors, or a new branch.
+/// large values that span many sectors, a new branch or a table declared.
 fn random_record(rng: &mut Rng) -> Record {
+    if rng.percent(3) {
+        let name_len = 1 + rng.below(24) as usize;
+        let who_len = 1 + rng.below(16) as usize;
+        let why_len = rng.below(48) as usize;
+        return Record::Table(Table {
+            name: rng.bytes(name_len),
+            engine: if rng.percent(50) {
+                Engine::Latest
+            } else {
+                Engine::History
+            },
+            who: rng.ascii(who_len),
+            why: rng.ascii(why_len),
+            approved_by: rng.percent(30).then(|| rng.ascii(who_len)),
+            time: rng.next_u64(),
+        });
+    }
     if rng.percent(5) {
         let name_len = 1 + rng.below(24) as usize;
         let from_len = 1 + rng.below(24) as usize;
@@ -361,8 +378,10 @@ fn random_write(rng: &mut Rng) -> Edit {
 }
 
 fn describe(record: &Record) -> String {
-    let Record::Commit(record) = record else {
-        return "new branch".to_owned();
+    let record = match record {
+        Record::Commit(record) => record,
+        Record::Table(_) => return "table declared".to_owned(),
+        _ => return "new branch".to_owned(),
     };
     let bytes: usize = record
         .changes

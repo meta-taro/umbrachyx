@@ -10,7 +10,7 @@ mod storage;
 use std::fmt;
 use std::io;
 
-pub use record::{Branch, Commit, Edit, Erase, MAX_PAYLOAD_LEN, Record};
+pub use record::{Branch, Commit, Edit, Engine, Erase, MAX_PAYLOAD_LEN, Record, Table};
 pub(crate) use storage::sync_parent_dir;
 pub use storage::{FileStorage, Storage};
 

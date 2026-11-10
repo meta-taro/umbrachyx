@@ -19,6 +19,8 @@ pub enum Record {
     Group(Vec<Commit>),
     /// A subject's key was destroyed. Holds no value.
     Erase(Erase),
+    /// A table declared to be held by an engine.
+    Table(Table),
 }
 
 /// Changes to one branch, made together, with who made them, why, who
@@ -44,6 +46,46 @@ pub struct Commit {
 pub struct Erase {
     pub subject: Vec<u8>,
     pub key_fingerprint: [u8; 8],
+    pub who: String,
+    pub why: String,
+    pub approved_by: Option<String>,
+    /// Microseconds since the Unix epoch, from the store's clock.
+    pub time: u64,
+}
+
+/// How a table is held in memory. The log holds every write either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Engine {
+    /// Every change, in the ordered tree: today's way, and a table's way
+    /// until it is declared otherwise.
+    History,
+    /// Only the current value of each key.
+    Latest,
+}
+
+impl Engine {
+    const fn byte(self) -> u8 {
+        match self {
+            Self::History => 0,
+            Self::Latest => 1,
+        }
+    }
+
+    const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::History),
+            1 => Some(Self::Latest),
+            _ => None,
+        }
+    }
+}
+
+/// A table, the first part of its keys, declared to be held by `engine`,
+/// with who declared it, why, who approved it and when.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Table {
+    pub name: Vec<u8>,
+    pub engine: Engine,
     pub who: String,
     pub why: String,
     pub approved_by: Option<String>,
@@ -89,6 +131,7 @@ const KIND_COMMIT: u8 = 1;
 const KIND_BRANCH: u8 = 2;
 const KIND_GROUP: u8 = 3;
 const KIND_ERASE: u8 = 4;
+const KIND_TABLE: u8 = 5;
 /// The version and kind bytes that start every payload.
 const KIND_PREFIX: usize = 2;
 /// The bytes in front of a group's commits: the version, kind and count.
@@ -138,6 +181,19 @@ fn encode_payload(record: &Record) -> Result<Vec<u8>, LogError> {
                 erase.approved_by.as_deref().map(str::as_bytes),
             );
             payload.extend_from_slice(&erase.time.to_le_bytes());
+            payload
+        }
+        Record::Table(table) => {
+            let mut payload = vec![FORMAT_VERSION, KIND_TABLE];
+            push_field(&mut payload, &table.name);
+            payload.push(table.engine.byte());
+            push_field(&mut payload, table.who.as_bytes());
+            push_field(&mut payload, table.why.as_bytes());
+            push_optional(
+                &mut payload,
+                table.approved_by.as_deref().map(str::as_bytes),
+            );
+            payload.extend_from_slice(&table.time.to_le_bytes());
             payload
         }
     };
@@ -316,6 +372,7 @@ fn decode_payload(payload: &[u8]) -> Option<Record> {
         }),
         KIND_GROUP => Record::Group(decode_group(&mut cursor)?),
         KIND_ERASE => Record::Erase(decode_erase(&mut cursor)?),
+        KIND_TABLE => Record::Table(decode_table(&mut cursor)?),
         _ => return None,
     };
     cursor.rest.is_empty().then_some(record)
@@ -334,6 +391,26 @@ fn decode_erase(cursor: &mut Cursor<'_>) -> Option<Erase> {
     Some(Erase {
         subject,
         key_fingerprint,
+        who,
+        why,
+        approved_by,
+        time,
+    })
+}
+
+fn decode_table(cursor: &mut Cursor<'_>) -> Option<Table> {
+    let name = cursor.field()?.to_vec();
+    let engine = Engine::from_byte(cursor.byte()?)?;
+    let who = cursor.text()?;
+    let why = cursor.text()?;
+    let approved_by = match cursor.optional()? {
+        None => None,
+        Some(bytes) => Some(bytes_to_text(bytes)?),
+    };
+    let time = cursor.u64()?;
+    Some(Table {
+        name,
+        engine,
         who,
         why,
         approved_by,
@@ -663,6 +740,51 @@ mod tests {
         ];
 
         assert_eq!(scan(&frames(&records)).expect("scans").records, records);
+    }
+
+    fn table(engine: Engine, approved_by: Option<&str>) -> Record {
+        Record::Table(Table {
+            name: b"position".to_vec(),
+            engine,
+            who: "ops:schema".to_owned(),
+            why: "only the current position matters — 現在地".to_owned(),
+            approved_by: approved_by.map(str::to_owned),
+            time: 1_800_000_000_000_002,
+        })
+    }
+
+    #[test]
+    fn table_records_round_trip_for_every_engine() {
+        let records = vec![
+            record("a", None),
+            table(Engine::Latest, Some("ops:lead")),
+            table(Engine::History, None),
+            group(&["b"]),
+        ];
+
+        assert_eq!(scan(&frames(&records)).expect("scans").records, records);
+    }
+
+    /// An engine this build does not know is not guessed at: the frame is
+    /// damage, as a frame of an unknown kind is.
+    #[test]
+    fn a_table_record_with_an_unknown_engine_is_corruption() {
+        let declared = encode(&table(Engine::Latest, None)).expect("encodes");
+        let mut payload = declared[HEADER_LEN..].to_vec();
+        let engine_at = KIND_PREFIX + LEN_PREFIX + b"position".len();
+        assert_eq!(payload[engine_at], 1, "the engine byte sits after the name");
+        payload[engine_at] = 9;
+        let len = u32::try_from(payload.len()).expect("fits");
+        let crc = crc32fast::hash(&payload);
+        let damaged = [&len.to_le_bytes()[..], &crc.to_le_bytes(), &payload].concat();
+        let bytes = [
+            frames(&[record("a", None)]),
+            damaged,
+            frames(&[record("b", None)]),
+        ]
+        .concat();
+
+        assert!(scan(&bytes).is_err());
     }
 
     /// A group is one frame: cut anywhere inside it, none of its commits

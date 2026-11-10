@@ -627,7 +627,68 @@ erases the subject while the history keeps its shape (see
   file. Keeping the key file out of backups, or encrypting it under a key
   held elsewhere, is left to the operator for now.
 
+## Engines per table (being built)
+
+Every value pays for the full history and the ordered tree today, and that
+is where Umbrachyx loses to Valkey: about 3 KB kept per SET against
+Valkey's 17 bytes, and a GET that walks the tree (315 ns) where a hash
+table takes 31 ns. Some data needs neither: a player's position or a
+session is read by key, and only its current value matters. So a table
+can be declared to keep only its latest value, the way MySQL lets a table
+choose its storage engine.
+
+- **What differs is only how a table is held in memory. The log stays one
+  log.** Every engine writes through it, and no write is acknowledged
+  before it is synced, whatever the engine. One log also keeps a commit
+  that touches tables of different engines atomic, and keeps the crash
+  tests one set.
+- **The log still holds everything**, whatever a table's engine drops
+  from memory. Disk use and restart time do not change; reducing those is
+  compaction (below), a separate step.
+- **A table is declared before anything is written to it**, on any
+  branch. Changing the engine of a table that has keys would mean
+  rebuilding it from the log, which is not built, so it is refused; the
+  store as written then stays equal to the store as the log replays.
+- **A table is the first segment of a key**: `player/42/gems` is in the
+  table `player`. The subject that erasing works on stays the first two
+  segments.
+- **Which engine a table uses is a record in the log**, so replaying the
+  log gives the same tables every time. A table never declared keeps its
+  history, as every table does today.
+- **Two engines to begin with**:
+
+  | | History (today's) | Latest |
+  |---|---|---|
+  | Held in memory | the prolly tree and the cells of every commit | a HAMT of current values |
+  | GET | walks the tree | one hash lookup |
+  | Range scan | in key order | reads every entry |
+  | Past values and undo | all of them | none |
+  | Branches | one pointer | one pointer (the HAMT is persistent too) |
+  | Diff and merge | the tree's | the HAMT's; a three-way merge over the keys a branch wrote |
+
+- **A latest table still branches.** An agent's writes always go to a
+  branch, so an engine without branches could not take them. That is why
+  it is a HAMT and not a plain hash table, which would be copied whole for
+  every branch. On a branch, a commit keeps the values it replaced until
+  the branch is merged, so the merge can tell a conflict: for each key the
+  branch wrote, the value on `main` now is compared with the value when
+  the branch first wrote it.
+- **Tools can tell the tables apart.** `UMBRA.TABLES` lists the declared
+  tables and their engines. `UMBRA.HISTORY` on a key of a latest table
+  answers with an error whose first word is `NOHISTORY`. `UMBRA.CELLS` and
+  `UMBRA.DIFF` leave latest tables out and name them in `omitted_tables`.
+- **Not built**: a way for others to plug in engines, a log per engine,
+  and an append-only engine for events, which waits for the latest
+  engine's numbers.
+- **Stop if** the latest engine does not at least halve the memory kept
+  per SET in `bench/memory.sh`, or makes neither SET nor GET at least 10%
+  faster; or if its branches fail the deterministic simulation or the
+  hijacked-agent tests.
+
 ## Retention per column (not built yet)
+
+Engines per table (above) cover keeping only the current value. The rest
+of this section is about keeping some history but less than all of it.
 
 The concept keeps every change of some columns, compacts others to one
 entry per interval, and keeps only the current value of others. None of

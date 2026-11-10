@@ -27,16 +27,18 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::keys::{Fingerprint, KeyError, KeyStorage, Keys};
-use crate::log::{Branch, Commit, Edit, Erase, Log, LogError, Record, Storage};
+use crate::log::{Branch, Commit, Edit, Engine, Erase, Log, LogError, Record, Storage, Table};
 use crate::tree::{Bytes, Tree};
 
 mod committer;
 mod inspect;
 mod merge;
 mod seal;
+mod tables;
 mod view;
 
 use seal::{Ring, Sealer};
+use tables::{Refusal, Tables};
 
 pub use committer::{Committer, Pending, Reader, Writer};
 pub use inspect::Inspect;
@@ -176,6 +178,11 @@ pub enum StoreError {
     NotSealed,
     /// Erasing needs encrypted values; the store was opened without keys.
     NoKeys,
+    /// A table name is one part of a key: not empty, without a `/`.
+    BadTableName,
+    /// The table has been written to, on some branch, so how it is held
+    /// can no longer be declared.
+    TableInUse(Vec<u8>),
 }
 
 impl fmt::Display for StoreError {
@@ -198,6 +205,12 @@ impl fmt::Display for StoreError {
             ),
             Self::NotSealed => write!(f, "the log holds values written without encryption"),
             Self::NoKeys => write!(f, "values are not encrypted, so nothing can be erased"),
+            Self::BadTableName => write!(f, "a table name must be one part of a key, without '/'"),
+            Self::TableInUse(name) => write!(
+                f,
+                "table {:?} already has keys; its engine can only be declared before the first write",
+                String::from_utf8_lossy(name)
+            ),
         }
     }
 }
@@ -236,6 +249,7 @@ pub struct Store<S: Storage, C: Clock> {
     /// Present when values are encrypted.
     sealer: Option<Sealer>,
     erasures: Vec<Erasure>,
+    tables: Tables,
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
@@ -282,6 +296,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             last_time: 0,
             sealer,
             erasures: Vec::new(),
+            tables: Tables::default(),
         };
         for record in &records {
             store
@@ -410,6 +425,43 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let sealer = self.sealer.as_mut().ok_or(StoreError::NoKeys)?;
         sealer.erase(subject, &key_fingerprint)?;
         Ok(true)
+    }
+
+    /// Declares that `table`, the first part of its keys, is held by
+    /// `engine`. Logged with who did it and why. Refused once anything has
+    /// been written to the table, on any branch, and for a name that is not
+    /// one part of a key; nothing is written then.
+    pub fn declare_table(
+        &mut self,
+        table: &[u8],
+        engine: Engine,
+        provenance: Provenance,
+    ) -> Result<(), StoreError> {
+        self.tables
+            .check(table)
+            .map_err(|refusal| refused(refusal, table))?;
+        let time = self.next_time();
+        let record = Record::Table(Table {
+            name: table.to_vec(),
+            engine,
+            who: provenance.who,
+            why: provenance.why,
+            approved_by: provenance.approved_by,
+            time,
+        });
+        self.log.append(&record)?;
+        self.apply(&record).map(drop)
+    }
+
+    /// Every declared table and its engine. A table not here keeps its
+    /// history.
+    pub fn tables(&self) -> &BTreeMap<Vec<u8>, Engine> {
+        self.tables.declared()
+    }
+
+    /// The engine that holds `key`'s table.
+    pub fn engine_of(&self, key: &[u8]) -> Engine {
+        self.tables.engine_of(key)
     }
 
     /// Every subject erased, oldest first.
@@ -674,6 +726,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 .iter()
                 .map(|commit| self.apply_commit(commit))
                 .collect(),
+            Record::Table(table) => {
+                self.tables
+                    .declare(&table.name, table.engine)
+                    .map_err(|refusal| refused(refusal, &table.name))?;
+                self.last_time = self.last_time.max(table.time);
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -684,6 +743,9 @@ impl<S: Storage, C: Clock> Store<S, C> {
             .ok_or_else(|| StoreError::UnknownBranch(commit.branch.clone()))?;
         let id = commit_id(head.commit, commit);
         let cells = cells_of(&head.state, commit, &id);
+        for (key, _) in &cells {
+            self.tables.note_written(key);
+        }
         let written = cells
             .iter()
             .map(|(key, cell)| Written {
@@ -752,6 +814,13 @@ fn new_commit(request: CommitRequest, time: u64, merged: Option<CommitId>) -> Co
         approved_by: request.provenance.approved_by,
         time,
         merged,
+    }
+}
+
+fn refused(refusal: Refusal, table: &[u8]) -> StoreError {
+    match refusal {
+        Refusal::BadName => StoreError::BadTableName,
+        Refusal::InUse => StoreError::TableInUse(table.to_vec()),
     }
 }
 
@@ -867,7 +936,7 @@ fn check_sealed(records: &[Record], ring: &Ring) -> Result<(), StoreError> {
         })
         .collect();
     let commits = records.iter().flat_map(|record| match record {
-        Record::Branch(_) | Record::Erase(_) => &[][..],
+        Record::Branch(_) | Record::Erase(_) | Record::Table(_) => &[][..],
         Record::Commit(commit) => std::slice::from_ref(commit),
         Record::Group(commits) => commits.as_slice(),
     });
