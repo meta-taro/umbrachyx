@@ -213,7 +213,10 @@ fn assert_every_state_reads_back(store: &FileStore, model: &Model) {
             continue;
         }
         for (key, value) in snapshot {
-            let got = store.get_at(id, key.as_bytes()).expect("reads").map(|v| text(&v));
+            let got = store
+                .get_at(id, key.as_bytes())
+                .expect("reads")
+                .map(|v| text(&v));
             assert_eq!(got.as_ref(), Some(value), "a value at a commit");
         }
     }
