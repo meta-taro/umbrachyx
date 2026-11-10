@@ -24,18 +24,30 @@ impl<S: Storage, C: Clock> Store<S, C> {
         self.tables.engine_of(key) == Engine::Latest
     }
 
-    /// The latest-value tables a diff from `from` to `to` leaves out,
-    /// because `main` keeps no past for them. Empty when the diff is whole.
-    pub fn omitted_tables(&self, from: Option<&CommitId>, to: Option<&CommitId>) -> Vec<Vec<u8>> {
-        if self.latest_changes(from, to).is_some() {
-            return Vec::new();
-        }
+    /// The table of `key` when it keeps only the latest value of each key,
+    /// and so has no history to show.
+    pub fn latest_table_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
+        self.tables.latest_table_of(key)
+    }
+
+    /// Every table that keeps only latest values: what a listing of cells
+    /// leaves out.
+    pub fn latest_tables(&self) -> Vec<Vec<u8>> {
         self.tables
             .declared()
             .iter()
             .filter(|(_, engine)| **engine == Engine::Latest)
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    /// The latest-value tables a diff from `from` to `to` leaves out,
+    /// because `main` keeps no past for them. Empty when the diff is whole.
+    pub fn omitted_tables(&self, from: Option<&CommitId>, to: Option<&CommitId>) -> Vec<Vec<u8>> {
+        if self.latest_changes(from, to).is_some() {
+            return Vec::new();
+        }
+        self.latest_tables()
     }
 
     /// The changes to latest-value tables from `from` to `to`, values

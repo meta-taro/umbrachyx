@@ -34,6 +34,11 @@ impl Tables {
         &self.declared
     }
 
+    /// The table of `key` when that table keeps only latest values.
+    pub fn latest_table_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
+        table_of(key).filter(|table| self.declared.get(*table) == Some(&Engine::Latest))
+    }
+
     pub fn engine_of(&self, key: &[u8]) -> Engine {
         table_of(key)
             .and_then(|table| self.declared.get(table))

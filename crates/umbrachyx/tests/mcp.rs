@@ -12,7 +12,7 @@ use biscuit_auth::KeyPair;
 use serde_json::{Value, json};
 use umbrachyx::capability::{self, Denied, Grant, Narrowing, Operation};
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
-use umbrachyx::log::{Edit, FileStorage};
+use umbrachyx::log::{Edit, Engine, FileStorage};
 use umbrachyx::mcp::Session;
 use umbrachyx::store::{MAIN_BRANCH, Provenance, Store, SystemClock};
 
@@ -228,6 +228,7 @@ fn diff_shows_only_the_keys_the_token_can_read() {
         diff["changes"],
         json!([{"key": "player/42/gems", "before": "95", "after": "5095", "erased": false}])
     );
+    assert_eq!(diff["omitted_tables"], json!([]));
 }
 
 #[test]
@@ -486,4 +487,133 @@ fn erased_values_read_as_erased() {
     assert_eq!(history["changes"][0]["why"], "bought a potion");
     assert_eq!(history["changes"][1]["erased"], true);
     assert_eq!(diff["changes"][0]["erased"], true);
+}
+
+/// Main where `player` and `pos` keep only latest values, written twice.
+fn latest_store(dir: &TempDir) -> FileStore {
+    let storage = FileStorage::open(&dir.0.join("log")).expect("opens file");
+    let mut store = Store::open(storage, SystemClock).expect("opens store");
+    for table in ["player", "pos"] {
+        store
+            .declare_table(table.as_bytes(), Engine::Latest, by("ops", "hot table"))
+            .expect("declares");
+    }
+    for gems in ["120", "95"] {
+        store
+            .commit(
+                MAIN_BRANCH,
+                vec![set("player/42/gems", gems), set("pos/42", gems)],
+                by("game:shop", "tick"),
+            )
+            .expect("commits");
+    }
+    store
+}
+
+#[test]
+fn history_of_a_latest_key_is_refused_as_having_none() {
+    let dir = TempDir::new("latest-history");
+    let mut session = session(latest_store(&dir), SystemTime::now() + HOUR);
+
+    let (history, is_error) = call(&mut session, "history", json!({"key": "player/42/gems"}));
+
+    assert!(is_error);
+    assert_eq!(history, "table 'player' keeps only the latest value");
+    assert_eq!(
+        call(&mut session, "get", json!({"key": "player/42/gems"})).0["value"],
+        "95"
+    );
+}
+
+/// The agent learns which of its tables a diff left out, and nothing of
+/// tables outside its token.
+#[test]
+fn diff_names_the_left_out_tables_the_token_reaches() {
+    let dir = TempDir::new("latest-diff");
+    let mut session = session(latest_store(&dir), SystemTime::now() + HOUR);
+
+    let (diff, is_error) = call(
+        &mut session,
+        "diff",
+        json!({"from": "main~1", "to": "main"}),
+    );
+
+    assert!(!is_error, "{diff}");
+    assert_eq!(diff["changes"], json!([]));
+    assert_eq!(diff["omitted_tables"], json!(["player"]));
+}
+
+/// A session whose token was narrowed by its holder before it connected.
+fn narrowed_session(
+    store: FileStore,
+    narrowing: &Narrowing<'_>,
+) -> Session<FileStorage, SystemClock> {
+    let root = KeyPair::new();
+    let token = capability::issue(&root, &grant(SystemTime::now() + HOUR)).expect("issues");
+    let narrowed = capability::narrow(&token, root.public(), narrowing).expect("narrows");
+    Session::new(store, &narrowed, root.public()).expect("starts")
+}
+
+/// Even a diff with no change the token can see checks the token, so an
+/// expired one learns no table names.
+#[test]
+fn an_expired_token_is_refused_a_diff_that_only_left_tables_out() {
+    let dir = TempDir::new("latest-diff-expired");
+    let mut session = session(latest_store(&dir), SystemTime::now() - HOUR);
+
+    let (diff, is_error) = call(
+        &mut session,
+        "diff",
+        json!({"from": "main~1", "to": "main"}),
+    );
+
+    assert!(is_error, "{diff}");
+    assert_eq!(diff, format!("refused: {}", Denied::Expired));
+}
+
+/// A table is named only when the token, narrowings and all, may read a
+/// key of it.
+#[test]
+fn a_narrowed_token_is_told_of_no_table_it_cannot_read() {
+    let dir = TempDir::new("latest-diff-narrowed");
+    for narrowing in [
+        Narrowing {
+            operation: Some(Operation::Write),
+            ..Narrowing::default()
+        },
+        Narrowing {
+            key_prefix: Some("player/7/"),
+            ..Narrowing::default()
+        },
+    ] {
+        let mut session = narrowed_session(latest_store(&dir), &narrowing);
+        let (diff, is_error) = call(
+            &mut session,
+            "diff",
+            json!({"from": "main~1", "to": "main"}),
+        );
+        assert!(!is_error, "{diff}");
+        assert_eq!(diff["omitted_tables"], json!([]), "{narrowing:?}");
+        std::fs::remove_file(dir.0.join("log")).expect("starts the next store afresh");
+    }
+}
+
+#[test]
+fn a_narrowed_token_is_told_of_a_table_it_can_still_read() {
+    let dir = TempDir::new("latest-diff-narrowed-reads");
+    let narrowing = Narrowing {
+        key_prefix: Some("player/42/item"),
+        column: Some("item"),
+        ..Narrowing::default()
+    };
+    let mut session = narrowed_session(latest_store(&dir), &narrowing);
+
+    let (diff, is_error) = call(
+        &mut session,
+        "diff",
+        json!({"from": "main~1", "to": "main"}),
+    );
+
+    assert!(!is_error, "{diff}");
+    assert_eq!(diff["omitted_tables"], json!(["player"]));
 }

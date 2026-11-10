@@ -6,7 +6,7 @@
 //! names only reads, so a question cannot write.
 
 use super::{Cell, Clock, CommitId, CommitInfo, Store, StoreError, ValueChange, decode_cell};
-use crate::log::Storage;
+use crate::log::{Engine, Storage};
 use crate::tree::Bytes;
 
 /// The reads of [`Store`] that do not depend on its storage or clock.
@@ -26,6 +26,14 @@ pub trait Inspect {
         to: Option<&CommitId>,
     ) -> Result<Vec<ValueChange>, StoreError>;
     fn cells(&self, branch: &str, after: Option<&[u8]>, limit: usize) -> Vec<(Bytes, Cell)>;
+    /// Every declared table and its engine ([`Store::tables`]).
+    fn tables(&self) -> Vec<(Vec<u8>, Engine)>;
+    /// [`Store::latest_table_of`].
+    fn latest_table_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]>;
+    /// [`Store::latest_tables`].
+    fn latest_tables(&self) -> Vec<Vec<u8>>;
+    /// [`Store::omitted_tables`].
+    fn omitted_tables(&self, from: Option<&CommitId>, to: Option<&CommitId>) -> Vec<Vec<u8>>;
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
@@ -121,5 +129,24 @@ impl<S: Storage, C: Clock> Inspect for Store<S, C> {
 
     fn cells(&self, branch: &str, after: Option<&[u8]>, limit: usize) -> Vec<(Bytes, Cell)> {
         Store::cells(self, branch, after, limit)
+    }
+
+    fn tables(&self) -> Vec<(Vec<u8>, Engine)> {
+        Store::tables(self)
+            .iter()
+            .map(|(name, engine)| (name.clone(), *engine))
+            .collect()
+    }
+
+    fn latest_table_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
+        Store::latest_table_of(self, key)
+    }
+
+    fn latest_tables(&self) -> Vec<Vec<u8>> {
+        Store::latest_tables(self)
+    }
+
+    fn omitted_tables(&self, from: Option<&CommitId>, to: Option<&CommitId>) -> Vec<Vec<u8>> {
+        Store::omitted_tables(self, from, to)
     }
 }

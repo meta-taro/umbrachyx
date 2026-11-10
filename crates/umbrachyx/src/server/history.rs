@@ -1,7 +1,14 @@
 //! Commands that read the history, for a person's tools: the branches, the
 //! cells of a branch, one key's changes, a branch's commits, and the diff
-//! between two commits. Names start with `UMBRA.`, as commands that Redis
-//! does not have usually do.
+//! between two commits, and the tables and the engines that hold them.
+//! Names start with `UMBRA.`, as commands that Redis does not have usually
+//! do.
+//!
+//! A table declared `latest` keeps only the current value of each key. Its
+//! keys have no history: `UMBRA.HISTORY` on one answers an error whose first
+//! word is `NOHISTORY`. `UMBRA.CELLS` leaves those tables out, and so does
+//! `UMBRA.DIFF` where `main` kept no past for them; both name what they
+//! left out in `omitted_tables`, empty when nothing was.
 //!
 //! Each answer is one bulk string of JSON, written as `report` writes it
 //! for agents. Every walk stops after a page, because the committer's
@@ -15,6 +22,7 @@
 use serde_json::{Value, json};
 
 use super::resp::Reply;
+use crate::log::Engine;
 use crate::report;
 use crate::store::{CommitId, Inspect, StoreError, Writer, short};
 
@@ -26,6 +34,7 @@ pub const MAX_PAGE: usize = 1000;
 /// the committer's thread.
 enum Question {
     Branches,
+    Tables,
     Cells {
         branch: String,
         after: Option<Vec<u8>>,
@@ -43,6 +52,31 @@ enum Question {
     },
 }
 
+/// Why a question has no answer.
+enum Refusal {
+    Store(StoreError),
+    /// The key is in a table that keeps only its latest value.
+    NoHistory(Vec<u8>),
+}
+
+impl From<StoreError> for Refusal {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl Refusal {
+    fn reply(&self) -> Reply {
+        match self {
+            Self::Store(error) => Reply::Error(format!("ERR {error}")),
+            Self::NoHistory(table) => Reply::Error(format!(
+                "NOHISTORY table '{}' keeps only the latest value",
+                String::from_utf8_lossy(table)
+            )),
+        }
+    }
+}
+
 /// The reply to the history command `name`, or `None` if there is none by
 /// that name. `name` is upper case; `served` is the branch this server
 /// writes to.
@@ -55,7 +89,7 @@ pub(super) fn answer(writer: &Writer, served: &str, name: &str, args: &[Vec<u8>]
     Some(
         match writer.ask(move |store| ask(store, &served, &question)) {
             Ok(Ok(answer)) => Reply::Bulk(Some(answer.to_string().into_bytes())),
-            Ok(Err(error)) => Reply::Error(format!("ERR {error}")),
+            Ok(Err(refusal)) => refusal.reply(),
             Err(error) => Reply::Error(format!("ERR {error}")),
         },
     )
@@ -64,6 +98,7 @@ pub(super) fn answer(writer: &Writer, served: &str, name: &str, args: &[Vec<u8>]
 fn read(name: &str, args: &[Vec<u8>]) -> Option<Result<Question, String>> {
     let question = match (name, args) {
         ("UMBRA.BRANCHES", []) => Ok(Question::Branches),
+        ("UMBRA.TABLES", []) => Ok(Question::Tables),
         ("UMBRA.CELLS", [branch]) => text(branch).map(|branch| Question::Cells {
             branch,
             after: None,
@@ -80,12 +115,14 @@ fn read(name: &str, args: &[Vec<u8>]) -> Option<Result<Question, String>> {
         ("UMBRA.DIFF", [from, to]) => {
             text(from).and_then(|from| text(to).map(|to| Question::Diff { from, to }))
         }
-        ("UMBRA.BRANCHES" | "UMBRA.CELLS" | "UMBRA.HISTORY" | "UMBRA.LOG" | "UMBRA.DIFF", _) => {
-            Err(format!(
-                "wrong number of arguments for '{}' command",
-                name.to_ascii_lowercase()
-            ))
-        }
+        (
+            "UMBRA.BRANCHES" | "UMBRA.TABLES" | "UMBRA.CELLS" | "UMBRA.HISTORY" | "UMBRA.LOG"
+            | "UMBRA.DIFF",
+            _,
+        ) => Err(format!(
+            "wrong number of arguments for '{}' command",
+            name.to_ascii_lowercase()
+        )),
         _ => return None,
     };
     Some(question)
@@ -96,22 +133,26 @@ fn text(arg: &[u8]) -> Result<String, String> {
     String::from_utf8(arg.to_vec()).map_err(|_| "a branch or commit name must be UTF-8".to_owned())
 }
 
-fn ask(store: &dyn Inspect, served: &str, question: &Question) -> Result<Value, StoreError> {
+fn ask(store: &dyn Inspect, served: &str, question: &Question) -> Result<Value, Refusal> {
     match question {
         Question::Branches => Ok(branches(store, served)),
+        Question::Tables => Ok(tables(store)),
         Question::Cells { branch, after } => {
             require_branch(store, branch)?;
             Ok(cells(store, branch, after.as_deref()))
         }
         Question::History { branch, key } => {
             require_branch(store, branch)?;
+            if let Some(table) = store.latest_table_of(key) {
+                return Err(Refusal::NoHistory(table.to_vec()));
+            }
             Ok(history(store, branch, key))
         }
         Question::Log { branch } => {
             require_branch(store, branch)?;
             Ok(log(store, branch))
         }
-        Question::Diff { from, to } => diff(store, from, to),
+        Question::Diff { from, to } => Ok(diff(store, from, to)?),
     }
 }
 
@@ -141,7 +182,28 @@ fn branches(store: &dyn Inspect, served: &str) -> Value {
     json!({"branches": branches, "served": served})
 }
 
-/// One page of cells. `next` is the last key of the page when more follow,
+/// The declared tables and their engines. A table not listed is held by
+/// the default engine.
+fn tables(store: &dyn Inspect) -> Value {
+    let tables: Vec<Value> = store
+        .tables()
+        .iter()
+        .map(|(name, engine)| json!({"name": report::shown(Some(name)), "engine": engine.name()}))
+        .collect();
+    json!({"default": Engine::History.name(), "tables": tables})
+}
+
+/// Table names as JSON shows keys.
+fn names(tables: &[Vec<u8>]) -> Vec<Value> {
+    tables
+        .iter()
+        .map(|name| report::shown(Some(name)))
+        .collect()
+}
+
+/// One page of cells. `omitted_tables` names every latest-value table,
+/// on every page and whichever keys the branch holds: their keys are never
+/// listed here. `next` is the last key of the page when more follow,
 /// to be sent back as `after`, and `null` on the last page.
 fn cells(store: &dyn Inspect, branch: &str, after: Option<&[u8]>) -> Value {
     let mut cells = store.cells(branch, after, MAX_PAGE + 1);
@@ -160,7 +222,12 @@ fn cells(store: &dyn Inspect, branch: &str, after: Option<&[u8]>) -> Value {
             Some(shown)
         })
         .collect();
-    json!({"branch": branch, "cells": cells, "next": next})
+    json!({
+        "branch": branch,
+        "cells": cells,
+        "next": next,
+        "omitted_tables": names(&store.latest_tables()),
+    })
 }
 
 /// The newest changes, at most a page of them; `more` says older ones
@@ -192,16 +259,25 @@ fn log(store: &dyn Inspect, branch: &str) -> Value {
 }
 
 /// The first page of keys, in key order, whose values differ; `more` says
-/// others were left out. Working the diff out costs the number of changes,
-/// not the size of the branches.
+/// others were left out, and `omitted_tables` the tables it could not
+/// diff. Working the diff out costs the number of changes, not the size of
+/// the branches.
 fn diff(store: &dyn Inspect, from: &str, to: &str) -> Result<Value, StoreError> {
-    let changes = store.diff(named(store, from)?.as_ref(), named(store, to)?.as_ref())?;
+    let (from_id, to_id) = (named(store, from)?, named(store, to)?);
+    let changes = store.diff(from_id.as_ref(), to_id.as_ref())?;
+    let omitted = store.omitted_tables(from_id.as_ref(), to_id.as_ref());
     let shown: Vec<Value> = changes
         .iter()
         .take(MAX_PAGE)
         .map(report::value_change)
         .collect();
-    Ok(json!({"from": from, "to": to, "changes": shown, "more": changes.len() > MAX_PAGE}))
+    Ok(json!({
+        "from": from,
+        "to": to,
+        "changes": shown,
+        "more": changes.len() > MAX_PAGE,
+        "omitted_tables": names(&omitted),
+    }))
 }
 
 /// The commit `name` names, or `None` for a branch with no commits yet,

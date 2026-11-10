@@ -63,6 +63,11 @@ pub struct Holder {
     pub subject: String,
     pub branch: String,
     pub purpose: String,
+    /// The keys the issuer granted. A holder may have narrowed it since, so
+    /// it bounds what the token reads; it is not a permission by itself.
+    pub key_prefix: String,
+    /// The columns the issuer granted, sorted; bounds as `key_prefix` does.
+    pub columns: Vec<String>,
 }
 
 /// What a holder takes away before handing a token on. Each field left
@@ -255,19 +260,26 @@ pub fn holder(token: &[u8], root: PublicKey) -> Result<Holder, Denied> {
     let token = Biscuit::from(token, root).map_err(|_| Denied::Invalid)?;
     // A query sees the authorizer's facts and the first block's only, as
     // the policy does, so a holder's own blocks cannot change the answer.
-    let (subject, branch, purpose) = AuthorizerBuilder::new()
+    let mut authorizer = AuthorizerBuilder::new()
         .set_limits(LIMITS)
         .build(&token)
-        .and_then(|mut authorizer| {
-            authorizer.query_exactly_one(
-                "holder($s, $b, $p) <- subject($s), write_branch($b), purpose($p)",
-            )
-        })
         .map_err(|_| Denied::Invalid)?;
+    let (subject, branch, purpose, key_prefix) = authorizer
+        .query_exactly_one(
+            "holder($s, $b, $p, $k) <- subject($s), write_branch($b), purpose($p), key_prefix($k)",
+        )
+        .map_err(|_| Denied::Invalid)?;
+    let columns: Vec<(String,)> = authorizer
+        .query("column($c) <- column_allowed($c)")
+        .map_err(|_| Denied::Invalid)?;
+    let mut columns: Vec<String> = columns.into_iter().map(|(column,)| column).collect();
+    columns.sort();
     Ok(Holder {
         subject,
         branch,
         purpose,
+        key_prefix,
+        columns,
     })
 }
 

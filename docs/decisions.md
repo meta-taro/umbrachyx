@@ -467,7 +467,7 @@ checker to hold the shared secret that mints tokens.
   first waits until the `SET`s before it are durable, so a `GET` reads what
   the same client set just before it, and replies stay in order.
 - **History is read over the same server, with commands named `UMBRA.`**
-  (`BRANCHES`, `CELLS`, `HISTORY`, `LOG` and `DIFF`), each answered with
+  (`BRANCHES`, `TABLES`, `CELLS`, `HISTORY`, `LOG` and `DIFF`), each answered with
   one JSON string written as the MCP tools write it. A person's tool, such
   as a database viewer, needs the history while the server runs, and the
   server's process is the only one that may open the log: a second process
@@ -689,11 +689,27 @@ choose its storage engine.
   into one node; nothing leaves the process in that order, since every
   listing and diff is sorted by key. Proofs over a latest table would need
   the hashes back.
-- **Tools can tell the tables apart** (in the server, still to come).
-  `UMBRA.TABLES` lists the declared
-  tables and their engines. `UMBRA.HISTORY` on a key of a latest table
-  answers with an error whose first word is `NOHISTORY`. `UMBRA.CELLS` and
-  `UMBRA.DIFF` leave latest tables out and name them in `omitted_tables`.
+- **A table is declared from the command line**, `umbrachyx table pos
+  latest --who W --why Y`, with who and why kept in the log like a commit.
+  Not from the Redis server or MCP: what a table keeps is a decision for
+  the people who run the store, and an agent's token reaches keys, not
+  tables.
+- **Tools can tell the tables apart.** `UMBRA.TABLES` answers
+  `{"default":"history","tables":[{"name":"pos","engine":"latest"}]}`; a
+  table not listed keeps its history. `UMBRA.HISTORY` on a key of a latest
+  table answers `-NOHISTORY table 'pos' keeps only the latest value`: the
+  first word of a Redis error names its kind, as `WRONGTYPE` does, so a
+  tool can tell "no history kept" from a failure. `UMBRA.CELLS` leaves
+  latest tables out and `UMBRA.DIFF` leaves them out where `main` kept no
+  past; both name them in `omitted_tables`, an empty list when nothing was
+  left out. The current values are still read with `SCAN` and `GET`.
+  `UMBRA.CELLS` names every latest table on every page, whatever the
+  branch holds. The MCP `diff` tool names left-out tables too, but only
+  those its token may read: for each table, it asks the token to read a
+  key of it built from what the issuer granted (the key prefix and each
+  column), so expiry and every narrowing count, and an expired token is
+  refused. A token narrowed below its issuer's grant may not be told of a
+  table it could read; it is never told of one it cannot.
 - **Not built**: a way for others to plug in engines, a log per engine,
   and an append-only engine for events, which waits for the latest
   engine's numbers.

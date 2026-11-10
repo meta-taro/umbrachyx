@@ -9,7 +9,7 @@
 //!
 //! For a viewer, `SCAN`, `TYPE` and `TTL` list and describe the keys of the
 //! branch (see `keys`), and commands named `UMBRA.` read the history of any
-//! branch (see `history`).
+//! branch and the tables declared (see `history`).
 //!
 //! There is no authentication yet, so a server should listen only on this
 //! machine.

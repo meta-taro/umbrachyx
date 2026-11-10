@@ -378,6 +378,13 @@ fn the_holder_is_read_from_the_issuers_block() {
         subject: SUBJECT.to_owned(),
         branch: BRANCH.to_owned(),
         purpose: PURPOSE.to_owned(),
+        key_prefix: grant().key_prefix.to_owned(),
+        columns: {
+            let mut columns: Vec<String> =
+                grant().columns.iter().map(|c| (*c).to_owned()).collect();
+            columns.sort();
+            columns
+        },
     };
 
     assert_eq!(

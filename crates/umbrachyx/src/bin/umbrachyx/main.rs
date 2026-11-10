@@ -1,18 +1,19 @@
 //! Command-line access to a store: write commits, read values and their
-//! history, branch, diff, merge, undo a commit, erase a subject, and serve a
-//! branch over the Redis protocol. Also makes the root key and the capability tokens that
-//! agents carry.
+//! history, branch, diff, merge, undo a commit, erase a subject, declare how
+//! a table is held, and serve a branch over the Redis protocol. Also makes
+//! the root key and the capability tokens that agents carry.
 //!
 //! The log file is named by `UMBRACHYX_DB`. Values are encrypted under a key
-//! per subject, kept in the file next to it with `.keys` added to its name. Exit status is 0 on success, 1
-//! when a merge or undo stopped on conflicts, and 2 on any other error.
+//! per subject, kept in the file next to it with `.keys` added to its name.
+//! Exit status is 0 on success, 1 when a merge or undo stopped on
+//! conflicts, and 2 on any other error.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, TcpListener};
 use std::process::ExitCode;
 
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
-use umbrachyx::log::{Edit, FileStorage};
+use umbrachyx::log::{Edit, Engine, FileStorage};
 use umbrachyx::server::{MAX_CONNECTIONS, Server};
 use umbrachyx::store::{
     CommitId, Committer, Conflict, MAIN_BRANCH, Merged, Provenance, Reverted, Store, SystemClock,
@@ -49,6 +50,10 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   erase <subject> --who W --why Y [--approved-by A]
                               destroys the key of a subject such as player/42
   erasures                    every subject erased, with who and why
+  table <name> <history|latest> --who W --why Y [--approved-by A]
+                              how the table <name>/... is held; latest keeps
+                              only current values. Only before its first write
+  tables                      every declared table and its engine
   serve <branch> [--port P] [--max-connections N]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history
@@ -171,6 +176,8 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         "revert" => revert(&mut store, &args),
         "erase" => erase(&mut store, &args),
         "erasures" => erasures(&store, &args),
+        "table" => table(&mut store, &args),
+        "tables" => tables(&store, &args),
         "serve" => serve(store, &args),
         "mcp" => tokens::mcp(store, &args),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
@@ -220,6 +227,12 @@ fn get(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
 fn history(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
     let [branch, key] = args.exactly()?;
     require_branch(store, branch)?;
+    if let Some(table) = store.latest_table_of(key.as_bytes()) {
+        return Err(format!(
+            "table '{}' keeps only the latest value; there is no history to show",
+            String::from_utf8_lossy(table)
+        ));
+    }
     for cell in store.history(branch, key.as_bytes()) {
         let info = store
             .commit_info(&cell.changed_by)
@@ -271,6 +284,26 @@ fn erasures(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Declares the engine of a table that nothing has been written to yet.
+fn table(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
+    let [name, engine_name] = args.exactly()?;
+    let engine = Engine::named(engine_name)
+        .ok_or_else(|| format!("engine {engine_name:?} is not one of history or latest"))?;
+    store
+        .declare_table(name.as_bytes(), engine, args.provenance()?)
+        .map_err(|e| e.to_string())?;
+    println!("declared {name} {}", engine.name());
+    Ok(ExitCode::SUCCESS)
+}
+
+fn tables(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
+    let [] = args.exactly()?;
+    for (name, engine) in store.tables() {
+        println!("{}  {}", String::from_utf8_lossy(name), engine.name());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn log(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
     let [branch] = args.exactly()?;
     require_branch(store, branch)?;
@@ -303,8 +336,9 @@ fn branch(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
 
 fn diff(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
     let [from, to] = args.exactly()?;
+    let (from, to) = (point(store, from)?, point(store, to)?);
     let changes = store
-        .diff(point(store, from)?.as_ref(), point(store, to)?.as_ref())
+        .diff(from.as_ref(), to.as_ref())
         .map_err(|e| e.to_string())?;
     for change in changes {
         let key = String::from_utf8_lossy(&change.key);
@@ -321,6 +355,13 @@ fn diff(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
                 shown(after.as_ref())
             ),
         }
+    }
+    // On stderr, so a script reading the changes reads only changes.
+    for table in store.omitted_tables(from.as_ref(), to.as_ref()) {
+        eprintln!(
+            "(left out: {} keeps only its latest values, and main keeps no past for it)",
+            String::from_utf8_lossy(&table)
+        );
     }
     Ok(ExitCode::SUCCESS)
 }

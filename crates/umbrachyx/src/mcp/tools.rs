@@ -39,7 +39,8 @@ pub(super) fn list() -> Value {
         {
             "name": "history",
             "description": "Every change to one key, newest first: the value, the commit, \
-                            who made it, why, and who approved it.",
+                            who made it, why, and who approved it. A key of a table that \
+                            keeps only its latest value has none, and is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -52,7 +53,9 @@ pub(super) fn list() -> Value {
         {
             "name": "diff",
             "description": "The keys whose values differ between two commits or branches. \
-                            Keys outside the agent's token are left out.",
+                            Keys outside the agent's token are left out. Tables that keep \
+                            only latest values have no past on main; a diff that needs it \
+                            leaves them out and names them in omitted_tables.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -119,6 +122,12 @@ fn history<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> 
     session
         .check(Operation::Read, &branch, key)
         .map_err(refused)?;
+    if let Some(table) = session.store.latest_table_of(key.as_bytes()) {
+        return Err(format!(
+            "table '{}' keeps only the latest value",
+            String::from_utf8_lossy(table)
+        ));
+    }
     let changes: Vec<Value> = session
         .store
         .history(&branch, key.as_bytes())
@@ -133,7 +142,9 @@ fn history<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> 
 
 /// Keys the token cannot read are left out rather than refused, so a diff
 /// across many keys shows the agent its own part. A token that allows
-/// nothing at all, such as an expired one, is refused.
+/// nothing at all, such as an expired one, is refused. `omitted_tables`
+/// names the latest-value tables the diff could not cover, among those the
+/// token may read.
 fn diff<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> Outcome {
     let (from_name, to_name) = (text(arguments, "from")?, text(arguments, "to")?);
     let store = &session.store;
@@ -153,7 +164,62 @@ fn diff<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> Out
             Err(denied) => return Err(refused(denied)),
         }
     }
-    Ok(json!({"from": from_name, "to": to_name, "changes": changes}))
+    let mut omitted = Vec::new();
+    for table in store.omitted_tables(Some(&from), Some(&to)) {
+        if readable(session, to_name, &table)? {
+            omitted.push(shown(Some(&table)));
+        }
+    }
+    Ok(json!({
+        "from": from_name,
+        "to": to_name,
+        "changes": changes,
+        "omitted_tables": omitted,
+    }))
+}
+
+/// Whether the token may read some key of `table` on `branch`, asked as
+/// a read of each key [`probes`] makes, so every check of the token counts:
+/// expiry, the operation, its narrowings. A token narrowed below what its
+/// issuer granted may be told no for a table it reaches; it is never told
+/// yes for one it does not. A token that allows nothing is refused.
+fn readable<S: Storage, C: Clock>(
+    session: &Session<S, C>,
+    branch: &str,
+    table: &[u8],
+) -> Result<bool, String> {
+    let holder = &session.holder;
+    for key in probes(&holder.key_prefix, &holder.columns, table) {
+        match session.check(Operation::Read, branch, &key) {
+            Ok(()) => return Ok(true),
+            Err(Denied::OutOfScope) => {}
+            Err(denied) => return Err(refused(denied)),
+        }
+    }
+    Ok(false)
+}
+
+/// Keys of `table` that the issuer's `prefix` and `columns` allow: one per
+/// column, under the prefix where it lies inside the table, under the
+/// table where the table lies inside the prefix. None when the two do not
+/// meet, or the table is not text, as keys a token names are.
+fn probes(prefix: &str, columns: &[String], table: &[u8]) -> Vec<String> {
+    let Ok(table) = std::str::from_utf8(table) else {
+        return Vec::new();
+    };
+    let root = format!("{table}/");
+    let base = if root.starts_with(prefix) {
+        root
+    } else if prefix.starts_with(&root) {
+        prefix.to_owned()
+    } else {
+        return Vec::new();
+    };
+    let separator = if base.ends_with('/') { "" } else { "/" };
+    columns
+        .iter()
+        .map(|column| format!("{base}{separator}{column}"))
+        .collect()
 }
 
 /// Every key is checked before anything is written, so a commit with one
@@ -263,4 +329,29 @@ fn text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
 
 fn refused(denied: Denied) -> String {
     format!("refused: {denied}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::probes;
+
+    #[test]
+    fn probes_lie_where_the_prefix_and_the_table_meet() {
+        let columns = ["gems".to_owned(), "x".to_owned()];
+        let cases: [(&str, &[u8], &[&str]); 8] = [
+            ("", b"pos", &["pos/gems", "pos/x"]),
+            ("po", b"pos", &["pos/gems", "pos/x"]),
+            ("pos", b"pos", &["pos/gems", "pos/x"]),
+            ("pos/", b"pos", &["pos/gems", "pos/x"]),
+            ("pos/42/", b"pos", &["pos/42/gems", "pos/42/x"]),
+            ("pos/4", b"pos", &["pos/4/gems", "pos/4/x"]),
+            ("player/42/", b"pos", &[]),
+            ("", &[0xff, 0xfe], &[]),
+        ];
+        for (prefix, table, expected) in cases {
+            assert_eq!(probes(prefix, &columns, table), expected, "{prefix:?}");
+        }
+        assert_eq!(probes("pos", &columns, b"posx"), ["posx/gems", "posx/x"]);
+        assert!(probes("po", &[], b"pos").is_empty(), "no columns, no keys");
+    }
 }

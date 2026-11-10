@@ -64,6 +64,21 @@ pub enum Engine {
 }
 
 impl Engine {
+    /// The name tools see and the command line takes.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::History => "history",
+            Self::Latest => "latest",
+        }
+    }
+
+    /// The engine called `name`, as [`Engine::name`] spells it.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::History, Self::Latest]
+            .into_iter()
+            .find(|engine| engine.name() == name)
+    }
+
     const fn byte(self) -> u8 {
         match self {
             Self::History => 0,
