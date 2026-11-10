@@ -273,12 +273,17 @@ virtual machine on the laptop. The first row is the store as it was until
 it stopped keeping a whole tree for every commit
 ([`2026-11-09-linux-vm/`](../bench/results/2026-11-09-linux-vm/)), the
 second as it is now
-([`2026-11-09-linux-vm-sparse-trees/`](../bench/results/2026-11-09-linux-vm-sparse-trees/)):
+([`2026-11-09-linux-vm-sparse-trees/`](../bench/results/2026-11-09-linux-vm-sparse-trees/)),
+and the third the same SETs to a table declared to keep only its latest
+values
+([`2026-11-10-linux-vm-latest-table/`](../bench/results/2026-11-10-linux-vm-latest-table/),
+where the history row measured again gave the same as the second):
 
 | | After 200,000 SETs | After 400,000 SETs | Added per SET in the second pass |
 |---|---|---|---|
 | Umbrachyx, a tree per commit | 1.4 GiB | 2.9 GiB | about 8 KB (7.7 to 8.2 KB) |
 | Umbrachyx, a tree per 1,024 commits | 484 MiB | 1.1 GiB | about 3.2 KB (3.1 to 3.2 KB) |
+| Umbrachyx, a table that keeps only latest values | 156 MiB | 277 MiB | about 630 bytes (628 to 653) |
 | Valkey 9.1.3 | 17 MiB | 20 MiB | 17 bytes |
 
 The second pass writes keys that are already there. Valkey replaces the
@@ -293,9 +298,46 @@ it took under 0.1 ms (`cargo run --release -p umbrachyx --example
 old_reads`, output in the same folder). A commit against its parent is
 read from its own cells and stays under 0.1 ms.
 
-At this rate a million SETs, as `bench/umbrachyx.sh` writes to fill its
-key space, need about 3 GB. Much of what is left is the history itself,
+A table declared `latest` holds only the current value of each key, in a
+hash trie, and keeps no past values. Each SET then adds a fifth of what
+it adds with history, and still about 37 times what it adds to Valkey;
+after 400,000 SETs the server holds 277 MiB to Valkey's 20. What remains is mostly the
+record every commit keeps, who wrote it, why and when, whatever the
+table; the server writes to a branch, where a latest table also keeps
+each commit's values and the ones they replaced, for merging. A table
+cannot change engine once written to, so it is chosen up front (see
+"Engines per table" in [`decisions.md`](decisions.md)).
+
+At the history rate a million SETs, as `bench/umbrachyx.sh` writes to
+fill its key space, need about 3 GB. Much of what is left is the history itself,
 each commit and its cells, which keeping fewer trees does not remove.
 Only a retention policy that drops or folds old changes would cut that
 (see "Retention per column" in [`decisions.md`](decisions.md)); it is
 designed but not built.
+
+## A table that keeps only latest values
+
+The same GETs and SETs as the Reads and Writes sections, from
+`bench/umbrachyx.sh`, on a server whose keys keep their history and on a
+fresh server whose keys are in a table declared `latest`; 1,000,000 keys
+written first on each, 32-byte values. The median of three runs on the
+laptop
+([`2026-11-10-laptop-latest-table/`](../bench/results/2026-11-10-laptop-latest-table/));
+p50 and p99 in milliseconds:
+
+| | History | Latest table | |
+|---|---|---|---|
+| `GET`, one client | 58,480 a second (0.015, p99 0.023) | 63,291 a second (0.015, p99 0.023) | 8% more |
+| `SET`, one client | 247 a second (4.0, p99 5.1) | 248 a second (4.0, p99 5.0) | the same |
+| `GET`, 50 clients | 233,645 a second (0.119, p99 0.159) | 225,225 a second (0.119, p99 0.567) | **4% fewer, p99 3.6× slower** |
+| `GET` while 50 clients SET | 77,101 a second (0.015, p99 0.047) | 85,324 a second (0.015, p99 0.039) | 11% more |
+
+A latest table is for memory more than speed. A `SET` waits for its sync
+either way, so how the value is held does not show. A `GET` from one
+client costs about what a `PING` does (70,225 a second), so the cheaper
+lookup, one hash instead of a walk down the tree, moves it by less than
+a tenth; it shows most while writes are going on, when a write to the
+history also updates its tree. With 50 clients the latest table is
+behind, and its slowest reads are three to four times the history's;
+why is not known yet. These are one machine's numbers and have not been
+taken on the Linux runner or the fixed machines.

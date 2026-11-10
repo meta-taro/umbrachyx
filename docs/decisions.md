@@ -717,6 +717,14 @@ choose its storage engine.
   per SET in `bench/memory.sh`, or makes neither SET nor GET at least 10%
   faster; or if its branches fail the deterministic simulation or the
   hijacked-agent tests.
+- **Measured on 2026-11-10** (`docs/comparison.md`, "Memory" and "A
+  table that keeps only latest values"): about 630 bytes a SET against
+  about 3,090 with history, a fifth. `GET` while 50 clients write was 11%
+  faster, `GET` from one client 8%, `SET` the same, and `GET` from 50
+  clients 4% slower with its slowest reads 3.6 times the history's. The
+  simulation and the hijacked-agent tests pass. Memory and one `GET` row
+  clear the bar, so the engine stays; the 50-client reads are to be
+  explained before an append-only engine is built on the same ground.
 
 ## Retention per column (not built yet)
 

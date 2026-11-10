@@ -126,7 +126,8 @@ jobs:
           bench/connections.sh | tee bench-connections.csv
 
       # Umbrachyx keeps every SET as history, so its memory grows with
-      # every write; this keeps that cost in view next to the speed.
+      # every write; this keeps that cost in view next to the speed, with
+      # and without a table that keeps only its latest values.
       - name: Memory
         run: bench/memory.sh | tee bench-memory.csv
 

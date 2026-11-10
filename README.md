@@ -87,15 +87,22 @@ about 17 bytes. 400,000 SETs over 200,000 keys left Umbrachyx at 1.1 GiB
 and Valkey at 20 MiB (a Linux virtual machine on the laptop,
 `bench/memory.sh`). It was about 8 KB a SET until commits stopped keeping
 a whole tree each; reading an old state now rebuilds its tree, a few
-milliseconds. Nothing is dropped yet; a retention policy is designed but
-not built.
+milliseconds. A table can instead be declared to keep only its latest
+values: the same SETs then add about 630 bytes each, still about 37
+times Valkey's, and leave it at 277 MiB; that table has no past to read
+or undo. Over the server its GETs and SETs are about as fast as with
+history: a little faster from one client, slower in the slowest reads of
+50 clients at once. Nothing is dropped from a history yet; a retention policy is
+designed but not built.
 
 How each number was taken, and what it does not show:
 [`docs/comparison.md`](docs/comparison.md). The raw output, machine and
 versions: [`bench/results/`](bench/results/) (the laptop in `2026-11-04/`,
 the runner in `2026-11-04-linux-ci/`, the virtual machine in
 `2026-11-09-linux-vm/`, `2026-11-09-linux-vm-sparse-trees/` and
-`2026-11-09-linux-vm-node-hash/`). The scripts are in
+`2026-11-09-linux-vm-node-hash/`, and with a latest table in
+`2026-11-10-linux-vm-latest-table/` and, for speed on the laptop,
+`2026-11-10-laptop-latest-table/`). The scripts are in
 [`bench/`](bench/), and CI runs them against Valkey on every change.
 
 ## Robustness

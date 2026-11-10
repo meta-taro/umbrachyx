@@ -1,0 +1,4 @@
+"server","sets","rss_kib_empty","rss_kib","sets_twice","rss_kib_twice","second_pass_bytes_per_set"
+"umbrachyx","200000","3812","479004","400000","1082024","3087"
+"umbrachyx (latest table)","200000","3836","156836","400000","284412","653"
+"valkey (appendfsync always)","200000","6060","16860","400000","20192","17"
