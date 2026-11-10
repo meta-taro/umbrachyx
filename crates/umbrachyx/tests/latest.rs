@@ -583,3 +583,32 @@ fn reading_a_latest_key_at_a_past_commit_says_the_table_keeps_no_past() {
     assert_eq!(now.as_deref(), Some(&b"2"[..]));
     assert_eq!(history.as_deref(), Some(&b"100"[..]));
 }
+
+/// A branch's cells are what a later merge of it learns from, even after
+/// `main` took it in: a branch forked before still lacks those commits.
+/// Dropping the cells once a branch reaches `main` would lose its changes
+/// here without a conflict.
+#[test]
+fn a_branch_merged_into_main_still_brings_its_changes_to_another_branch() {
+    let dir = TempDir::new("merged-then-again");
+    let mut store = with_pos(&dir);
+    store
+        .commit(MAIN_BRANCH, vec![set("pos/1/x", "0")], by("game"))
+        .expect("commits");
+    store.create_branch("b", MAIN_BRANCH).expect("branches");
+    store.create_branch("c", "b").expect("branches");
+    store
+        .commit("b", vec![set("pos/1/x", "5")], by("agent-b"))
+        .expect("commits");
+    let into_main = store.merge(MAIN_BRANCH, "b", by("owner")).expect("merges");
+    store
+        .commit("c", vec![set("pos/2/x", "7")], by("agent-c"))
+        .expect("commits");
+
+    let into_c = store.merge("c", "b", by("agent-c")).expect("merges");
+
+    assert!(matches!(into_main, Merged::Commit(_)), "{into_main:?}");
+    assert!(matches!(into_c, Merged::Commit(_)), "{into_c:?}");
+    assert_eq!(value(&store, "c", "pos/1/x"), Some("5".to_owned()));
+    assert_eq!(value(&store, "c", "pos/2/x"), Some("7".to_owned()));
+}
