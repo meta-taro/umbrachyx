@@ -55,14 +55,20 @@ pub enum Reverted {
 
 impl<S: Storage, C: Clock> Store<S, C> {
     /// What changed from `from` to `to`; `None` stands for the empty state
-    /// before the first commit. Sorted by key.
+    /// before the first commit. Sorted by key. Latest-value tables are in
+    /// it when their changes can be known, and left out otherwise; see
+    /// `omitted_tables`.
     pub fn diff(
         &self,
         from: Option<&CommitId>,
         to: Option<&CommitId>,
     ) -> Result<Vec<ValueChange>, StoreError> {
-        Ok(self
-            .changes(from, to)?
+        let mut changes = self.changes(from, to)?;
+        if let Some(latest) = self.latest_changes(from, to) {
+            changes.extend(latest);
+            changes.sort_by(|a, b| a.key.cmp(&b.key));
+        }
+        Ok(changes
             .into_iter()
             .map(|change| {
                 let had_values = (change.before.is_some(), change.after.is_some());
@@ -78,8 +84,9 @@ impl<S: Storage, C: Clock> Store<S, C> {
             .collect())
     }
 
-    /// The diff as stored: sealed values stay sealed, so merges and undo
-    /// compare and copy them without opening them.
+    /// The diff of the tables that keep their history, as stored: sealed
+    /// values stay sealed, so merges and undo compare and copy them without
+    /// opening them. Undo therefore leaves latest-value tables alone.
     fn changes(
         &self,
         from: Option<&CommitId>,
@@ -108,6 +115,8 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// Brings into `into` what `from` changed since they last shared a
     /// commit. Changes to different keys combine; the same change on both
     /// sides is taken once; different changes to one key are conflicts.
+    /// Latest-value tables merge over the keys that differ between the two
+    /// heads now (see `merge_latest`).
     pub fn merge(
         &mut self,
         into: &str,
@@ -129,8 +138,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             .into_iter()
             .map(|change| (change.key, change.after))
             .collect();
-        let mut edits = Vec::new();
-        let mut conflicts = Vec::new();
+        let (mut edits, mut conflicts) = self.merge_latest(into, from);
         for change in self.changes(base.as_ref(), Some(&theirs))? {
             match ours_changed.get(&change.key) {
                 None => edits.push(edit_to(&change.key, change.after.as_ref())),
@@ -144,6 +152,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             }
         }
         if !conflicts.is_empty() {
+            conflicts.sort_by(|a, b| a.key.cmp(&b.key));
             let conflicts = conflicts
                 .into_iter()
                 .map(|c| self.revealed_conflict(c))
@@ -209,7 +218,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     }
 
     /// `id` and every commit before it, through both parents of merges.
-    fn ancestors(&self, id: CommitId) -> HashSet<CommitId> {
+    pub(super) fn ancestors(&self, id: CommitId) -> HashSet<CommitId> {
         let mut seen = HashSet::new();
         let mut queue = VecDeque::from([id]);
         while let Some(id) = queue.pop_front() {
@@ -301,7 +310,7 @@ fn live_value(state: &Tree, key: &[u8]) -> Option<Bytes> {
     decode_cell(state.get(key)?).value
 }
 
-fn edit_to(key: &Bytes, value: Option<&Bytes>) -> Edit {
+pub(super) fn edit_to(key: &Bytes, value: Option<&Bytes>) -> Edit {
     Edit {
         key: key.to_vec(),
         value: value.map(|v| v.to_vec()),

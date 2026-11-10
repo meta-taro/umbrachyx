@@ -9,13 +9,17 @@
 //!   so is a group of commits written with one sync;
 //! - recorded times never go backwards, across commits and restarts.
 //!
+//! Half the keys are in a table held by the latest-value engine, so every
+//! promise above holds for it too; undoing a commit must leave that table
+//! as it was.
+//!
 //! Damage to the disk is the log's business and is covered by its own run.
 
 use std::collections::BTreeMap;
 
 use super::disk::{SimStorage, SyncFault};
 use super::rng::Rng;
-use crate::log::{Edit, LogError};
+use crate::log::{Edit, Engine, LogError};
 use crate::store::{
     Clock, CommitRequest, MAIN_BRANCH, Merged, Provenance, Reverted, Store, StoreError,
 };
@@ -31,6 +35,9 @@ const KEY_SPACE: u64 = 200;
 const MAX_EDITS: u64 = 6;
 /// Out of 100, per edit.
 const REMOVE_PERCENT: u64 = 20;
+/// Out of 100, per edit: a key in the latest-value table.
+const LATEST_PERCENT: u64 = 50;
+const LATEST_TABLE: &str = "pos";
 /// Out of 100, per commit step: make a branch, merge two branches, or undo
 /// a branch's latest commit instead.
 const NEW_BRANCH_PERCENT: u64 = 8;
@@ -109,8 +116,11 @@ struct Run {
 pub fn run(seed: u64) -> Result<Outcome, String> {
     let mut rng = Rng::new(seed);
     let clock = SimClock::new(&mut rng);
-    let store = Store::open(SimStorage::default(), clock)
+    let mut store = Store::open(SimStorage::default(), clock)
         .map_err(|e| format!("empty store fails to open: {e}"))?;
+    store
+        .declare_table(LATEST_TABLE.as_bytes(), Engine::Latest, provenance(0))
+        .map_err(|e| format!("declaring the latest-value table fails: {e}"))?;
     let mut run = Run {
         rng,
         store,
@@ -251,7 +261,8 @@ impl Run {
     }
 
     /// Undoing a branch's latest commit cannot conflict, and must give back
-    /// what the branch held before it.
+    /// what the branch held before it in the tables that keep history,
+    /// leaving the latest-value table as it is.
     fn revert_latest(&mut self, step: usize) -> Result<(), String> {
         let branch = self.random_branch();
         let Some(head) = self.store.head(&branch) else {
@@ -263,6 +274,10 @@ impl Run {
             .and_then(|info| info.parent)
             .map(|parent| self.store.entries_at(&parent))
             .unwrap_or_default();
+        let latest_now: Model = entries_of(&self.store, &branch)
+            .into_iter()
+            .filter(|(key, _)| is_latest(key))
+            .collect();
         let reverted = self
             .store
             .revert(&branch, &head, provenance(step))
@@ -276,6 +291,8 @@ impl Run {
         let expected: Model = before
             .into_iter()
             .map(|(k, v)| (k.to_vec(), v.to_vec()))
+            .filter(|(key, _)| !is_latest(key))
+            .chain(latest_now)
             .collect();
         if held != expected {
             return Err(format!(
@@ -371,7 +388,13 @@ impl Run {
         let count = 1 + self.rng.below(MAX_EDITS);
         (0..count)
             .map(|_| {
-                let key = format!("k{:03}", self.rng.below(KEY_SPACE)).into_bytes();
+                let number = self.rng.below(KEY_SPACE);
+                let key = if self.rng.percent(LATEST_PERCENT) {
+                    format!("{LATEST_TABLE}/{number:03}")
+                } else {
+                    format!("k{number:03}")
+                }
+                .into_bytes();
                 let value = (!self.rng.percent(REMOVE_PERCENT))
                     .then(|| self.rng.next_u64().to_le_bytes().to_vec());
                 Edit { key, value }
@@ -399,6 +422,10 @@ fn apply(model: &mut Model, edits: &[Edit]) {
             None => model.remove(&edit.key),
         };
     }
+}
+
+fn is_latest(key: &[u8]) -> bool {
+    key.starts_with(LATEST_TABLE.as_bytes()) && key.get(LATEST_TABLE.len()) == Some(&b'/')
 }
 
 fn entries_of(store: &Store<SimStorage, SimClock>, branch: &str) -> Model {

@@ -32,6 +32,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// The cells of `branch` in key order, starting after `after`, at most
     /// `limit` of them. A removed key is left out; an erased one is kept,
     /// marked so. A page costs its own cells and one path down the tree.
+    /// Keys of latest-value tables, which keep no history, are not here.
     pub fn cells(&self, branch: &str, after: Option<&[u8]>, limit: usize) -> Vec<(Bytes, Cell)> {
         let Some(head) = self.branches.get(branch) else {
             return Vec::new();
@@ -52,8 +53,12 @@ impl<S: Storage, C: Clock> Store<S, C> {
 impl<S: Storage, C: Clock> Store<S, C> {
     /// Stops after `limit` changes, so a key changed many times costs a
     /// page, not its whole history.
+    /// A latest-value table keeps no history: its keys have none.
     pub(super) fn history_up_to(&self, branch: &str, key: &[u8], limit: usize) -> Vec<Cell> {
         let mut history = Vec::new();
+        if self.is_latest(key) {
+            return history;
+        }
         let mut cell = self.raw_cell(branch, key);
         while let Some(current) = cell.filter(|_| history.len() < limit) {
             cell = self

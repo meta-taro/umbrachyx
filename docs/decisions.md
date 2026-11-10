@@ -664,16 +664,33 @@ choose its storage engine.
   | Range scan | in key order | reads every entry |
   | Past values and undo | all of them | none |
   | Branches | one pointer | one pointer (the HAMT is persistent too) |
-  | Diff and merge | the tree's | the HAMT's; a three-way merge over the keys a branch wrote |
+  | Diff and merge | the tree's | between branch heads only; a three-way merge over the keys a branch wrote |
 
 - **A latest table still branches.** An agent's writes always go to a
   branch, so an engine without branches could not take them. That is why
   it is a HAMT and not a plain hash table, which would be copied whole for
-  every branch. On a branch, a commit keeps the values it replaced until
-  the branch is merged, so the merge can tell a conflict: for each key the
-  branch wrote, the value on `main` now is compared with the value when
-  the branch first wrote it.
-- **Tools can tell the tables apart.** `UMBRA.TABLES` lists the declared
+  every branch. Off `main`, a commit keeps the values it wrote and the ones
+  they replaced, so a merge can tell a conflict: for each key that differs
+  between the two branches now, the value where the branch first wrote it
+  is compared with both sides. When one side is `main`, which keeps no
+  such values, a differing key the branch did not write was changed on
+  `main`. Those values are kept for good for now; dropping them once the
+  branch is merged is not built.
+- **On `main`, a latest table keeps no past.** A commit there keeps no
+  cells for it, so a diff that reaches into the past of `main` cannot
+  include it, and says which tables it left out. A diff between two
+  branch heads compares the two HAMTs, and a commit off `main` against its
+  parent uses the values it kept. Undo leaves latest tables as they are.
+- **The HAMT carries no Merkle hashes.** A diff skips every subtree the
+  two sides share by pointer, which is every untouched one when both come
+  from the same line of history, as a branch and its base do; HAMTs built
+  apart still diff correctly, reading more. Keys are placed by SipHash
+  with a key drawn once per process, so keys chosen to collide cannot pile
+  into one node; nothing leaves the process in that order, since every
+  listing and diff is sorted by key. Proofs over a latest table would need
+  the hashes back.
+- **Tools can tell the tables apart** (in the server, still to come).
+  `UMBRA.TABLES` lists the declared
   tables and their engines. `UMBRA.HISTORY` on a key of a latest table
   answers with an error whose first word is `NOHISTORY`. `UMBRA.CELLS` and
   `UMBRA.DIFF` leave latest tables out and name them in `omitted_tables`.

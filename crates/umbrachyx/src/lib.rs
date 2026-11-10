@@ -5,6 +5,7 @@
 //! session that lets an agent read and write within its token exist so far. See `docs/concept.md` for what this crate is meant to become.
 
 pub mod capability;
+pub mod hamt;
 pub mod keys;
 pub mod log;
 pub mod mcp;

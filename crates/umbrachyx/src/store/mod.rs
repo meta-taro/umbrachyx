@@ -17,6 +17,11 @@
 //! it replaced, which gives the change before, so the history of a key
 //! costs the number of times it changed, not the number of commits.
 //!
+//! A table declared `Latest` is held apart, in a HAMT of current cells per
+//! branch: no tree, no past on `main`, and only the cells a branch wrote
+//! kept off it, for merges (see `latest`). Its writes go through the same
+//! log, in the same commits.
+//!
 //! A store opened with a key file seals every value under its subject's key
 //! as it comes in and opens it as it goes out (see `seal`), so the log and
 //! the tree hold no value in the clear.
@@ -26,12 +31,14 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::hamt::Hamt;
 use crate::keys::{Fingerprint, KeyError, KeyStorage, Keys};
 use crate::log::{Branch, Commit, Edit, Engine, Erase, Log, LogError, Record, Storage, Table};
 use crate::tree::{Bytes, Tree};
 
 mod committer;
 mod inspect;
+mod latest;
 mod merge;
 mod seal;
 mod tables;
@@ -120,8 +127,13 @@ pub struct CommitInfo {
     pub branch: String,
     pub provenance: Provenance,
     pub time: u64,
-    /// The cells this commit wrote, sorted by key.
+    /// The cells this commit wrote to tables that keep their history,
+    /// sorted by key.
     written: Vec<Written>,
+    /// The cells it wrote to latest-value tables, sorted by key: kept off
+    /// `main` only, so a merge can tell what a branch changed. On `main`
+    /// such a table keeps no past.
+    latest_written: Vec<Written>,
     /// The whole tree after this commit, kept for one commit in about
     /// `TREE_EVERY` along each line of history. The trees of the others
     /// are rebuilt from the nearest one before them.
@@ -234,6 +246,8 @@ impl From<LogError> for StoreError {
 struct Head {
     commit: Option<CommitId>,
     state: Tree,
+    /// The cells of latest-value tables. A removed key is not kept.
+    latest: Hamt,
     /// Commits along this line of history since the last that kept its
     /// whole tree.
     since_tree: usize,
@@ -289,6 +303,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 Head {
                     commit: None,
                     state: Tree::empty(),
+                    latest: Hamt::empty(),
                     since_tree: 0,
                 },
             )]),
@@ -512,7 +527,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         View::new(
             self.branches
                 .iter()
-                .map(|(name, head)| (name.clone(), head.state.clone()))
+                .map(|(name, head)| (name.clone(), (head.state.clone(), head.latest.clone())))
                 .collect(),
             self.sealer.as_ref().map(Sealer::ring),
         )
@@ -532,11 +547,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
     }
 
     fn raw_cell(&self, branch: &str, key: &[u8]) -> Option<Cell> {
-        self.branches
-            .get(branch)?
-            .state
-            .get(key)
-            .map(|bytes| decode_cell(bytes))
+        let head = self.branches.get(branch)?;
+        let bytes = if self.is_latest(key) {
+            head.latest.get(key)
+        } else {
+            head.state.get(key)
+        };
+        bytes.map(|bytes| decode_cell(bytes))
     }
 
     fn revealed(&self, key: &[u8], cell: Cell) -> Cell {
@@ -559,20 +576,54 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let Some(head) = self.branches.get(branch) else {
             return Vec::new();
         };
-        self.live_entries(&head.state)
+        self.head_entries(head)
     }
 
-    /// Every live key and value as `commit` left it, in key order.
+    /// Every live key and value as `commit` left it, in key order. A
+    /// latest-value table keeps no past, so its keys are there only when
+    /// `commit` is the head of a branch.
     pub fn entries_at(&self, commit: &CommitId) -> Vec<(Bytes, Bytes)> {
+        if let Some(head) = self.head_of(commit) {
+            return self.head_entries(head);
+        }
         self.tree_at(commit)
             .map(|tree| self.live_entries(&tree))
             .unwrap_or_default()
     }
 
+    /// The branch head that is `commit`, if any.
+    fn head_of(&self, commit: &CommitId) -> Option<&Head> {
+        self.branches
+            .values()
+            .find(|head| head.commit == Some(*commit))
+    }
+
+    fn head_entries(&self, head: &Head) -> Vec<(Bytes, Bytes)> {
+        let mut entries = self.live_entries(&head.state);
+        if head.latest.is_empty() {
+            return entries;
+        }
+        entries.extend(
+            head.latest
+                .sorted_entries()
+                .into_iter()
+                .filter_map(|(key, bytes)| {
+                    let value = self.reveal(&key, decode_cell(&bytes).value)?;
+                    Some((key, value))
+                }),
+        );
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
     /// The cell of `key` as `commit` left it: written by the commit itself
     /// or one before it, found by walking back no further than the nearest
-    /// commit that keeps its whole tree.
+    /// commit that keeps its whole tree. A latest-value table keeps no past:
+    /// its keys have a cell only at the head of a branch.
     fn cell_at(&self, commit: &CommitId, key: &[u8]) -> Option<Bytes> {
+        if self.is_latest(key) {
+            return self.head_of(commit)?.latest.get(key).cloned();
+        }
         let mut next = Some(*commit);
         while let Some(id) = next {
             let info = self.commits.get(&id)?;
@@ -591,7 +642,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// other rebuilt from the nearest tree kept before it, or from the empty
     /// tree, by replaying the cells written since.
     fn tree_at(&self, commit: &CommitId) -> Option<Tree> {
-        if let Some(head) = self.branches.values().find(|h| h.commit == Some(*commit)) {
+        if let Some(head) = self.head_of(commit) {
             return Some(head.state.clone());
         }
         // Walking back from the newest, the first cell seen for a key is the
@@ -686,6 +737,16 @@ impl<S: Storage, C: Clock> Store<S, C> {
             .count()
     }
 
+    /// How many cells commits keep for diffs, history and merges. Tests use
+    /// this to check that a latest-value table on `main` keeps none.
+    #[doc(hidden)]
+    pub fn cells_kept(&self) -> usize {
+        self.commits
+            .values()
+            .map(|info| info.written.len() + info.latest_written.len())
+            .sum()
+    }
+
     fn require_branch(&self, name: &str) -> Result<(), StoreError> {
         if self.branches.contains_key(name) {
             Ok(())
@@ -737,24 +798,33 @@ impl<S: Storage, C: Clock> Store<S, C> {
     }
 
     fn apply_commit(&mut self, commit: &Commit) -> Result<CommitId, StoreError> {
+        let tables = &self.tables;
         let head = self
             .branches
             .get_mut(&commit.branch)
             .ok_or_else(|| StoreError::UnknownBranch(commit.branch.clone()))?;
         let id = commit_id(head.commit, commit);
-        let cells = cells_of(&head.state, commit, &id);
-        for (key, _) in &cells {
-            self.tables.note_written(key);
-        }
-        let written = cells
-            .iter()
-            .map(|(key, cell)| Written {
-                key: key.clone(),
-                cell: cell.clone(),
-                replaced: head.state.get(key).cloned(),
-            })
-            .collect();
+        let is_latest = |key: &[u8]| tables.engine_of(key) == Engine::Latest;
+        let all_cells = cells_of(head, commit, &id, &is_latest);
+        let touched: Vec<Bytes> = all_cells.iter().map(|(key, _)| key.clone()).collect();
+        let (latest_cells, cells): (Vec<_>, Vec<_>) =
+            all_cells.into_iter().partition(|(key, _)| is_latest(key));
+        let written = written_over(&cells, |key| head.state.get(key).cloned());
+        let latest_written = if commit.branch == MAIN_BRANCH {
+            Vec::new()
+        } else {
+            written_over(&latest_cells, |key| head.latest.get(key).cloned())
+        };
         let state = head.state.insert_sorted(cells);
+        let latest = latest_cells
+            .into_iter()
+            .fold(head.latest.clone(), |latest, (key, cell)| {
+                if decode_cell(&cell).value.is_some() {
+                    latest.insert(key, cell)
+                } else {
+                    latest.remove(&key)
+                }
+            });
         let since_tree = (head.since_tree + 1) % TREE_EVERY;
         let info = CommitInfo {
             id,
@@ -768,13 +838,18 @@ impl<S: Storage, C: Clock> Store<S, C> {
             },
             time: commit.time,
             written,
+            latest_written,
             tree: (since_tree == 0).then(|| state.clone()),
         };
         *head = Head {
             commit: Some(id),
             state,
+            latest,
             since_tree,
         };
+        for key in &touched {
+            self.tables.note_written(key);
+        }
         self.commits.insert(id, Arc::new(info));
         self.last_time = self.last_time.max(commit.time);
         Ok(id)
@@ -827,14 +902,24 @@ fn refused(refusal: Refusal, table: &[u8]) -> StoreError {
 /// The cells `commit` writes, sorted by key. Edits apply in order, so the
 /// last edit of a key wins, and removing what is not live at that point
 /// changes nothing and records nothing.
-fn cells_of(state: &Tree, commit: &Commit, id: &CommitId) -> Vec<(Bytes, Bytes)> {
+fn cells_of(
+    head: &Head,
+    commit: &Commit,
+    id: &CommitId,
+    is_latest: &dyn Fn(&[u8]) -> bool,
+) -> Vec<(Bytes, Bytes)> {
     let mut written: BTreeMap<&[u8], Option<&[u8]>> = BTreeMap::new();
     for edit in &commit.changes {
         let is_live = match written.get(edit.key.as_slice()) {
             Some(value) => value.is_some(),
-            None => state
-                .get(&edit.key)
-                .is_some_and(|bytes| decode_cell(bytes).value.is_some()),
+            None => {
+                let held = if is_latest(&edit.key) {
+                    head.latest.get(&edit.key)
+                } else {
+                    head.state.get(&edit.key)
+                };
+                held.is_some_and(|bytes| decode_cell(bytes).value.is_some())
+            }
         };
         if edit.value.is_none() && !is_live {
             continue;
@@ -844,6 +929,18 @@ fn cells_of(state: &Tree, commit: &Commit, id: &CommitId) -> Vec<(Bytes, Bytes)>
     written
         .into_iter()
         .map(|(key, value)| (Arc::from(key), encode_cell(id, value)))
+        .collect()
+}
+
+/// Each cell, with the cell it replaces as `held` finds it.
+fn written_over(cells: &[(Bytes, Bytes)], held: impl Fn(&[u8]) -> Option<Bytes>) -> Vec<Written> {
+    cells
+        .iter()
+        .map(|(key, cell)| Written {
+            key: key.clone(),
+            cell: cell.clone(),
+            replaced: held(key),
+        })
         .collect()
 }
 
