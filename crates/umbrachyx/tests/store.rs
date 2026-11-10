@@ -275,8 +275,8 @@ fn the_state_at_an_earlier_commit_does_not_change() {
         )
         .expect("commits");
 
-    assert_eq!(store.get_at(&first, b"k").as_deref(), Some(&b"before"[..]));
-    assert_eq!(store.get_at(&first, b"new"), None);
+    assert_eq!(store.get_at(&first, b"k").expect("reads").as_deref(), Some(&b"before"[..]));
+    assert_eq!(store.get_at(&first, b"new").expect("reads"), None);
     assert_eq!(value(&store, MAIN_BRANCH, "k").as_deref(), Some("after"));
     assert_eq!(store.entries(MAIN_BRANCH).len(), 2);
 }
@@ -351,7 +351,7 @@ fn commits_written_together_apply_in_order() {
     let last = *results[3].as_ref().expect("last commits");
     assert_eq!(store.head(MAIN_BRANCH), Some(last));
     assert_eq!(store.commit_info(&last).expect("known").parent, Some(first));
-    assert_eq!(store.get_at(&first, b"a").as_deref(), Some(&b"1"[..]));
+    assert_eq!(store.get_at(&first, b"a").expect("reads").as_deref(), Some(&b"1"[..]));
     assert_eq!(value(&store, MAIN_BRANCH, "a").as_deref(), Some("2"));
     assert_eq!(value(&store, "event", "a").as_deref(), Some("e"));
     let history: Vec<_> = store
@@ -413,4 +413,21 @@ fn cells_come_in_pages_without_removed_keys() {
     assert_eq!(keys(Some(b"b"), 1), ["c"]);
     assert!(keys(Some(b"d"), 10).is_empty());
     assert!(store.cells("missing", None, 10).is_empty());
+}
+
+#[test]
+fn reading_at_a_commit_the_store_never_made_is_refused() {
+    let dir = TempDir::new("unknown-commit");
+    let mut store = open(&dir.log());
+    store
+        .commit(MAIN_BRANCH, vec![set("k", "v")], by("a", "first"))
+        .expect("commits");
+    let unknown = [7u8; 32];
+
+    let read = store.get_at(&unknown, b"k");
+
+    assert!(
+        matches!(read, Err(StoreError::UnknownCommit(id)) if id == unknown),
+        "got {read:?}"
+    );
 }

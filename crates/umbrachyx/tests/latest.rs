@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use umbrachyx::log::{Edit, Engine, FileStorage};
-use umbrachyx::store::{MAIN_BRANCH, Merged, Provenance, Reverted, Store, SystemClock};
+use umbrachyx::store::{MAIN_BRANCH, Merged, Provenance, Reverted, Store, StoreError, SystemClock};
 
 type FileStore = Store<FileStorage, SystemClock>;
 
@@ -553,4 +553,33 @@ fn undoing_a_commit_leaves_latest_keys_as_they_are() {
         Some("1".to_owned())
     );
     assert_eq!(value(&store, MAIN_BRANCH, "pos/1/x"), Some("2".to_owned()));
+}
+
+#[test]
+fn reading_a_latest_key_at_a_past_commit_says_the_table_keeps_no_past() {
+    let dir = TempDir::new("past-read");
+    let mut store = with_pos(&dir);
+    let first = store
+        .commit(
+            MAIN_BRANCH,
+            vec![set("pos/1/x", "1"), set("player/1/gold", "100")],
+            by("game"),
+        )
+        .expect("commits");
+    let head = store
+        .commit(MAIN_BRANCH, vec![set("pos/1/x", "2")], by("game"))
+        .expect("commits");
+
+    let past = store.get_at(&first, b"pos/1/x");
+    let now = store.get_at(&head, b"pos/1/x").expect("the head keeps it");
+    let history = store
+        .get_at(&first, b"player/1/gold")
+        .expect("a history table keeps its past");
+
+    assert!(
+        matches!(past, Err(StoreError::NoPast(ref table)) if table == b"pos"),
+        "got {past:?}"
+    );
+    assert_eq!(now.as_deref(), Some(&b"2"[..]));
+    assert_eq!(history.as_deref(), Some(&b"100"[..]));
 }

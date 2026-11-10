@@ -195,6 +195,9 @@ pub enum StoreError {
     /// The table has been written to, on some branch, so how it is held
     /// can no longer be declared.
     TableInUse(Vec<u8>),
+    /// The key's table keeps only its latest value, so it has none to give
+    /// for a commit that is not the head of a branch.
+    NoPast(Vec<u8>),
 }
 
 impl fmt::Display for StoreError {
@@ -221,6 +224,11 @@ impl fmt::Display for StoreError {
             Self::TableInUse(name) => write!(
                 f,
                 "table {:?} already has keys; its engine can only be declared before the first write",
+                String::from_utf8_lossy(name)
+            ),
+            Self::NoPast(name) => write!(
+                f,
+                "table {:?} keeps only the latest value; past commits hold none of it",
                 String::from_utf8_lossy(name)
             ),
         }
@@ -533,10 +541,22 @@ impl<S: Storage, C: Clock> Store<S, C> {
         )
     }
 
-    /// The value of `key` as `commit` left it.
-    pub fn get_at(&self, commit: &CommitId, key: &[u8]) -> Option<Bytes> {
-        let value = decode_cell(&self.cell_at(commit, key)?).value;
-        self.reveal(key, value)
+    /// The value of `key` as `commit` left it. A latest-value table keeps
+    /// no past, so for its keys only the head of a branch can answer; any
+    /// other commit is refused rather than read as holding nothing.
+    pub fn get_at(&self, commit: &CommitId, key: &[u8]) -> Result<Option<Bytes>, StoreError> {
+        if !self.commits.contains_key(commit) {
+            return Err(StoreError::UnknownCommit(*commit));
+        }
+        if let Some(table) = self.latest_table_of(key)
+            && self.head_of(commit).is_none()
+        {
+            return Err(StoreError::NoPast(table.to_vec()));
+        }
+        let Some(cell) = self.cell_at(commit, key) else {
+            return Ok(None);
+        };
+        Ok(self.reveal(key, decode_cell(&cell).value))
     }
 
     /// The cell of `key` on `branch`: its value, or the removal, and the

@@ -134,7 +134,7 @@ fn history_diff_and_old_values_read_as_written() {
         .map(|cell| text(cell.value))
         .collect();
     let diff = store.diff(Some(&first), Some(&second)).expect("diffs");
-    let old = text(store.get_at(&first, b"player/42/gems"));
+    let old = text(store.get_at(&first, b"player/42/gems").expect("reads"));
     let entries: Vec<(String, String)> = store
         .entries(MAIN_BRANCH)
         .into_iter()

@@ -715,6 +715,10 @@ choose its storage engine.
   latest tables out and `UMBRA.DIFF` leaves them out where `main` kept no
   past; both name them in `omitted_tables`, an empty list when nothing was
   left out. The current values are still read with `SCAN` and `GET`.
+  Reading a key of a latest table as an older commit left it is refused
+  (`StoreError::NoPast`) rather than answered as empty: without its past,
+  the table cannot tell a key that held nothing then from one it no
+  longer remembers.
   `UMBRA.CELLS` names every latest table on every page, whatever the
   branch holds. The MCP `diff` tool names left-out tables too, but only
   those its token may read: for each table, it asks the token to read a
