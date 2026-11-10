@@ -1,0 +1,24 @@
+== base t=10 run 1
+engine,keys,threads,reads_per_thread,reads_per_second,p50_ns,p99_ns,p999_ns
+history,1000000,10,200000,4656705,1750,3416,9667
+latest,1000000,10,200000,4733170,1542,6167,11083
+== base t=50 run 1
+engine,keys,threads,reads_per_thread,reads_per_second,p50_ns,p99_ns,p999_ns
+history,1000000,50,200000,4604769,1750,3334,33584
+latest,1000000,50,200000,4658777,1416,6083,35709
+== base t=10 run 2
+engine,keys,threads,reads_per_thread,reads_per_second,p50_ns,p99_ns,p999_ns
+history,1000000,10,200000,4429851,1750,3334,14792
+latest,1000000,10,200000,5059742,1417,5708,11208
+== base t=50 run 2
+engine,keys,threads,reads_per_thread,reads_per_second,p50_ns,p99_ns,p999_ns
+history,1000000,50,200000,4658362,1750,3375,30167
+latest,1000000,50,200000,4579697,1583,6625,16042
+== base t=10 run 3
+engine,keys,threads,reads_per_thread,reads_per_second,p50_ns,p99_ns,p999_ns
+history,1000000,10,200000,4630471,1709,3333,10417
+latest,1000000,10,200000,4743574,1542,6125,12542
+== base t=50 run 3
+engine,keys,threads,reads_per_thread,reads_per_second,p50_ns,p99_ns,p999_ns
+history,1000000,50,200000,4818299,1750,3250,14917
+latest,1000000,50,200000,4722225,1459,6250,20792

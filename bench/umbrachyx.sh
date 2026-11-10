@@ -88,8 +88,11 @@ server=
 start latest pos
 valkey-benchmark -p "$port" -n "$keys" -r "$keys" -c 50 -P 64 -q \
   SET "pos/bench/key:__rand_int__" "$value" >/dev/null 2>&1
-bench "every commit synced, latest table" pos GET -n "$requests" -c 1
+# SET before GET, as -t runs them above: the first run of 50 clients
+# after a long run of one client's SETs, which mostly wait on the disk,
+# had slowest reads three times the others' on the laptop.
 bench "every commit synced, latest table" pos SET -n "$requests" -c 1
+bench "every commit synced, latest table" pos GET -n "$requests" -c 1
 bench "every commit synced, latest table, 50 clients" pos GET -n "$requests" -c 50
 valkey-benchmark -p "$port" -n 100000000 -r "$keys" -c 50 -q \
   SET "pos/bench/key:__rand_int__" "$value" >/dev/null 2>&1 &

@@ -322,22 +322,29 @@ The same GETs and SETs as the Reads and Writes sections, from
 fresh server whose keys are in a table declared `latest`; 1,000,000 keys
 written first on each, 32-byte values. The median of three runs on the
 laptop
-([`2026-11-10-laptop-latest-table/`](../bench/results/2026-11-10-laptop-latest-table/));
+([`2026-11-10-laptop-read-order/`](../bench/results/2026-11-10-laptop-read-order/));
 p50 and p99 in milliseconds:
 
 | | History | Latest table | |
 |---|---|---|---|
-| `GET`, one client | 58,480 a second (0.015, p99 0.023) | 63,291 a second (0.015, p99 0.023) | 8% more |
-| `SET`, one client | 247 a second (4.0, p99 5.1) | 248 a second (4.0, p99 5.0) | the same |
-| `GET`, 50 clients | 233,645 a second (0.119, p99 0.159) | 225,225 a second (0.119, p99 0.567) | **4% fewer, p99 3.6× slower** |
-| `GET` while 50 clients SET | 77,101 a second (0.015, p99 0.047) | 85,324 a second (0.015, p99 0.039) | 11% more |
+| `GET`, one client | 58,480 a second (0.015, p99 0.023) | 60,569 a second (0.015, p99 0.031) | 4% more |
+| `SET`, one client | 248 a second (4.0, p99 5.0) | 248 a second (4.0, p99 5.0) | the same |
+| `GET`, 50 clients | 233,645 a second (0.119, p99 0.167) | 239,808 a second (0.111, p99 0.159) | 3% more |
+| `GET` while 50 clients SET | 76,394 a second (0.015, p99 0.047) | 83,542 a second (0.015, p99 0.039) | 9% more |
 
 A latest table is for memory more than speed. A `SET` waits for its sync
 either way, so how the value is held does not show. A `GET` from one
 client costs about what a `PING` does (70,225 a second), so the cheaper
 lookup, one hash instead of a walk down the tree, moves it by less than
 a tenth; it shows most while writes are going on, when a write to the
-history also updates its tree. With 50 clients the latest table is
-behind, and its slowest reads are three to four times the history's;
-why is not known yet. These are one machine's numbers and have not been
+history also updates its tree. With 50 clients the two are about the
+same. An earlier run
+([`2026-11-10-laptop-latest-table/`](../bench/results/2026-11-10-laptop-latest-table/))
+had the latest table's slowest reads from 50 clients at 3.6 times the
+history's; there those reads came straight after a long run of one
+client's SETs, and run in the same order as the history's they are not.
+In process, with no network, the latest table's slowest reads are about
+twice the history's, from the lock around the encryption keys, but at
+1–2 µs a read against about 110 µs over the server it does not show
+here. These are one machine's numbers and have not been
 taken on the Linux runner or the fixed machines.

@@ -378,3 +378,55 @@ fn listed_cells_show_erased_values_as_erased() {
         ]
     );
 }
+
+/// A reader thread that has opened a subject's values, and so may keep
+/// its key near at hand, still loses them once the erasure returns.
+#[test]
+fn a_reader_that_already_opened_a_value_loses_it_once_erased() {
+    let dir = TempDir::new("warm-reader");
+    let mut store = dir.open();
+    seed(&mut store);
+    let view = store.view();
+    let (opened, wait_for_open) = std::sync::mpsc::channel();
+    let (erased, wait_for_erase) = std::sync::mpsc::channel::<()>();
+    let reader = std::thread::spawn(move || {
+        let before = text(view.get(MAIN_BRANCH, b"player/42/gems"));
+        opened.send(()).expect("main waits");
+        wait_for_erase.recv().expect("main erases");
+        let after = text(view.get(MAIN_BRANCH, b"player/42/gems"));
+        let other = text(view.get(MAIN_BRANCH, b"player/7/gems"));
+        (before, after, other)
+    });
+
+    wait_for_open.recv().expect("the reader opens a value");
+    erase_player_42(&mut store);
+    erased.send(()).expect("the reader waits");
+    let (before, after, other) = reader.join().expect("the reader finishes");
+
+    assert_eq!(before.as_deref(), Some("95"));
+    assert_eq!(after, None);
+    assert_eq!(other.as_deref(), Some("30"), "other subjects stay readable");
+}
+
+/// A store opened again in the same process, on the same thread, does not
+/// open what its log says was erased, whatever an earlier one could.
+#[test]
+fn a_store_opened_again_does_not_open_what_was_erased() {
+    let dir = TempDir::new("reopen-warm");
+    let mut store = dir.open();
+    seed(&mut store);
+    assert_eq!(
+        text(store.view().get(MAIN_BRANCH, b"player/42/gems")).as_deref(),
+        Some("95")
+    );
+    erase_player_42(&mut store);
+    drop(store);
+
+    let store = dir.open();
+
+    assert_eq!(store.view().get(MAIN_BRANCH, b"player/42/gems"), None);
+    assert_eq!(
+        text(store.view().get(MAIN_BRANCH, b"player/7/gems")).as_deref(),
+        Some("30")
+    );
+}

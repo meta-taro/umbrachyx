@@ -575,6 +575,18 @@ erases the subject while the history keeps its shape (see
   the counter-mode key inside every operation, so keeping the cipher
   between reads would save only part of it. Whether to accept the cost,
   cache opened values, or seal only the columns that need erasing is open.
+- **Every read takes one lock around the encryption keys, and stays
+  so.** In process, with no network, it is what the latest table's
+  quicker lookups wait on: on a 10-core laptop with 50 threads its 99th
+  percentile read took 6.1–6.6 µs against the history's 3.3 µs
+  (`examples/read_contention.rs`,
+  [`bench/results/2026-11-10-laptop-read-order`](../bench/results/2026-11-10-laptop-read-order/)).
+  Each thread keeping the last few keys it used, under a lock of its own
+  that an erasure wipes, took that to about 1.8 µs. It was not kept:
+  over the server a read takes about 110 µs and the 50-client rows did
+  not move, and it would have put process-wide state on the path that
+  makes an erasure hold for every reader at once. It is worth taking
+  again if a workload shows readers waiting on that lock.
 - **The first value of a new subject costs a sync of the key file**, on
   top of the log's, made on the committer's thread. Writes that create
   many subjects at once pay it once each; batching them is left until it
@@ -723,8 +735,10 @@ choose its storage engine.
   faster, `GET` from one client 8%, `SET` the same, and `GET` from 50
   clients 4% slower with its slowest reads 3.6 times the history's. The
   simulation and the hijacked-agent tests pass. Memory and one `GET` row
-  clear the bar, so the engine stays; the 50-client reads are to be
-  explained before an append-only engine is built on the same ground.
+  clear the bar, so the engine stays. The 50-client reads were explained
+  the same day: they followed a long run of `SET`s, and run in the
+  history's order they are 3% faster with about the same slowest reads
+  ([`bench/results/2026-11-10-laptop-read-order`](../bench/results/2026-11-10-laptop-read-order/)).
 
 ## Retention per column (not built yet)
 
