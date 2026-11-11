@@ -326,6 +326,26 @@ struct Head {
     /// Commits along this line of history since the last that kept its
     /// whole tree.
     since_tree: usize,
+    /// Cells written by the commits of a group being applied and not yet
+    /// in `state`: a group's commits go into the tree together, once.
+    /// Empty whenever no record is being applied.
+    pending: BTreeMap<Bytes, Bytes>,
+}
+
+impl Head {
+    /// The cell `key` holds, counting what the group being applied wrote.
+    fn held(&self, key: &[u8]) -> Option<&Bytes> {
+        self.pending.get(key).or_else(|| self.state.get(key))
+    }
+
+    /// Puts the group's cells into the tree.
+    fn flush(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let cells = std::mem::take(&mut self.pending).into_iter().collect();
+        self.state = self.state.insert_sorted(cells);
+    }
 }
 
 pub struct Store<S: Storage, C: Clock> {
@@ -382,6 +402,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                     state: Tree::empty(),
                     latest: Hamt::empty(),
                     since_tree: 0,
+                    pending: BTreeMap::new(),
                 },
             )]),
             commits: HashMap::new(),
@@ -863,7 +884,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 }
                 Ok(Vec::new())
             }
-            Record::Commit(commit) => Ok(vec![self.apply_commit(commit)?]),
+            Record::Commit(commit) => Ok(vec![self.apply_commit(commit, false)?]),
             Record::Erase(erase) => {
                 self.erasures.push(Erasure {
                     subject: erase.subject.clone(),
@@ -877,10 +898,18 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 self.last_time = self.last_time.max(erase.time);
                 Ok(Vec::new())
             }
-            Record::Group(commits) => commits
-                .iter()
-                .map(|commit| self.apply_commit(commit))
-                .collect(),
+            Record::Group(commits) => {
+                let ids = commits
+                    .iter()
+                    .map(|commit| self.apply_commit(commit, true))
+                    .collect();
+                for commit in commits {
+                    if let Some(head) = self.branches.get_mut(&commit.branch) {
+                        head.flush();
+                    }
+                }
+                ids
+            }
             Record::Table(table) => {
                 self.tables
                     .declare(&table.name, table.engine)
@@ -908,7 +937,10 @@ impl<S: Storage, C: Clock> Store<S, C> {
         }
     }
 
-    fn apply_commit(&mut self, commit: &Commit) -> Result<CommitId, StoreError> {
+    /// Applies one commit. With `in_group`, its cells wait in the head's
+    /// `pending` for the caller to flush once the group is applied, unless
+    /// this commit is one that keeps its whole tree.
+    fn apply_commit(&mut self, commit: &Commit, in_group: bool) -> Result<CommitId, StoreError> {
         let tables = &self.tables;
         let head = self
             .branches
@@ -920,13 +952,17 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let touched: Vec<Bytes> = all_cells.iter().map(|(key, _)| key.clone()).collect();
         let (latest_cells, cells): (Vec<_>, Vec<_>) =
             all_cells.into_iter().partition(|(key, _)| is_latest(key));
-        let written = written_over(&cells, |key| head.state.get(key).cloned());
+        let written = written_over(&cells, |key| head.held(key).cloned());
         let latest_written = if commit.branch == MAIN_BRANCH {
             Vec::new()
         } else {
             written_over(&latest_cells, |key| head.latest.get(key).cloned())
         };
-        let state = head.state.insert_sorted(cells);
+        head.pending.extend(cells);
+        let since_tree = (head.since_tree + 1) % TREE_EVERY;
+        if !in_group || since_tree == 0 {
+            head.flush();
+        }
         let latest = latest_cells
             .into_iter()
             .fold(head.latest.clone(), |latest, (key, cell)| {
@@ -936,7 +972,6 @@ impl<S: Storage, C: Clock> Store<S, C> {
                     latest.remove(&key)
                 }
             });
-        let since_tree = (head.since_tree + 1) % TREE_EVERY;
         let info = CommitInfo {
             id,
             parent: head.commit,
@@ -950,14 +985,11 @@ impl<S: Storage, C: Clock> Store<S, C> {
             time: commit.time,
             written,
             latest_written,
-            tree: (since_tree == 0).then(|| state.clone()),
+            tree: (since_tree == 0).then(|| head.state.clone()),
         };
-        *head = Head {
-            commit: Some(id),
-            state,
-            latest,
-            since_tree,
-        };
+        head.commit = Some(id);
+        head.latest = latest;
+        head.since_tree = since_tree;
         for key in &touched {
             self.tables.note_written(key);
         }
@@ -1027,7 +1059,7 @@ fn cells_of(
                 let held = if is_latest(&edit.key) {
                     head.latest.get(&edit.key)
                 } else {
-                    head.state.get(&edit.key)
+                    head.held(&edit.key)
                 };
                 held.is_some_and(|bytes| decode_cell(bytes).value.is_some())
             }
