@@ -130,7 +130,7 @@ pub fn mcp(store: FileStore, args: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn public_key(args: &Args) -> Result<PublicKey, String> {
+pub(super) fn public_key(args: &Args) -> Result<PublicKey, String> {
     let text = args.option("public-key")?;
     PublicKey::from_str(text).map_err(|_| format!("--public-key {text:?} is not a public key"))
 }

@@ -163,8 +163,8 @@ fn pipelined_sets_share_syncs_and_later_commands_see_them() {
     assert!(used * 4 <= SETS, "{used} syncs for {SETS} SETs");
 }
 
-/// Writes reach the server's branch, never main, with the client named as
-/// their author.
+/// Writes reach the server's branch, never main, and a client that has not
+/// authenticated is named so as their author.
 #[test]
 fn writes_go_to_the_branch_with_the_client_as_author() {
     let dir = TempDir::new("branch");
@@ -183,8 +183,7 @@ fn writes_go_to_the_branch_with_the_client_as_author() {
     assert_eq!(view.get(MAIN_BRANCH, b"player/1/gold"), None);
     let store = committer.stop();
     let latest = store.log(BRANCH)[0];
-    let local = client.local_addr().expect("has an address");
-    assert_eq!(latest.provenance.who, format!("resp {local}"));
+    assert_eq!(latest.provenance.who, "unauthenticated");
     assert_eq!(latest.provenance.why, "SET");
 }
 
@@ -369,7 +368,7 @@ fn history_shows_every_change_to_a_key_newest_first() {
     assert_eq!(changes[0]["why"], "SET");
     assert_eq!(changes[0]["erased"], false);
     let who = changes[0]["who"].as_str().expect("who is text");
-    assert!(who.starts_with("resp 127.0.0.1:"), "{who}");
+    assert_eq!(who, "unauthenticated");
     assert_ne!(changes[0]["commit"], changes[1]["commit"]);
 }
 

@@ -3,16 +3,18 @@
 //!
 //! It serves one branch, never main: writes from a client are not trusted,
 //! so they go where a person can review them before merging. Each `SET` is
-//! a commit, acknowledged once durable, with the client's address as its
-//! author. Reads come from the latest view the committer published, so a
-//! client reads back what it has written.
+//! a commit, acknowledged once durable. Its author is the holder of the
+//! capability token the connection sent with `AUTH`, which also bounds what
+//! it may write, or `unauthenticated` (see `session`). Reads come from the
+//! latest view the committer published, so a client reads back what it has
+//! written.
 //!
 //! For a viewer, `SCAN`, `TYPE` and `TTL` list and describe the keys of the
 //! branch (see `keys`), and commands named `UMBRA.` read the history of any
 //! branch and the tables declared (see `history`).
 //!
-//! There is no authentication yet, so a server should listen only on this
-//! machine.
+//! Reads need no token, and writes without one are taken unless the server
+//! requires authentication, so a server should listen only on this machine.
 //!
 //! Each connection has a thread. Commands sent together (pipelined) are
 //! answered together, in order. SETs sent together are written together,
@@ -27,15 +29,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use biscuit_auth::PublicKey;
+
 use crate::log::Edit;
 use crate::store::{CommitId, MAIN_BRANCH, Pending, Provenance, Reader, StoreError, Writer};
 
 mod history;
 mod keys;
 pub mod resp;
+mod session;
 
 pub use history::MAX_PAGE;
 use resp::{Command, Reply};
+use session::Session;
+pub use session::UNAUTHENTICATED;
 
 /// Connections served at once unless set otherwise. One more is told so
 /// and closed.
@@ -76,6 +83,10 @@ pub struct Server {
     reader: Reader,
     connections: Arc<AtomicUsize>,
     max_connections: usize,
+    /// The database's root public key, which `AUTH` checks tokens against.
+    public_key: Option<PublicKey>,
+    /// Refuse writes from connections that have not authenticated.
+    require_auth: bool,
 }
 
 impl Server {
@@ -92,7 +103,25 @@ impl Server {
             reader,
             connections: Arc::new(AtomicUsize::new(0)),
             max_connections: MAX_CONNECTIONS,
+            public_key: None,
+            require_auth: false,
         })
+    }
+
+    /// Takes `AUTH` with capability tokens signed by this root key.
+    pub fn public_key(self, public_key: PublicKey) -> Self {
+        Self {
+            public_key: Some(public_key),
+            ..self
+        }
+    }
+
+    /// Whether a connection must `AUTH` before it may write.
+    pub fn require_auth(self, require_auth: bool) -> Self {
+        Self {
+            require_auth,
+            ..self
+        }
     }
 
     pub fn max_connections(self, max_connections: usize) -> Self {
@@ -131,7 +160,7 @@ impl Server {
     fn connection(self, mut stream: TcpStream, peer: SocketAddr, _slot: Slot) {
         // A connection that fails is closed; the server goes on. A client
         // that hangs up is not worth a line of the log.
-        match self.talk(&mut stream, peer) {
+        match self.talk(&mut stream) {
             Ok(()) => {}
             Err(error) if is_hang_up(&error) => {}
             Err(error) => eprintln!("umbrachyx: {peer}: {error}"),
@@ -139,9 +168,9 @@ impl Server {
     }
 
     /// Reads commands and answers each batch that arrived together.
-    fn talk(&self, stream: &mut TcpStream, peer: SocketAddr) -> io::Result<()> {
+    fn talk(&self, stream: &mut TcpStream) -> io::Result<()> {
         stream.set_nodelay(true)?;
-        let who = format!("resp {peer}");
+        let mut session = Session::new();
         let mut input = Vec::new();
         let mut out = Vec::new();
         let mut unanswered = Vec::new();
@@ -157,7 +186,7 @@ impl Server {
                 match resp::parse(&input[used..]) {
                     Ok(Some((command, len))) => {
                         used += len;
-                        self.answer(&command, &who, &mut unanswered, &mut out);
+                        self.answer(&command, &mut session, &mut unanswered, &mut out);
                         if out.len() >= MAX_PENDING_OUT {
                             stream.write_all(&out)?;
                             out.clear();
@@ -184,7 +213,7 @@ impl Server {
     fn answer(
         &self,
         command: &Command,
-        who: &str,
+        session: &mut Session,
         unanswered: &mut Vec<Pending>,
         out: &mut Vec<u8>,
     ) {
@@ -192,7 +221,7 @@ impl Server {
         if !is_set(command) {
             settle(unanswered, out);
         }
-        match self.execute(command, who) {
+        match self.execute(command, session) {
             Some(Step::Sent(commit)) => unanswered.push(commit),
             Some(Step::Reply(reply)) => {
                 settle(unanswered, out);
@@ -203,7 +232,7 @@ impl Server {
     }
 
     /// The reply to one command; none to an empty one, as Redis does.
-    fn execute(&self, command: &Command, who: &str) -> Option<Step> {
+    fn execute(&self, command: &Command, session: &mut Session) -> Option<Step> {
         let (name, args) = command.split_first()?;
         let name = String::from_utf8_lossy(name).to_ascii_uppercase();
         Some(Step::Reply(match (name.as_str(), args) {
@@ -213,7 +242,15 @@ impl Server {
                 let value = self.reader.view().get(&self.branch, key);
                 Reply::Bulk(value.map(|value| value.to_vec()))
             }
-            ("SET", [key, value]) => return Some(Step::Sent(self.set(key, value, who))),
+            ("AUTH", args) => session.authenticate(self.public_key, args),
+            ("SET", [key, value]) => {
+                match session.may_write(self.public_key, &self.branch, key, self.require_auth) {
+                    Ok(()) => {
+                        return Some(Step::Sent(self.set(key, value, session.provenance("SET"))));
+                    }
+                    Err(refused) => refused,
+                }
+            }
             ("SET", [_, _, _, ..]) => Reply::Error("ERR SET options are not supported".to_owned()),
             ("PING" | "GET" | "SET", _) => Reply::Error(format!(
                 "ERR wrong number of arguments for '{}' command",
@@ -233,15 +270,10 @@ impl Server {
         }))
     }
 
-    fn set(&self, key: &[u8], value: &[u8], who: &str) -> Pending {
+    fn set(&self, key: &[u8], value: &[u8], provenance: Provenance) -> Pending {
         let edit = Edit {
             key: key.to_vec(),
             value: Some(value.to_vec()),
-        };
-        let provenance = Provenance {
-            who: who.to_owned(),
-            why: "SET".to_owned(),
-            approved_by: None,
         };
         self.writer.send(&self.branch, vec![edit], provenance)
     }

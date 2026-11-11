@@ -441,11 +441,18 @@ checker to hold the shared secret that mints tokens.
   during a walk.
 - **It serves one branch, never main.** Writes from a client are not
   trusted, so they land where a person can review the diff before merging
-  it. Each `SET` is one commit, acknowledged once durable, with the
-  client's address as its author.
-- **It listens only on 127.0.0.1**, because nothing authenticates a client
-  yet. Capability tokens are meant to guard it before it listens anywhere
-  else.
+  it. Each `SET` is one commit, acknowledged once durable.
+- **`AUTH <token>` (or `AUTH <user> <token>`, as Redis takes a password)
+  names who writes.** Started with the database's public key, the server
+  checks a capability token as the MCP session does: its holder becomes
+  the author of the connection's writes, and every `SET` is checked
+  against the token's branch, keys, columns, purpose and expiry before it
+  is sent (`NOPERM` otherwise). A bad token is `WRONGPASS` and leaves the
+  connection as it was. A connection without `AUTH` writes as
+  `unauthenticated`; `serve --require-auth` refuses its writes
+  (`NOAUTH`), and reads stay open either way.
+- **It listens only on 127.0.0.1**, because reads need no token and writes
+  need one only with `--require-auth`.
 - **One thread per connection, at most 1,024 connections, no async
   runtime.** It is the simplest design that serves the benchmarks, and it
   adds no dependency. A connection past the limit is told so and closed.

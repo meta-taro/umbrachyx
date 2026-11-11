@@ -162,3 +162,63 @@ fn a_second_process_on_a_log_in_use_is_refused_at_once() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("already open"), "stderr: {stderr}");
 }
+
+#[test]
+fn serve_with_require_auth_refuses_writes_without_auth() {
+    let dir = TempDir::new("require-auth");
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+    let key = dir.0.join("root.key");
+    let keygen = dir.run(&["keygen", key.to_str().expect("utf-8")]);
+    assert!(keygen.status.success());
+    let public = String::from_utf8(keygen.stdout)
+        .expect("text")
+        .trim()
+        .to_owned();
+    let port = free_port();
+    let port_arg = port.to_string();
+    let _server = Server(
+        dir.umbrachyx(&[
+            "serve",
+            BRANCH,
+            "--port",
+            &port_arg,
+            "--public-key",
+            &public,
+            "--require-auth",
+        ])
+        .spawn()
+        .expect("starts"),
+    );
+
+    let mut client = connect(port);
+    client
+        .write_all(b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\nb\r\n")
+        .expect("sends");
+    let expected = b"-NOAUTH Authentication required.\r\n";
+    let mut reply = vec![0; expected.len()];
+    client.read_exact(&mut reply).expect("reads");
+    assert_eq!(reply, expected);
+}
+
+#[test]
+fn serve_refuses_require_auth_without_a_public_key() {
+    let dir = TempDir::new("require-auth-no-key");
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+
+    let output = dir.run(&["serve", BRANCH, "--require-auth"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--public-key"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

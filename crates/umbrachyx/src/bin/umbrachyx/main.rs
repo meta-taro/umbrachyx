@@ -54,9 +54,11 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               how the table <name>/... is held; latest keeps
                               only current values. Only before its first write
   tables                      every declared table and its engine
-  serve <branch> [--port P] [--max-connections N]
+  serve <branch> [--port P] [--max-connections N] [--public-key K [--require-auth]]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
-                              SCAN, TYPE, TTL, and UMBRA.* to read history
+                              SCAN, TYPE, TTL, and UMBRA.* to read history.
+                              With a public key, AUTH <token> names who
+                              writes; --require-auth refuses writes without it
   mcp --public-key K --token-file F
                               MCP over stdin and stdout, for one agent's token
 
@@ -90,6 +92,9 @@ fn main() -> ExitCode {
 }
 
 /// Positional arguments and `--name value` options, in order.
+/// Options that take no value.
+const FLAGS: &[&str] = &["require-auth"];
+
 struct Args {
     positional: Vec<String>,
     options: HashMap<String, String>,
@@ -109,6 +114,10 @@ impl Args {
                 parsed.positional.push(arg.clone());
                 continue;
             };
+            if FLAGS.contains(&name) {
+                parsed.options.insert(name.to_owned(), String::new());
+                continue;
+            }
             let value = args
                 .next()
                 .ok_or_else(|| format!("--{name} needs a value"))?
@@ -394,8 +403,9 @@ fn revert(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Serves one branch until stopped. Only on this machine: there is no
-/// authentication yet.
+/// Serves one branch until stopped, only on this machine. With a public
+/// key, connections may `AUTH` with a capability token; with
+/// `--require-auth`, only those may write.
 fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
     let [branch] = args.exactly()?;
     let port: u16 = match args.options.get("port") {
@@ -412,10 +422,22 @@ fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
             .ok_or_else(|| format!("--max-connections {max:?} is not a positive number"))?,
         None => MAX_CONNECTIONS,
     };
+    let public_key = match args.options.get("public-key") {
+        Some(_) => Some(tokens::public_key(args)?),
+        None => None,
+    };
+    let require_auth = args.options.contains_key("require-auth");
+    if require_auth && public_key.is_none() {
+        return Err("--require-auth needs --public-key, to check the tokens against".to_owned());
+    }
     let committer = Committer::start(store);
-    let server = Server::new(branch, committer.writer(), committer.reader())
+    let mut server = Server::new(branch, committer.writer(), committer.reader())
         .map_err(|e| e.to_string())?
-        .max_connections(max_connections);
+        .max_connections(max_connections)
+        .require_auth(require_auth);
+    if let Some(public_key) = public_key {
+        server = server.public_key(public_key);
+    }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
     eprintln!("serving {branch} on 127.0.0.1:{port}");
     server.serve(listener)
