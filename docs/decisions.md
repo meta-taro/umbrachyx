@@ -652,14 +652,14 @@ erases the subject while the history keeps its shape (see
   file. Keeping the key file out of backups, or encrypting it under a key
   held elsewhere, is left to the operator for now.
 
-## Approving changes (proposal, not built)
+## Approving changes
 
 An agent's writes land on its branch, and a person decides what reaches
 `main`. Today that person has to know branches, diffs and merges. A
 viewer that tried it asked for less: a list of changes waiting, the diff,
 and approve or reject. This is the shape agreed with that viewer before
-building; it is the gate for the first public release with the speed
-work.
+building (`store/approvals.rs`, `server/review.rs`); the viewer's screen
+for it is the gate for the first public release, with the speed work.
 
 - **A change waiting is a branch with commits `main` does not have**,
   not approved or rejected yet. Every branch counts, not only agents', so
@@ -687,9 +687,9 @@ work.
   as the one who approved or rejected. Approving needs an operation that
   is never granted together with a branch to write to, so an agent's
   token cannot approve its own change, or any other. A token that can
-  approve cannot write; a person who also writes holds two tokens. An
-  approval records its approvers as a list, of one for now, so requiring
-  two later does not change the format.
+  approve cannot write; a person who also writes holds two tokens. The
+  merge records its approver in `approved_by`, one name; approvals by
+  two people would make it a list, a change of the log's format.
 - **A connection that has not authenticated** reads as before and may
   `SET` on the served branch, recorded with `unauthenticated` as who
   rather than an empty name; it may not approve or reject.
@@ -698,8 +698,12 @@ work.
 - **This is the one way a server writes to `main`.** The server still
   serves one branch for `SET`; `APPROVE` writes a merge to `main` and
   nothing else, and only for a token that may approve.
-- **The diff is `UMBRA.DIFF`**, with a page per table so a large change
-  can be read in parts.
+- **The diff is `UMBRA.DIFF`.** Reading a large change a table and a page
+  at a time is still to come.
+- **Refusals say why in their first word**, as Redis errors do:
+  `NOAUTH` without a token, `NOPERM` for a token that may not approve a
+  key the change touches, `NOTWAITING` when the branch is no longer at
+  the head given, `CONFLICT` followed by the keys both sides changed.
 - **A change is named by its branch and head, not its head alone.** A
   branch made from another starts at the same head, and the store
   simulation found a rejection landing on the branch it came from when

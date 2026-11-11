@@ -37,6 +37,7 @@ use crate::store::{CommitId, MAIN_BRANCH, Pending, Provenance, Reader, StoreErro
 mod history;
 mod keys;
 pub mod resp;
+mod review;
 mod session;
 
 pub use history::MAX_PAGE;
@@ -257,6 +258,11 @@ impl Server {
                 name.to_ascii_lowercase()
             )),
             _ => {
+                if let Some(reply) =
+                    review::answer(&self.writer, session, self.public_key, &name, args)
+                {
+                    return Some(Step::Reply(reply));
+                }
                 let view = self.reader.view();
                 if let Some(reply) = keys::answer(&view, &self.branch, &name, args) {
                     return Some(Step::Reply(reply));

@@ -84,6 +84,13 @@ impl Session {
         .map_err(no_permission)
     }
 
+    /// The token this connection authenticated with, and its holder.
+    pub(super) fn token(&self) -> Option<(&[u8], &Holder)> {
+        self.token
+            .as_ref()
+            .map(|(token, holder)| (token.as_slice(), holder))
+    }
+
     /// Who and why for a write from this connection.
     pub(super) fn provenance(&self, command: &str) -> Provenance {
         let who = match &self.token {

@@ -19,7 +19,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::{Clock, CommitId, CommitRequest, Inspect, Provenance, Store, StoreError, View};
+use super::{Clock, CommitId, CommitRequest, Inspect, Provenance, Review, Store, StoreError, View};
 use crate::log::record::{GROUP_OVERHEAD, commit_len};
 use crate::log::{Edit, LogError, MAX_PAYLOAD_LEN, Storage};
 
@@ -36,11 +36,14 @@ const MAX_GATHER: Duration = Duration::from_micros(500);
 enum Message {
     Commit(Job),
     Ask(Question),
+    Decide(Decision),
     Stop,
 }
 
 /// Reads the store and sends the answer back.
 type Question = Box<dyn FnOnce(&dyn Inspect) + Send>;
+/// Approves or rejects a change and sends the answer back.
+type Decision = Box<dyn FnOnce(&mut dyn Review) + Send>;
 
 struct Job {
     request: CommitRequest,
@@ -182,6 +185,20 @@ impl Writer {
         let _ = self.messages.send(Message::Ask(question));
         answer.recv().map_err(|_| StoreError::Stopped)
     }
+
+    /// Carries out `decision` on the store once the commits sent before it
+    /// are written, and publishes the view after it.
+    pub fn decide<T: Send + 'static>(
+        &self,
+        decision: impl FnOnce(&mut dyn Review) -> T + Send + 'static,
+    ) -> Result<T, StoreError> {
+        let (reply, answer) = mpsc::sync_channel(1);
+        let decision: Decision = Box::new(move |store| {
+            let _ = reply.send(decision(store));
+        });
+        let _ = self.messages.send(Message::Decide(decision));
+        answer.recv().map_err(|_| StoreError::Stopped)
+    }
 }
 
 /// A commit sent to a [`Committer`] and not yet answered.
@@ -227,6 +244,13 @@ fn run<S: Storage, C: Clock>(
             Message::Commit(job) => job,
             Message::Ask(question) => {
                 question(&store);
+                continue;
+            }
+            Message::Decide(decision) => {
+                decision(&mut store);
+                // An approval moves main; readers see it from here on.
+                let view = Arc::new(store.view());
+                *published.write().unwrap_or_else(PoisonError::into_inner) = view;
                 continue;
             }
             Message::Stop => return store,

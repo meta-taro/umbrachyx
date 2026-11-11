@@ -15,6 +15,7 @@ use super::{
     Clock, CommitId, Conflict, MAIN_BRANCH, Provenance, Rejection, Storage, Store, StoreError,
 };
 use crate::log::{Record, Reject};
+use crate::tree::Bytes;
 
 /// One change waiting, as a list of changes shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +107,20 @@ impl<S: Storage, C: Clock> Store<S, C> {
         });
         self.log.append(&record)?;
         self.apply(&record).map(drop)
+    }
+
+    /// The keys the change waiting on `branch` at `head` would change in
+    /// `main`, so a caller can check each against who may approve it.
+    pub fn change_keys(&self, branch: &str, head: &CommitId) -> Result<Vec<Bytes>, StoreError> {
+        self.require_waiting(branch, head)?;
+        let base = self
+            .head(MAIN_BRANCH)
+            .and_then(|main| self.merge_base(main, *head));
+        Ok(self
+            .diff(base.as_ref(), Some(head))?
+            .into_iter()
+            .map(|change| change.key)
+            .collect())
     }
 
     /// The last change rejected on `branch`.

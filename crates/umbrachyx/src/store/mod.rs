@@ -50,7 +50,7 @@ use tables::{Refusal, Tables};
 
 pub use approvals::{Approved, PendingChange};
 pub use committer::{Committer, Pending, Reader, Writer};
-pub use inspect::Inspect;
+pub use inspect::{Inspect, Review};
 pub use merge::{Conflict, Merged, Reverted, ValueChange};
 pub use view::View;
 
@@ -1089,7 +1089,7 @@ pub fn short(id: &CommitId) -> String {
     hex(id)[..12].to_owned()
 }
 
-fn hex(id: &CommitId) -> String {
+pub fn hex(id: &CommitId) -> String {
     id.iter().map(|b| format!("{b:02x}")).collect()
 }
 

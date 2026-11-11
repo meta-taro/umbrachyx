@@ -5,7 +5,10 @@
 //! answered there between groups of commits (see `Writer::ask`). The trait
 //! names only reads, so a question cannot write.
 
-use super::{Cell, Clock, CommitId, CommitInfo, Store, StoreError, ValueChange, decode_cell};
+use super::{
+    Approved, Cell, Clock, CommitId, CommitInfo, PendingChange, Provenance, Store, StoreError,
+    ValueChange, decode_cell,
+};
 use crate::log::{Engine, Storage};
 use crate::tree::Bytes;
 
@@ -34,6 +37,49 @@ pub trait Inspect {
     fn latest_tables(&self) -> Vec<Vec<u8>>;
     /// [`Store::omitted_tables`].
     fn omitted_tables(&self, from: Option<&CommitId>, to: Option<&CommitId>) -> Vec<Vec<u8>>;
+    /// [`Store::pending`].
+    fn pending(&self) -> Result<Vec<PendingChange>, StoreError>;
+    /// [`Store::change_keys`].
+    fn change_keys(&self, branch: &str, head: &CommitId) -> Result<Vec<Bytes>, StoreError>;
+}
+
+/// What a person decides about a change waiting ([`Store::approve`],
+/// [`Store::reject`]). Kept apart from [`Inspect`] so a question cannot
+/// write; it goes to the committer as a decision instead (see
+/// `Writer::decide`).
+pub trait Review {
+    fn approve(
+        &mut self,
+        branch: &str,
+        head: &CommitId,
+        provenance: Provenance,
+    ) -> Result<Approved, StoreError>;
+    fn reject(
+        &mut self,
+        branch: &str,
+        head: &CommitId,
+        provenance: Provenance,
+    ) -> Result<(), StoreError>;
+}
+
+impl<S: Storage, C: Clock> Review for Store<S, C> {
+    fn approve(
+        &mut self,
+        branch: &str,
+        head: &CommitId,
+        provenance: Provenance,
+    ) -> Result<Approved, StoreError> {
+        Store::approve(self, branch, head, provenance)
+    }
+
+    fn reject(
+        &mut self,
+        branch: &str,
+        head: &CommitId,
+        provenance: Provenance,
+    ) -> Result<(), StoreError> {
+        Store::reject(self, branch, head, provenance)
+    }
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
@@ -148,5 +194,13 @@ impl<S: Storage, C: Clock> Inspect for Store<S, C> {
 
     fn omitted_tables(&self, from: Option<&CommitId>, to: Option<&CommitId>) -> Vec<Vec<u8>> {
         Store::omitted_tables(self, from, to)
+    }
+
+    fn pending(&self) -> Result<Vec<PendingChange>, StoreError> {
+        Store::pending(self)
+    }
+
+    fn change_keys(&self, branch: &str, head: &CommitId) -> Result<Vec<Bytes>, StoreError> {
+        Store::change_keys(self, branch, head)
     }
 }
