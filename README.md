@@ -2,19 +2,66 @@
 
 **An in-memory database that keeps every change as history.**
 
+- **Every change is kept**, with who made it and why, to branch, diff,
+  merge and undo: per key and per cell, the way git keeps files.
+- **Agents write only to their own branch.** An agent's capability token
+  names its branch; nothing it holds can write to `main`. A person reads
+  the diff and merges it. [`docs/agents.md`](docs/agents.md) lists what a
+  hijacked agent was tested not to be able to do.
 - **Reads never wait for writes.** While 50 clients write durably, a `GET`
-  answers in tens of microseconds: about 18 times sooner than Valkey with
-  every write synced to disk on the AWS machine releases are measured on,
-  and about 650 times sooner on a laptop, where a sync costs more.
+  answers in tens of microseconds, about 18 times sooner than Valkey with
+  every write synced, on the machine releases are measured on.
 - **Nothing acknowledged is lost.** Killed mid-write 1,100 times with
   843,005 writes acknowledged on the release machine, and put through
   more than 400,000 simulated restarts after power cuts and disk faults:
   not one acknowledged write went missing.
-- **Every change is kept**, with who made it and why, to branch, diff,
-  merge and undo.
 
-Measured on AWS, on a laptop and on a Linux CI runner, against Valkey and
-Dolt, with the raw output published. [Where it is slower](#numbers-so-far) is in the same table.
+It is not a faster Valkey. For plain reads and writes Valkey is ahead
+(about 1.3 times for one client, twice for 50), and keeping history costs
+far more memory (about 3 KB a write against 16 bytes). Both are in
+[the same table](#numbers-so-far) as the rows where Umbrachyx is ahead,
+measured on AWS, a laptop and a Linux CI runner against Valkey and Dolt,
+with the raw output published.
+
+## Quick start
+
+Five minutes, with the command-line tool: write, let an agent change a
+branch, read the diff, and merge it as a person.
+
+```console
+$ cargo build --release && export PATH="$PWD/target/release:$PATH"
+$ export UMBRACHYX_DB="$PWD/quick.log"
+$ umbrachyx table pos latest --who you --why "positions need no past"
+declared pos latest
+$ umbrachyx commit main player/42/gems=100 pos/42/x=10 --who you --why "first data"
+committed 186dd36a0364 to main
+$ umbrachyx branch agent/support --from main
+created agent/support from main
+$ umbrachyx commit agent/support player/42/gems=150 --who agent:support --why "ticket 8812"
+committed 63d11a6ea0f1 to agent/support
+$ umbrachyx diff main agent/support
+~ player/42/gems: 100 -> 150
+$ umbrachyx merge main agent/support --who you --why "checked ticket 8812"
+merged fae80a1d255d
+$ umbrachyx history main player/42/gems
+2026-11-11T07:43:46Z  fae80a1d255d  150  by you  "checked ticket 8812"
+2026-11-11T07:43:45Z  186dd36a0364  100  by you  "first data"
+$ umbrachyx history agent/support player/42/gems
+2026-11-11T07:43:45Z  63d11a6ea0f1  150  by agent:support  "ticket 8812"
+2026-11-11T07:43:45Z  186dd36a0364  100  by you  "first data"
+```
+
+- **Declare a table before its first write.** `pos` keeps only its latest
+  values; once a table has keys, its engine can no longer be declared
+  and `table` refuses. Undeclared tables keep their history.
+- **On `main`, a merge is the change.** It is credited to whoever merged;
+  the agent's own commit, with its reason, stays on its branch.
+- Here the agent is played by hand with `--who`. A real agent gets a token
+  for its branch and talks to `umbrachyx mcp`; [`docs/agents.md`](docs/agents.md)
+  sets one up. To watch the same history in a viewer, `umbrachyx serve
+  <branch>` speaks the Redis protocol with `UMBRA.*` commands for history.
+- **No format is stable yet.** A later version may not open a log this
+  one wrote; keep the commands that load your data, not the log.
 
 Umbrachyx is meant to read and write at memory speed. Behind every value sits
 its full history: when it changed, from what, to what, who changed it, why,
@@ -85,6 +132,15 @@ threads before it is answered, and with 50 readers much of the server's
 time goes to walking the tree from node to node. The runner is noisy: its
 two runs differ by up to a third. The 256-writer row measures Umbrachyx in
 process and Valkey over loopback; the diff row includes Dolt's SQL layer.
+
+Rough sizes from the AWS run, in memory, per key written once and per
+later overwrite (`bench/memory.sh`, 200,000 keys):
+
+| | A million keys, each written once | Each overwrite after that |
+|---|---|---|
+| Umbrachyx, history | about 2.4 GB | about 3.1 KB |
+| Umbrachyx, latest-value table | about 0.7 GB | about 650 bytes |
+| Valkey | about 55 MB | about 16 bytes |
 
 Memory is where Umbrachyx loses most. Valkey keeps only the current value
 of each key; Umbrachyx also keeps every commit (who, why, when), the
