@@ -38,6 +38,7 @@ use crate::tree::{Bytes, Tree};
 
 mod approvals;
 mod committer;
+mod export;
 mod inspect;
 mod latest;
 mod merge;
@@ -93,6 +94,9 @@ pub struct Provenance {
     pub why: String,
     pub approved_by: Option<String>,
 }
+
+/// A record read back from the log, with the ids of the commits it held.
+type Replayed = (Record, Vec<CommitId>);
 
 /// One commit asked of [`Store::commit_all`].
 #[derive(Debug, Clone)]
@@ -403,6 +407,17 @@ impl<S: Storage, C: Clock> Store<S, C> {
     }
 
     fn open_with(storage: S, clock: C, sealer: Option<Sealer>) -> Result<Self, StoreError> {
+        Self::replay(storage, clock, sealer, false).map(|(store, _)| store)
+    }
+
+    /// Opens the log and replays every record. With `keep`, also returns
+    /// each record with the ids of the commits it held.
+    fn replay(
+        storage: S,
+        clock: C,
+        sealer: Option<Sealer>,
+        keep: bool,
+    ) -> Result<(Self, Vec<Replayed>), StoreError> {
         let (log, records) = Log::open(storage)?;
         if let Some(sealer) = &sealer {
             check_sealed(&records, &sealer.ring())?;
@@ -435,10 +450,14 @@ impl<S: Storage, C: Clock> Store<S, C> {
             rejections: BTreeMap::new(),
             decisions: Vec::new(),
         };
-        for record in &records {
-            store
-                .apply(record)
+        let mut replayed = Vec::new();
+        for record in records {
+            let ids = store
+                .apply(&record)
                 .map_err(|e| StoreError::Inconsistent(e.to_string()))?;
+            if keep {
+                replayed.push((record, ids));
+            }
         }
         // An erasure is logged before its key is destroyed; finish any a
         // crash cut short. Only now, after the log checked out against the
@@ -448,7 +467,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 sealer.erase_fingerprint(fingerprint)?;
             }
         }
-        Ok(store)
+        Ok((store, replayed))
     }
 
     /// Writes `edits` to `branch` as one commit and returns its id once it

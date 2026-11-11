@@ -276,3 +276,44 @@ fn serve_reserves_its_log_and_other_commands_still_read_it() {
     assert_eq!(String::from_utf8_lossy(&both[0].stdout).trim(), "1");
     assert_eq!(String::from_utf8_lossy(&both[1].stdout).trim(), "2");
 }
+
+#[test]
+fn export_prints_the_log_as_one_json_record_a_line() {
+    let dir = TempDir::new("export");
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+    assert!(
+        dir.run(&[
+            "commit",
+            BRANCH,
+            "player/1/gems=40",
+            "--who",
+            "agent-7",
+            "--why",
+            "refund",
+        ])
+        .status
+        .success()
+    );
+
+    let output = dir.run(&["export"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["record"], "branch");
+    assert_eq!(lines[1]["who"], "agent-7");
+    assert_eq!(lines[1]["changes"][0]["key"], "player/1/gems");
+    assert_eq!(lines[1]["changes"][0]["value"], "40");
+    // The log is as it was: the next command reads the same value.
+    let read = dir.run(&["get", BRANCH, "player/1/gems"]);
+    assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), "40");
+}

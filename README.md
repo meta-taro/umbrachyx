@@ -54,6 +54,9 @@ $ umbrachyx history agent/support player/42/gems
 - **Declare a table before its first write.** `pos` keeps only its latest
   values; once a table has keys, its engine can no longer be declared
   and `table` refuses. Undeclared tables keep their history.
+- **`umbrachyx export` prints the whole log as JSON Lines**, one record a
+  line, to search with `jq` or `grep`:
+  `umbrachyx export | jq 'select(.who == "agent:support")'`.
 - **On `main`, a merge is the change.** It is credited to whoever merged;
   the agent's own commit, with its reason, stays on its branch.
 - Here the agent is played by hand with `--who`. A real agent gets a token

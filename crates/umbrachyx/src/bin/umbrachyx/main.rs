@@ -1,7 +1,8 @@
 //! Command-line access to a store: write commits, read values and their
 //! history, branch, diff, merge, undo a commit, erase a subject, declare how
-//! a table is held, and serve a branch over the Redis protocol. Also makes
-//! the root key and the capability tokens that agents carry.
+//! a table is held, write the log out as JSON Lines, and serve a branch over
+//! the Redis protocol. Also makes the root key and the capability tokens
+//! that agents carry.
 //!
 //! The log file is named by `UMBRACHYX_DB`. Values are encrypted under a key
 //! per subject, kept in the file next to it with `.keys` added to its name.
@@ -9,6 +10,7 @@
 //! conflicts, and 2 on any other error.
 
 use std::collections::HashMap;
+use std::io::{BufWriter, ErrorKind, Write};
 use std::net::{Ipv4Addr, TcpListener};
 use std::process::ExitCode;
 
@@ -54,6 +56,9 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               how the table <name>/... is held; latest keeps
                               only current values. Only before its first write
   tables                      every declared table and its engine
+  export                      every record of the log as a line of JSON, for
+                              jq and grep: commits with their changes,
+                              branches, tables, rejections and erasures
   serve <branch> [--port P] [--max-connections N] [--public-key K [--require-auth]]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history.
@@ -183,6 +188,9 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let keys_path = format!("{path}.keys");
     let key_storage: Box<dyn KeyStorage + Send> = Box::new(FileKeyStorage::new(keys_path.as_ref()));
     let keys = Keys::open(key_storage).map_err(|e| format!("{keys_path}: {e}"))?;
+    if command == "export" {
+        return export(storage, keys, &args).map_err(|e| format!("{path}: {e}"));
+    }
     let mut store =
         Store::open_sealed(storage, keys, SystemClock).map_err(|e| format!("{path}: {e}"))?;
     match command.as_str() {
@@ -201,6 +209,26 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         "serve" => serve(store, &args),
         "mcp" => tokens::mcp(store, &args),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
+    }
+}
+
+/// Prints every record of the log, a line of JSON each. A reader that
+/// stops early, such as `head`, is not an error.
+fn export(
+    storage: FileStorage,
+    keys: Keys<Box<dyn KeyStorage + Send>>,
+    args: &Args,
+) -> Result<ExitCode, String> {
+    let [] = args.exactly()?;
+    let lines = FileStore::export(storage, keys, SystemClock).map_err(|e| e.to_string())?;
+    let mut out = BufWriter::new(std::io::stdout().lock());
+    let written = lines
+        .iter()
+        .try_for_each(|line| writeln!(out, "{line}"))
+        .and_then(|()| out.flush());
+    match written {
+        Err(error) if error.kind() != ErrorKind::BrokenPipe => Err(error.to_string()),
+        _ => Ok(ExitCode::SUCCESS),
     }
 }
 

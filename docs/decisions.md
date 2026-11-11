@@ -95,6 +95,17 @@ without an entry here is not adopted.
 - **The log file is locked by one writer at a time**, so two processes cannot
   interleave records.
 
+- **The log stays binary; `umbrachyx export` writes it out as JSON Lines.**
+  One record a line, in log order, so `jq` and `grep` can search the whole
+  history: commits with their changes, branches, tables, rejections and
+  erasures. A log of JSON itself was not taken: values are any bytes and
+  are encrypted, so they would be hex or base64 either way, each write
+  would pay for the text, and a line cut short by a crash still needs a
+  length and a checksum to tell it from damage. The export opens values
+  with the key file; a value whose subject was erased is `null` with
+  `"erased": true`. It opens the log like any other command, so it is
+  refused while a server holds the log.
+
 ### What a durable write costs
 
 Measured with `cargo run --release --example sync_latency` (2,000 writes of
