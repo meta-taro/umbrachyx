@@ -44,6 +44,7 @@ mod export;
 mod inspect;
 mod latest;
 mod merge;
+mod replica;
 mod seal;
 mod tables;
 mod view;
