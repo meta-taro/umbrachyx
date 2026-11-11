@@ -17,12 +17,12 @@ pub(super) enum Node {
     Leaf {
         entries: Vec<Entry>,
         hash: OnceLock<Digest>,
-        index: OnceLock<KeyIndex>,
+        index: OnceLock<Arc<KeyIndex>>,
     },
     Internal {
         children: Vec<Child>,
         hash: OnceLock<Digest>,
-        index: OnceLock<KeyIndex>,
+        index: OnceLock<Arc<KeyIndex>>,
     },
 }
 
@@ -55,6 +55,31 @@ impl Node {
             hash: OnceLock::new(),
             index: OnceLock::new(),
         })
+    }
+
+    /// A leaf with `entries`, whose keys are exactly `like`'s: it takes
+    /// over the key index `like` has built, if any.
+    pub fn leaf_with_keys_of(like: &Self, entries: Vec<Entry>) -> Arc<Self> {
+        Arc::new(Self::Leaf {
+            entries,
+            hash: OnceLock::new(),
+            index: like.built_index(),
+        })
+    }
+
+    /// An internal node with `children`, whose last keys are exactly
+    /// `like`'s: it takes over the key index `like` has built, if any.
+    pub fn internal_with_keys_of(like: &Self, children: Vec<Child>) -> Arc<Self> {
+        Arc::new(Self::Internal {
+            children,
+            hash: OnceLock::new(),
+            index: like.built_index(),
+        })
+    }
+
+    fn built_index(&self) -> OnceLock<Arc<KeyIndex>> {
+        let (Self::Leaf { index, .. } | Self::Internal { index, .. }) = self;
+        index.get().cloned().map(OnceLock::from).unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -357,11 +382,13 @@ impl Node {
     pub fn key_index(&self) -> &KeyIndex {
         match self {
             Self::Leaf { entries, index, .. } => {
-                index.get_or_init(|| KeyIndex::new(entries.iter().map(|(key, _)| &**key)))
+                index.get_or_init(|| Arc::new(KeyIndex::new(entries.iter().map(|(key, _)| &**key))))
             }
             Self::Internal {
                 children, index, ..
-            } => index.get_or_init(|| KeyIndex::new(children.iter().map(|c| &*c.last_key))),
+            } => {
+                index.get_or_init(|| Arc::new(KeyIndex::new(children.iter().map(|c| &*c.last_key))))
+            }
         }
     }
 }

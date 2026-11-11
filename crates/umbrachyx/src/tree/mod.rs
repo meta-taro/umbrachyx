@@ -205,10 +205,18 @@ impl Tree {
 /// how many of `batch` were new keys. `batch` is sorted and every key in it
 /// belongs under `node`. An insert never moves the last key of a node other
 /// than the last one, so every node it returns but the last is closed.
+///
+/// When no key is new, which is every overwrite, the keys under `node` are
+/// what they were, so are the places nodes end: each node on the way is
+/// replaced by one with the same keys, without working out the cuts again,
+/// and takes over the key index its predecessor built.
 fn insert_into(node: &Node, level: u32, batch: &[Entry]) -> (Vec<Arc<Node>>, usize) {
     match node {
         Node::Leaf { entries, .. } => {
             let (merged, added) = merge_sorted(entries, batch);
+            if added == 0 {
+                return (vec![Node::leaf_with_keys_of(node, merged)], 0);
+            }
             (split_leaf(merged), added)
         }
         Node::Internal { children, .. } => {
@@ -231,6 +239,9 @@ fn insert_into(node: &Node, level: u32, batch: &[Entry]) -> (Vec<Arc<Node>>, usi
                 new_children.extend(replaced.into_iter().map(Child::of));
                 added += count;
                 rest = after;
+            }
+            if added == 0 {
+                return (vec![Node::internal_with_keys_of(node, new_children)], 0);
             }
             (split_internal(new_children, level), added)
         }

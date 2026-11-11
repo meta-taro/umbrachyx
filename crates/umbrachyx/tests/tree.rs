@@ -350,3 +350,37 @@ fn iter_after_matches_the_model_from_any_key() {
         }
     }
 }
+
+/// Overwriting keys that are already there, one at a time and in batches,
+/// with lookups in between so nodes carry their key index along: the tree
+/// reads back the new values and has the shape of one built from them.
+#[test]
+fn overwriting_existing_keys_keeps_the_shape_and_reads_the_new_values() {
+    for seed in 0..5 {
+        let mut rng = Rng(seed + 100);
+        let key_space = 20_000;
+        let mut model = starting_model(&mut rng, key_space);
+        let keys: Vec<Bytes> = model.keys().cloned().collect();
+        let mut tree = build(&model);
+
+        for round in 0..2_000 {
+            let batch: Model = (0..1 + round % 4)
+                .map(|_| {
+                    let key = keys[rng.below(keys.len() as u64) as usize].clone();
+                    (key, value(&mut rng))
+                })
+                .collect();
+            tree = tree.insert_sorted(batch.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+            for (key, value) in batch {
+                assert_eq!(tree.get(&key), Some(&value), "seed {seed} round {round}");
+                model.insert(key, value);
+            }
+        }
+
+        assert_eq!(tree.len(), model.len());
+        assert_eq!(tree.root_hash(), build(&model).root_hash(), "seed {seed}");
+        for (key, value) in &model {
+            assert_eq!(tree.get(key), Some(value), "seed {seed}");
+        }
+    }
+}
