@@ -484,6 +484,22 @@ checker to hold the shared secret that mints tokens.
   diff between commits on different branches when neither is a head.
   **Look again if** a command people use reads whole old states often:
   a few trees remembered after they are made would bound it.
+- **Where the time goes with 256 clients writing** (profiled; one change
+  tried and not taken). In a Linux virtual machine with 2 virtual CPUs,
+  256 clients each waiting for its reply get about 90,000 to 98,000 SETs
+  a second where Valkey with `appendfsync always` gets 250,000 to
+  268,000. The sync is not what holds it back there: the one thread that
+  writes takes 77% of the server's processor time, and of that about 35%
+  is putting the group's cells into the tree, 20% reading the cell each
+  write replaces, 19% freeing the tree nodes the group replaced when the
+  view before is dropped, 8% hashing commit ids and 6% encrypting.
+  Dropping the replaced view on a thread of its own changed nothing
+  (89,000 to 99,000 over three runs, as before): with the benchmark's
+  client on the same two processors, work moved to another thread is
+  still work on them. It was taken out again. **Try it again** on a
+  machine with processors to spare, and look first at the work itself:
+  a leaf is copied whole, 32 keys and 32 values each counted up and
+  later down, for one changed value.
 - **No hash index of current values beside the tree** (measured, not
   taken). A table that keeps its history answers a `GET` by walking the
   prolly tree; an index of current values would answer it with one
