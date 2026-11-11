@@ -130,6 +130,65 @@ impl Storage for CountingStorage {
     }
 }
 
+/// A sync this slow makes a read that waits for it unmistakable.
+struct VerySlowSync(FileStorage);
+
+const VERY_SLOW_SYNC: Duration = Duration::from_millis(400);
+
+impl Storage for VerySlowSync {
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        self.0.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.0.append(bytes)
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        thread::sleep(VERY_SLOW_SYNC);
+        self.0.sync()
+    }
+
+    fn truncate(&mut self, len: u64) -> io::Result<()> {
+        self.0.truncate(len)
+    }
+}
+
+/// A read never waits for a write's sync, also when one thread serves the
+/// reader and the writer: with every sync taking 400 ms, a GET sent while
+/// another connection's SET is being synced is answered long before.
+#[test]
+fn a_read_does_not_wait_for_another_connections_sync() {
+    let dir = TempDir::new("read-during-sync");
+    let storage = VerySlowSync(FileStorage::open(&dir.0.join("log")).expect("opens file"));
+    let (_committer, address) = serve_store(storage, |server| server.threads(1));
+    let mut writer = TcpStream::connect(address).expect("connects");
+    let mut reader = TcpStream::connect(address).expect("connects");
+    // Both connections are with the serving thread before the SET goes.
+    reader.write_all(&command(&["PING"])).expect("sends");
+    assert_eq!(read_reply(&mut reader, b"+PONG\r\n"), b"+PONG\r\n");
+    writer.write_all(&command(&["PING"])).expect("sends");
+    assert_eq!(read_reply(&mut writer, b"+PONG\r\n"), b"+PONG\r\n");
+
+    writer
+        .write_all(&command(&["SET", "player/1/gold", "100"]))
+        .expect("sends");
+    thread::sleep(VERY_SLOW_SYNC / 8);
+    let asked = std::time::Instant::now();
+    reader
+        .write_all(&command(&["GET", "player/1/gold"]))
+        .expect("sends");
+    let nothing_yet = read_reply(&mut reader, b"$-1\r\n");
+    let waited = asked.elapsed();
+
+    assert_eq!(nothing_yet, b"$-1\r\n", "the SET is not durable yet");
+    assert!(
+        waited < VERY_SLOW_SYNC / 4,
+        "the read waited {waited:?} behind a sync of {VERY_SLOW_SYNC:?}"
+    );
+    assert_eq!(read_reply(&mut writer, b"+OK\r\n"), b"+OK\r\n");
+}
+
 /// SETs sent together share syncs rather than waiting for one each, and
 /// are answered in order; a command after them sees them all.
 #[test]

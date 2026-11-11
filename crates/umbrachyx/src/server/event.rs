@@ -7,23 +7,28 @@
 //! of its sockets have something to read, and takes them in turn:
 //!
 //! 1. it reads each and carries out the commands, queueing the `SET`s;
-//! 2. it waits for the queued `SET`s, which writes them, and those other
-//!    threads queued meanwhile, as one group with one sync;
-//! 3. it sends each connection its replies.
+//! 2. it sends each connection the replies that are ready.
 //!
-//! So the `SET`s that arrive together on many connections share a sync
-//! without any of them being handed to another thread. Reads are answered
-//! from a view and never wait for that sync; several threads answer them at
-//! once, which one thread serving every connection could not.
+//! It never waits for a sync. One more thread does: it writes the `SET`s
+//! every serving thread queued, as one group with one sync, and tells the
+//! serving threads, which then send those replies. A serving thread that
+//! waited for the sync itself would keep every other connection it serves
+//! waiting too, and a read must never wait for a write. A connection's own
+//! commands stay in order: one that is not a `SET` is not carried out
+//! until the `SET`s before it are answered, so it reads what they wrote.
+//!
+//! Reads are answered from a view, on every serving thread at once, which
+//! one thread serving every connection could not.
 //!
 //! A connection whose client does not read its replies is not read from
 //! until it does, so the replies waiting for it stay bounded.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::TcpStream as StdStream;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -32,8 +37,8 @@ use mio::{Events, Interest, Poll, Token, Waker};
 
 use super::resp::{self, Reply};
 use super::session::Session;
-use super::{MAX_PENDING_OUT, READ_CHUNK, Server, Slot, settle};
-use crate::store::Pending;
+use super::{MAX_PENDING_OUT, READ_CHUNK, Server, Slot, Step, is_set, set_reply};
+use crate::store::{Pending, Writer};
 
 /// The token of the waker that announces new connections.
 const WAKE: Token = Token(usize::MAX);
@@ -42,6 +47,51 @@ const EVENTS: usize = 1024;
 /// Bytes read from one connection before the others get their turn.
 const READ_BUDGET: usize = 1024 * 1024;
 
+/// Whether commits are queued for the thread that writes them.
+#[derive(Default)]
+pub(super) struct Queued {
+    some: Mutex<bool>,
+    told: Condvar,
+}
+
+impl Queued {
+    fn tell(&self) {
+        *self.some.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.told.notify_one();
+    }
+
+    /// Sleeps until told.
+    fn wait(&self) {
+        let mut some = self.some.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*some {
+            some = self.told.wait(some).unwrap_or_else(PoisonError::into_inner);
+        }
+        *some = false;
+    }
+}
+
+/// Starts the thread that writes the commits the serving threads queue,
+/// and wakes them once each group is durable.
+pub(super) fn spawn_writer(
+    writer: Writer,
+    queued: Arc<Queued>,
+    wakers: Vec<Arc<Waker>>,
+) -> io::Result<()> {
+    thread::Builder::new()
+        .name("resp commits".to_owned())
+        .spawn(move || {
+            loop {
+                queued.wait();
+                writer.write_queued();
+                for waker in &wakers {
+                    // A failed wake leaves the replies for the next one.
+                    let _ = waker.wake();
+                }
+            }
+        })
+        .map(drop)
+}
+
 /// One thread's end of the server: where new connections are handed to it.
 pub(super) struct Handle {
     incoming: Sender<(StdStream, Slot)>,
@@ -49,6 +99,10 @@ pub(super) struct Handle {
 }
 
 impl Handle {
+    pub(super) fn waker(&self) -> Arc<Waker> {
+        Arc::clone(&self.waker)
+    }
+
     /// Hands a connection to the thread. If the thread is gone, the
     /// connection is dropped, which closes it.
     pub(super) fn give(&self, stream: StdStream, slot: Slot) {
@@ -69,6 +123,7 @@ pub(super) fn spawn(server: Server, number: usize) -> io::Result<Handle> {
         poll,
         incoming: received,
         connections: HashMap::new(),
+        awaiting: HashSet::new(),
         next_token: 0,
         chunk: vec![0; READ_CHUNK],
     };
@@ -86,8 +141,9 @@ struct Connection {
     /// Replies not yet sent, from `sent` on.
     out: Vec<u8>,
     sent: usize,
-    /// `SET`s queued and not yet answered, in order.
-    unanswered: Vec<Pending>,
+    /// `SET`s queued and not yet answered, in order, and any reply that
+    /// has to go out after one of them.
+    unanswered: VecDeque<Outgoing>,
     /// Close once the replies are sent: the client hung up, or sent
     /// something that is not the protocol.
     is_closing: bool,
@@ -96,7 +152,18 @@ struct Connection {
     /// Whole commands may be waiting in `input`: carrying them out stopped
     /// for the replies to be sent first.
     has_backlog: bool,
+    /// A command that is not a `SET` waits in `input` for the `SET`s
+    /// before it to be answered.
+    is_waiting: bool,
     _slot: Slot,
+}
+
+/// A reply on its way, in the order its command came.
+enum Outgoing {
+    /// A `SET` being written.
+    Waiting(Pending),
+    /// A reply held back behind one.
+    Ready(Reply),
 }
 
 /// What became of a connection after its replies were sent.
@@ -114,6 +181,8 @@ struct Loop {
     poll: Poll,
     incoming: Receiver<(StdStream, Slot)>,
     connections: HashMap<usize, Connection>,
+    /// The connections with `SET`s being written.
+    awaiting: HashSet<usize>,
     next_token: usize,
     /// What a read fills, shared by every connection.
     chunk: Vec<u8>,
@@ -136,7 +205,10 @@ impl Loop {
             let mut ready = std::mem::take(&mut again);
             for event in &events {
                 if event.token() == WAKE {
+                    // New connections, or commits written: either way the
+                    // connections with SETs out are worth another look.
                     self.adopt(&mut ready);
+                    ready.extend(&self.awaiting);
                 } else {
                     ready.push(event.token().0);
                 }
@@ -147,28 +219,34 @@ impl Loop {
         }
     }
 
-    /// Reads, writes what was queued, and replies, for each ready
+    /// Delivers what was written, reads, and replies, for each ready
     /// connection.
     fn take_turns(&mut self, ready: &[usize], again: &mut Vec<usize>) {
+        let mut has_queued = false;
         for token in ready {
             if let Some(connection) = self.connections.get_mut(token) {
+                connection.deliver();
+                let before = connection.unanswered.len();
                 connection.read(&self.server, &mut self.chunk);
+                has_queued |= connection.unanswered.len() > before;
             }
         }
-        // After every connection was read, so that their SETs are queued
-        // together and the first wait writes them all.
-        for token in ready {
-            if let Some(connection) = self.connections.get_mut(token) {
-                settle(&mut connection.unanswered, &mut connection.out);
-            }
+        if has_queued {
+            self.server.queued.tell();
         }
         for token in ready {
             let Some(connection) = self.connections.get_mut(token) else {
                 continue;
             };
+            if connection.unanswered.is_empty() {
+                self.awaiting.remove(token);
+            } else {
+                self.awaiting.insert(*token);
+            }
             let was_blocked = connection.is_blocked;
+            let is_done = connection.is_closing && connection.unanswered.is_empty();
             match connection.send() {
-                Sent::All if connection.is_closing => self.close(*token),
+                Sent::All if is_done => self.close(*token),
                 Sent::All => {
                     connection.is_blocked = false;
                     if was_blocked && !self.listen(*token, Interest::READABLE) {
@@ -212,10 +290,11 @@ impl Loop {
                     input: Vec::new(),
                     out: Vec::new(),
                     sent: 0,
-                    unanswered: Vec::new(),
+                    unanswered: VecDeque::new(),
                     is_closing: false,
                     is_blocked: false,
                     has_backlog: false,
+                    is_waiting: false,
                     _slot: slot,
                 },
             );
@@ -241,6 +320,7 @@ impl Loop {
     }
 
     fn close(&mut self, token: usize) {
+        self.awaiting.remove(&token);
         if let Some(mut connection) = self.connections.remove(&token) {
             // The socket closes when dropped; not being watched any more
             // only matters if that somehow fails.
@@ -250,18 +330,34 @@ impl Loop {
 }
 
 impl Connection {
+    /// Moves to `out` the replies of the `SET`s written since the last
+    /// look, and what was held back behind them, as far as they are ready.
+    fn deliver(&mut self) {
+        while let Some(front) = self.unanswered.front_mut() {
+            match front {
+                Outgoing::Waiting(pending) => match pending.poll() {
+                    Some(answer) => set_reply(answer).write_to(&mut self.out),
+                    None => return,
+                },
+                Outgoing::Ready(reply) => reply.write_to(&mut self.out),
+            }
+            self.unanswered.pop_front();
+        }
+    }
+
     /// Reads what has arrived and carries out the whole commands in it.
     /// Stops at the read budget, and reads nothing while replies wait for
-    /// the client to take them.
+    /// the client to take them, nor while a command waits for the `SET`s
+    /// before it.
     fn read(&mut self, server: &Server, chunk: &mut [u8]) {
         if self.is_blocked || self.is_closing {
             return;
         }
-        if self.has_backlog {
+        if self.has_backlog || self.is_waiting {
             self.execute(server);
         }
         let mut budget = READ_BUDGET;
-        while !self.has_backlog && !self.is_closing && budget > 0 {
+        while !self.has_backlog && !self.is_waiting && !self.is_closing && budget > 0 {
             match self.stream.read(chunk) {
                 Ok(0) => self.is_closing = true,
                 Ok(read) => {
@@ -289,10 +385,13 @@ impl Connection {
         self.has_backlog |= budget == 0;
     }
 
-    /// Carries out the whole commands in `input`, until the replies
-    /// waiting to be sent are many enough that they should go first.
+    /// Carries out the whole commands in `input`. Stops when the replies
+    /// waiting to be sent are many enough that they should go first, and
+    /// at a command that is not a `SET` while `SET`s before it are still
+    /// being written: it must read what they wrote.
     fn execute(&mut self, server: &Server) {
         self.has_backlog = false;
+        self.is_waiting = false;
         let mut used = 0;
         let result = loop {
             if self.out.len() - self.sent >= MAX_PENDING_OUT {
@@ -300,14 +399,19 @@ impl Connection {
                 break Ok(());
             }
             match resp::parse(&self.input[used..]) {
+                Ok(Some((command, _))) if !is_set(&command) && !self.unanswered.is_empty() => {
+                    self.is_waiting = true;
+                    break Ok(());
+                }
                 Ok(Some((command, len))) => {
                     used += len;
-                    server.answer(
-                        &command,
-                        &mut self.session,
-                        &mut self.unanswered,
-                        &mut self.out,
-                    );
+                    match server.execute(&command, &mut self.session) {
+                        Some(Step::Sent(commit)) => {
+                            self.unanswered.push_back(Outgoing::Waiting(commit));
+                        }
+                        Some(Step::Reply(reply)) => self.reply(reply),
+                        None => {}
+                    }
                 }
                 Ok(None) => break Ok(()),
                 Err(error) => break Err(error),
@@ -315,9 +419,17 @@ impl Connection {
         };
         self.input.drain(..used);
         if let Err(error) = result {
-            settle(&mut self.unanswered, &mut self.out);
-            Reply::Error(format!("ERR {error}")).write_to(&mut self.out);
+            self.reply(Reply::Error(format!("ERR {error}")));
             self.is_closing = true;
+        }
+    }
+
+    /// Sends `reply` now, or after the `SET`s still being written.
+    fn reply(&mut self, reply: Reply) {
+        if self.unanswered.is_empty() {
+            reply.write_to(&mut self.out);
+        } else {
+            self.unanswered.push_back(Outgoing::Ready(reply));
         }
     }
 

@@ -126,6 +126,8 @@ trait Engine: Send + Sync {
     fn turns(&self) -> &Turns;
     /// Writes a group and answers it. The caller holds the turn.
     fn write(&self, group: Vec<Job>);
+    /// Writes everything queued. The caller holds the turn.
+    fn write_queue(&self);
     /// Whether the store was there to ask. The caller holds the turn.
     fn inspect(&self, question: Question<'_>) -> bool;
     /// As `inspect`, and publishes the view after it.
@@ -189,6 +191,10 @@ where
 
     fn write(&self, group: Vec<Job>) {
         Core::write(self, group);
+    }
+
+    fn write_queue(&self) {
+        Core::write_queue(self);
     }
 
     fn inspect(&self, question: Question<'_>) -> bool {
@@ -322,6 +328,15 @@ impl Writer {
         }
     }
 
+    /// Writes every commit queued so far and answers them, on this thread.
+    /// For a thread kept for that, so that the threads that sent the
+    /// commits need not wait for the sync: they ask each [`Pending`] with
+    /// [`Pending::poll`] afterwards.
+    pub fn write_queued(&self) {
+        let _turn = self.engine.turns().take();
+        self.engine.write_queue();
+    }
+
     /// Answers `question` from the store once the commits sent before it
     /// are written. It waits behind their sync, so it suits a person
     /// reading the history, not a hot path; reads of live values go
@@ -352,6 +367,12 @@ pub struct Pending {
 }
 
 impl Pending {
+    /// The answer, if the commit has been written, without waiting or
+    /// writing. The answer is given once.
+    pub fn poll(&mut self) -> Option<Result<CommitId, StoreError>> {
+        self.answer.take()
+    }
+
     /// The commit's id once it is durable. If nobody is writing, this
     /// thread writes: its own commit and every other one queued.
     pub fn wait(self) -> Result<CommitId, StoreError> {

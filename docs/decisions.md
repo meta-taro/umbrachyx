@@ -518,8 +518,8 @@ checker to hold the shared secret that mints tokens.
 - **A few threads serve all the connections, each waiting on many sockets
   at once; no async runtime.** A thread asks the operating system which of
   its sockets have something to read, reads each and carries out the
-  commands, waits once for the `SET`s they queued, which writes them with
-  one sync, and sends the replies. There are as many threads as
+  commands, queueing the `SET`s, and sends the replies that are ready.
+  There are as many threads as
   processors, up to four (`Server::threads`), and a new connection goes to
   the next in turn. At most 1,024 connections unless `serve
   --max-connections` says otherwise; one past the limit is told so and
@@ -532,6 +532,23 @@ checker to hold the shared secret that mints tokens.
     326,000 and 305,000; durable `SET`s from 256 clients from about 78,000
     to about 120,000, where Valkey did 128,000. It also ends the thread
     limit that kept macOS from serving 10,000 connections.
+  - **A serving thread never waits for a sync; one more thread does.** It
+    writes the `SET`s every serving thread queued, as one group with one
+    sync, and wakes them to send those replies. The first version had each
+    serving thread wait for its own `SET`s, which saved handing them over
+    and made every other connection on that thread wait for the sync too:
+    a `GET` while 50 clients wrote, the row this server is built for, went
+    from a slowest percent of 0.04 ms to 19 ms on the laptop. A test now
+    holds a sync for 400 ms on a server with one serving thread and expects
+    another connection's `GET` answered long before. With the writing
+    thread, in the virtual machine: that `GET` at a median of 0.006 ms and
+    a slowest percent of 0.047 ms, where Valkey's are 0.5 ms and 4.2 ms.
+    The hand-over costs a lone writer about 20 µs: a durable `SET` from one
+    client runs at about 9,800 a second over the server, not the 12,100 of
+    a writer that writes for itself, and Valkey's at about 5,200.
+  - **A connection's own commands stay in order.** One that is not a `SET`
+    is not carried out until the `SET`s before it are answered, so it reads
+    what they wrote; the `SET`s after a `SET` are queued without waiting.
   - **What it cost:** a `GET` from one client went from about 32,000 a
     second to about 28,600, the same as Valkey's 28,700. A thread that
     blocks on its one socket is woken straight into the read; a thread

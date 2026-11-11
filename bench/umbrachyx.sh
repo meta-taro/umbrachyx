@@ -3,8 +3,10 @@
 # same runs as bench/valkey.sh: GET and SET from one client over loopback,
 # with 32-byte values over a space of 1,000,000 keys, and PING as the round
 # trip with no work. Then GET from 50 clients at once. Every SET is a commit,
-# durable before it is acknowledged, so there is one run, not two. Last,
-# GET from one client while 50 others keep sending SETs.
+# durable before it is acknowledged, so there is one run, not two. Then
+# GET from one client while 50 others keep sending SETs, SET from 8, 64
+# and 256 clients at once, and GET and SET from 50 clients that send 16
+# and 64 commands at a time without waiting for each reply.
 #
 # Then the same GET and SET runs on a fresh server whose keys are in a
 # table declared to keep only its latest values (`pos/bench/key:<n>`). Those
@@ -12,10 +14,19 @@
 # others. The keys share one subject (`pos/bench`), as `key:<n>` do, so
 # both runs make one encryption key, not one per key.
 #
-# Usage: bench/umbrachyx.sh [requests]
+# Last, on a third server started with a public key: SETs from 50 clients,
+# 64 at a time, from connections that sent AUTH with a capability token and
+# from connections that did not, to the same keys (`auth/<n>/v`, a subject
+# each, written once before so that no row measures making their keys).
+#
+# Usage: bench/umbrachyx.sh [requests] [concurrent-requests]
 set -euo pipefail
 
 requests="${1:-100000}"
+concurrent_requests="${2:-200000}"
+# Commands sent without waiting finish this many times sooner.
+pipelined_requests=$((requests * 20))
+auth_keys=100000
 port=6390
 keys=1000000
 branch=bench
@@ -38,7 +49,8 @@ start() {
     "$bin" table "$table" latest --who bench --why "bench/umbrachyx.sh" >/dev/null
   fi
   "$bin" branch "$branch" --from main >/dev/null
-  "$bin" serve "$branch" --port "$port" 2>"$dir/$name.serve.log" &
+  # shellcheck disable=SC2086
+  "$bin" serve "$branch" --port "$port" ${serve_options:-} 2>"$dir/$name.serve.log" &
   server=$!
   until valkey-cli -p "$port" ping >/dev/null 2>&1; do sleep 0.1; done
 }
@@ -82,6 +94,11 @@ sleep 1
 bench "every commit synced, GET while 50 clients SET" "" -t get -n "$requests" -c 1
 reap "$writers"
 writers=
+for clients in 8 64 256; do
+  bench "every commit synced, $clients clients" "" -t set -n "$concurrent_requests" -c "$clients"
+done
+bench "every commit synced, 50 clients, 16 at a time" "" -t get -n "$pipelined_requests" -c 50 -P 16
+bench "every commit synced, 50 clients, 64 at a time" "" -t set -n "$pipelined_requests" -c 50 -P 64
 reap "$server"
 server=
 
@@ -101,5 +118,27 @@ sleep 1
 bench "every commit synced, latest table, GET while 50 clients SET" pos GET -n "$requests" -c 1
 reap "$writers"
 writers=
+reap "$server"
+server=
+
+# The key and token are made here and removed with the directory.
+public_key="$("$bin" keygen "$dir/root.key")"
+"$bin" token issue --key "$dir/root.key" --subject agent:bench --branch "$branch" \
+  --prefix auth/ --columns v --operations read,write --purpose bench --expires-in 8h \
+  >"$dir/token"
+serve_options="--public-key $public_key"
+start auth
+auth_set() {
+  local label="$1"
+  shift
+  valkey-benchmark -p "$port" -r "$auth_keys" --csv -n "$pipelined_requests" -c 50 -P 64 "$@" \
+    SET "auth/__rand_int__/v" "$value" 2>/dev/null |
+    sed -E 's/^"SET [^"]*"/"SET"/' | grep -v '"test"' | sed "s/^/\"$label\",/"
+}
+# Once over every key first: the first write to a subject makes its key.
+valkey-benchmark -p "$port" -r "$auth_keys" -n $((auth_keys * 20)) -c 50 -P 64 -q \
+  SET "auth/__rand_int__/v" "$value" >/dev/null 2>&1
+auth_set "every commit synced, not authenticated, 50 clients, 64 at a time"
+auth_set "every commit synced, authenticated, 50 clients, 64 at a time" -a "$(cat "$dir/token")"
 reap "$server"
 server=

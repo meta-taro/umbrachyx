@@ -92,6 +92,8 @@ pub struct Server {
     require_auth: bool,
     /// Threads serving connections.
     loops: usize,
+    /// Tells the thread that writes commits that some are queued.
+    queued: Arc<event::Queued>,
 }
 
 impl Server {
@@ -111,6 +113,7 @@ impl Server {
             public_key: None,
             require_auth: false,
             loops: default_loops(),
+            queued: Arc::default(),
         })
     }
 
@@ -158,6 +161,9 @@ impl Server {
             })
             .collect();
         assert!(!loops.is_empty(), "no serving thread could start");
+        let wakers = loops.iter().map(event::Handle::waker).collect();
+        event::spawn_writer(self.writer.clone(), Arc::clone(&self.queued), wakers)
+            .expect("the thread that writes commits starts");
         let mut next = 0;
         loop {
             let (stream, peer) = match listener.accept() {
@@ -183,29 +189,6 @@ impl Server {
             }
             loops[next % loops.len()].give(stream, slot);
             next = next.wrapping_add(1);
-        }
-    }
-
-    /// Carries out one command. Its reply goes to `out`, or, for a SET, to
-    /// `unanswered` until the write is durable.
-    fn answer(
-        &self,
-        command: &Command,
-        session: &mut Session,
-        unanswered: &mut Vec<Pending>,
-        out: &mut Vec<u8>,
-    ) {
-        // A read must see the SETs sent before it.
-        if !is_set(command) {
-            settle(unanswered, out);
-        }
-        match self.execute(command, session) {
-            Some(Step::Sent(commit)) => unanswered.push(commit),
-            Some(Step::Reply(reply)) => {
-                settle(unanswered, out);
-                reply.write_to(out);
-            }
-            None => {}
         }
     }
 
@@ -281,14 +264,6 @@ fn is_set(command: &Command) -> bool {
     command
         .first()
         .is_some_and(|name| name.eq_ignore_ascii_case(b"SET"))
-}
-
-/// Waits for the SETs sent so far and adds their replies to `out`, in the
-/// order they were sent.
-fn settle(unanswered: &mut Vec<Pending>, out: &mut Vec<u8>) {
-    for commit in unanswered.drain(..) {
-        set_reply(commit.wait()).write_to(out);
-    }
 }
 
 fn set_reply(answer: Result<CommitId, StoreError>) -> Reply {

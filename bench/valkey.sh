@@ -4,14 +4,18 @@
 # without persistence, then with every write fsynced before it is
 # acknowledged (appendfsync always). PING is the round trip with no work.
 # Then SET with appendfsync always from 8, 64 and 256 clients at once, each
-# waiting for its reply before the next request, GET from 50 clients, and
-# GET from one client while 50 others keep sending SETs.
+# waiting for its reply before the next request, GET from 50 clients, GET
+# from one client while 50 others keep sending SETs, and GET and SET from
+# 50 clients that send 16 and 64 commands at a time without waiting for
+# each reply.
 #
 # Usage: bench/valkey.sh [requests] [concurrent-requests]
 set -euo pipefail
 
 requests="${1:-100000}"
-concurrent_requests="${2:-20000}"
+concurrent_requests="${2:-200000}"
+# Commands sent without waiting finish this many times sooner.
+pipelined_requests=$((requests * 20))
 port=6399
 keys=1000000
 dir="$(mktemp -d)"
@@ -59,6 +63,10 @@ concurrent() {
     | grep -v '"test"' | sed 's/^/"appendfsync always, GET while 50 clients SET",/'
   kill "$writers"
   writers=
+  valkey-benchmark -p "$port" -t get -n "$pipelined_requests" -r "$keys" -d 32 -c 50 -P 16 --csv \
+    | grep -v '"test"' | sed 's/^/"appendfsync always, 50 clients, 16 at a time",/'
+  valkey-benchmark -p "$port" -t set -n "$pipelined_requests" -r "$keys" -d 32 -c 50 -P 64 --csv \
+    | grep -v '"test"' | sed 's/^/"appendfsync always, 50 clients, 64 at a time",/'
   stop
 }
 
