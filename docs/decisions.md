@@ -37,6 +37,41 @@ without an entry here is not adopted.
   whole, checked record anywhere after it: if one exists, acknowledged data
   was damaged and the log refuses to open rather than dropping it. Damage
   inside the very last record cannot be told apart from a torn write.
+- **A server's log is zeroed ahead of its records, 16 MiB at a time.** A
+  sync of a file that grows waits mostly for the file system, which has to
+  record the new length and the new blocks; the record's own bytes are the
+  small part. A record written over zeros that are already on the disk
+  changes neither, so the sync has only those bytes to make durable. In a
+  Linux virtual machine an append and its sync took 152 µs on a growing
+  file and 46 to 55 µs on a zeroed one, and over the server a durable `SET`
+  from one client went from about 5,000 a second to about 10,300, where
+  Valkey with `appendfsync always`, whose file grows, did about 5,150
+  (the release machine has not measured this yet). The promise is the one
+  above: nothing is acknowledged before its sync returns. The zeros and
+  the file's new length are synced when each 16 MiB is reserved, before
+  any record goes into it.
+  - **The end of the records is found as a torn end always was.** No
+    record has a length of zero, so the zeros check out as no record, and
+    no whole record starts among them. A write a power cut tore now sits
+    in front of zeros instead of at the end of the file; it is cut the same
+    way, by zeroing it in place, and the reserve stays.
+  - **A record that ends in zero bytes and lost only those reads as
+    written**, because over zeros it is the same bytes. It was never
+    acknowledged, and an unacknowledged record may survive a crash, as
+    before.
+  - **Half the seeds of the log's simulation run on such a file**, through
+    the same power cuts, torn sectors and bit flips; reading an all-zero
+    end as damage fails the second seed.
+  - **Only `serve` reserves.** Other commands write once and leave; they
+    open the log as it is and cut the zeros a server left, and the next
+    server reserves again. Reserving costs one write of 16 MiB and a sync,
+    a pause of some milliseconds every few hundred thousand writes, which
+    will show in the slowest writes; reserving ahead on another thread
+    would remove it and is not built.
+  - **What it does not change:** on a file system that can show stale
+    blocks after a crash, a file that grew could already end in bytes of
+    an older file. Zeroing and syncing before use narrows that to a crash
+    during the reserving itself.
 - **A record is a commit, a new branch, or a group of commits.** A commit
   holds the branch, the keys it sets or removes, who made it, why, who
   approved it and when. It is one frame, so a commit that touches many keys

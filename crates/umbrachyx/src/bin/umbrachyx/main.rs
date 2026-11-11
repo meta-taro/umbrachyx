@@ -92,6 +92,9 @@ fn main() -> ExitCode {
 }
 
 /// Positional arguments and `--name value` options, in order.
+/// How far ahead of its records a server zeroes its log, at a time.
+const LOG_RESERVE: u64 = 16 * 1024 * 1024;
+
 /// Options that take no value.
 const FLAGS: &[&str] = &["require-auth"];
 
@@ -170,7 +173,13 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         _ => {}
     }
     let path = std::env::var(DB_ENV).unwrap_or_else(|_| DEFAULT_DB.to_owned());
-    let storage = FileStorage::open(path.as_ref()).map_err(|e| format!("{path}: {e}"))?;
+    // A server syncs for every write, so its log is zeroed ahead of what it
+    // writes and a sync has only the record to make durable. Other commands
+    // write once and leave; they open the log as it is and give back any
+    // zeros a server left at its end.
+    let reserve = if command == "serve" { LOG_RESERVE } else { 0 };
+    let storage =
+        FileStorage::open_reserving(path.as_ref(), reserve).map_err(|e| format!("{path}: {e}"))?;
     let keys_path = format!("{path}.keys");
     let key_storage: Box<dyn KeyStorage + Send> = Box::new(FileKeyStorage::new(keys_path.as_ref()));
     let keys = Keys::open(key_storage).map_err(|e| format!("{keys_path}: {e}"))?;

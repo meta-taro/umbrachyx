@@ -222,3 +222,57 @@ fn serve_refuses_require_auth_without_a_public_key() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// The server reserves its log ahead of what it writes, so a sync has only
+/// the record to make durable. The command-line tool reads such a log after
+/// the server is gone, and the server takes it up again.
+#[test]
+fn serve_reserves_its_log_and_other_commands_still_read_it() {
+    const RESERVE: u64 = 16 * 1024 * 1024;
+    let dir = TempDir::new("reserve");
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+    let set = |port: u16, key: &str, value: &str| {
+        let mut client = connect(port);
+        let command = format!(
+            "*3\r\n$3\r\nSET\r\n${}\r\n{key}\r\n${}\r\n{value}\r\n",
+            key.len(),
+            value.len()
+        );
+        client.write_all(command.as_bytes()).expect("sends");
+        let mut reply = [0; 5];
+        client.read_exact(&mut reply).expect("reads");
+        assert_eq!(&reply, b"+OK\r\n");
+    };
+    let serve = |port: u16| {
+        let port_arg = port.to_string();
+        Server(
+            dir.umbrachyx(&["serve", BRANCH, "--port", &port_arg])
+                .spawn()
+                .expect("starts"),
+        )
+    };
+
+    let port = free_port();
+    let server = serve(port);
+    set(port, "a", "1");
+    let reserved = std::fs::metadata(dir.0.join("log")).expect("stats").len();
+    drop(server);
+    let read = dir.run(&["get", BRANCH, "a"]);
+    let port = free_port();
+    let server = serve(port);
+    set(port, "b", "2");
+    drop(server);
+
+    assert_eq!(reserved, RESERVE);
+    assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), "1");
+    let both = [
+        dir.run(&["get", BRANCH, "a"]),
+        dir.run(&["get", BRANCH, "b"]),
+    ];
+    assert_eq!(String::from_utf8_lossy(&both[0].stdout).trim(), "1");
+    assert_eq!(String::from_utf8_lossy(&both[1].stdout).trim(), "2");
+}
