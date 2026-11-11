@@ -17,10 +17,12 @@ pub(super) enum Node {
     Leaf {
         entries: Vec<Entry>,
         hash: OnceLock<Digest>,
+        index: OnceLock<KeyIndex>,
     },
     Internal {
         children: Vec<Child>,
         hash: OnceLock<Digest>,
+        index: OnceLock<KeyIndex>,
     },
 }
 
@@ -43,6 +45,7 @@ impl Node {
         Arc::new(Self::Leaf {
             entries,
             hash: OnceLock::new(),
+            index: OnceLock::new(),
         })
     }
 
@@ -50,6 +53,7 @@ impl Node {
         Arc::new(Self::Internal {
             children,
             hash: OnceLock::new(),
+            index: OnceLock::new(),
         })
     }
 
@@ -62,7 +66,7 @@ impl Node {
 
     pub fn hash(&self) -> &Digest {
         match self {
-            Self::Leaf { entries, hash } => hash.get_or_init(|| {
+            Self::Leaf { entries, hash, .. } => hash.get_or_init(|| {
                 let mut hasher = NodeHasher::new(0);
                 for (key, value) in entries {
                     hasher.field(key);
@@ -70,7 +74,7 @@ impl Node {
                 }
                 hasher.finish()
             }),
-            Self::Internal { children, hash } => hash.get_or_init(|| {
+            Self::Internal { children, hash, .. } => hash.get_or_init(|| {
                 let mut hasher = NodeHasher::new(1);
                 for child in children {
                     hasher.field(child.node.hash());
@@ -192,6 +196,61 @@ impl NodeHasher {
 mod tests {
     use super::*;
 
+    /// The index finds every key where a binary search of the keys does,
+    /// and puts every missing key where that search would, including keys
+    /// that are a prefix of their neighbours and the empty key.
+    #[test]
+    fn the_key_index_answers_as_a_binary_search_of_the_keys() {
+        let keys: Vec<&[u8]> = vec![
+            b"",
+            b"a",
+            b"ab",
+            b"abc",
+            b"abd",
+            b"b",
+            b"key:000001",
+            b"key:0000010",
+            b"z",
+        ];
+        let index = KeyIndex::new(keys.iter().copied());
+        let probes: Vec<&[u8]> = vec![
+            b"",
+            b"0",
+            b"a",
+            b"aa",
+            b"ab",
+            b"abb",
+            b"abc",
+            b"abcd",
+            b"abd",
+            b"abe",
+            b"b",
+            b"key:000001",
+            b"key:0000010",
+            b"key:00000100",
+            b"key:000002",
+            b"y",
+            b"z",
+            b"zz",
+        ];
+
+        for probe in probes {
+            assert_eq!(
+                index.search(probe),
+                keys.binary_search(&probe),
+                "probe {:?}",
+                String::from_utf8_lossy(probe)
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_index_puts_every_key_first() {
+        let index = KeyIndex::new(std::iter::empty::<&[u8]>());
+
+        assert_eq!(index.search(b"anything"), Err(0));
+    }
+
     /// The encoding fed field by field, as nodes were first hashed: gathering
     /// it into one buffer must not change a single hash, or every commit
     /// name and every stored diff shortcut would change with it.
@@ -248,5 +307,61 @@ mod tests {
         assert!(is_hashed(&internal));
         assert!(is_hashed(&leaf), "a parent's hash needs its children's");
         assert_eq!(internal.hash(), &first, "asking again gives the kept hash");
+    }
+}
+
+/// A node's keys in one buffer, so a lookup searches memory that sits
+/// together instead of following a pointer per key. Built the first time a
+/// lookup reaches the node, like the hash.
+#[derive(Debug)]
+pub(super) struct KeyIndex {
+    bytes: Vec<u8>,
+    ends: Vec<u32>,
+}
+
+impl KeyIndex {
+    fn new<'a>(keys: impl ExactSizeIterator<Item = &'a [u8]>) -> Self {
+        let mut ends = Vec::with_capacity(keys.len());
+        let mut bytes = Vec::new();
+        for key in keys {
+            bytes.extend_from_slice(key);
+            ends.push(u32::try_from(bytes.len()).expect("a node's keys fit in 4 GiB"));
+        }
+        Self { bytes, ends }
+    }
+
+    fn key(&self, index: usize) -> &[u8] {
+        let start = index
+            .checked_sub(1)
+            .map_or(0, |before| self.ends[before] as usize);
+        &self.bytes[start..self.ends[index] as usize]
+    }
+
+    /// Where `key` is, or where it would go, as `binary_search` answers.
+    pub fn search(&self, key: &[u8]) -> Result<usize, usize> {
+        let (mut low, mut high) = (0, self.ends.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match self.key(middle).cmp(key) {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => return Ok(middle),
+            }
+        }
+        Err(low)
+    }
+}
+
+impl Node {
+    /// The node's keys (a leaf) or last keys (an internal node), indexed.
+    pub fn key_index(&self) -> &KeyIndex {
+        match self {
+            Self::Leaf { entries, index, .. } => {
+                index.get_or_init(|| KeyIndex::new(entries.iter().map(|(key, _)| &**key)))
+            }
+            Self::Internal {
+                children, index, ..
+            } => index.get_or_init(|| KeyIndex::new(children.iter().map(|c| &*c.last_key))),
+        }
     }
 }

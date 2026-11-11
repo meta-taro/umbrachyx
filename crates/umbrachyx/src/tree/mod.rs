@@ -87,11 +87,11 @@ impl Tree {
         loop {
             match node {
                 Node::Leaf { entries, .. } => {
-                    let index = entries.binary_search_by(|(k, _)| (**k).cmp(key)).ok()?;
+                    let index = node.key_index().search(key).ok()?;
                     return Some(&entries[index].1);
                 }
                 Node::Internal { children, .. } => {
-                    let index = children.partition_point(|child| *child.last_key < *key);
+                    let index = node.key_index().search(key).unwrap_or_else(|at| at);
                     node = &children.get(index)?.node;
                 }
             }
