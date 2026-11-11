@@ -432,6 +432,25 @@ fn branches_log_and_diff_show_what_the_branch_changed() {
     assert_eq!(diff["more"], false);
 }
 
+/// `-` names the state before any commit, so everything a commit holds
+/// can be read as added, whatever `main` holds.
+#[test]
+fn a_diff_from_a_dash_shows_everything_as_added() {
+    let dir = TempDir::new("from-nothing");
+    let (_committer, mut client) = start(&dir);
+    set_all(&mut client, &[("gold", "1"), ("silver", "2")]);
+
+    let diff = ask_json(&mut client, &["UMBRA.DIFF", "-", BRANCH]);
+
+    assert_eq!(
+        diff["changes"],
+        serde_json::json!([
+            {"key": "gold", "before": null, "after": "1", "erased": false},
+            {"key": "silver", "before": null, "after": "2", "erased": false},
+        ])
+    );
+}
+
 #[test]
 fn history_commands_refuse_unknown_branches_and_wrong_arguments() {
     let dir = TempDir::new("history-refused");

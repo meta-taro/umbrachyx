@@ -280,10 +280,14 @@ fn diff(store: &dyn Inspect, from: &str, to: &str) -> Result<Value, StoreError> 
     }))
 }
 
-/// The commit `name` names, or `None` for a branch with no commits yet,
-/// which holds nothing.
+/// What names the state before any commit, unless a branch is called so.
+const NOTHING: &str = "-";
+
+/// The commit `name` names, or `None` for what holds nothing: a branch
+/// with no commits yet, or `-`.
 fn named(store: &dyn Inspect, name: &str) -> Result<Option<CommitId>, StoreError> {
-    if store.branches().contains(&name) && store.head(name).is_none() {
+    let is_branch = store.branches().contains(&name);
+    if (is_branch && store.head(name).is_none()) || (!is_branch && name == NOTHING) {
         return Ok(None);
     }
     store.resolve(name).map(Some)

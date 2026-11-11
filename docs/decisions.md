@@ -711,6 +711,9 @@ for it is the gate for the first public release, with the speed work.
   `none`: never a change there), `CONFLICT` followed by the keys both
   sides changed. A viewer says something different for each without
   parsing the message.
+- **`-` names the state before any commit** in `UMBRA.DIFF`, unless a
+  branch is called so. A change whose branch shares no commit with `main`
+  has no base; `UMBRA.DIFF - <head>` shows all it holds as added.
 - **A change is named by its branch and head, not its head alone.** A
   branch made from another starts at the same head, and the store
   simulation found a rejection landing on the branch it came from when
