@@ -14,91 +14,87 @@
     6. 本文（section を必要なだけ）
 -->
 <html lang="{{LANG}}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-<title>{{NAME}} — {{TAGLINE}}</title>
-<meta name="description" content="{{DESCRIPTION}}">
+    <title>{{NAME}} — {{TAGLINE}}</title>
+    <meta name="description" content="{{DESCRIPTION}}" />
 
-<link rel="icon" type="image/png" href="icon.png">
-<meta name="theme-color" content="#0f0f13">
+    <link rel="icon" type="image/png" href="icon.png" />
+    <meta name="theme-color" content="#0f0f13" />
 
-<!-- SNS / チャットに貼られたときに出るカード。
+    <!-- SNS / チャットに貼られたときに出るカード。
      **絵と行き先は絶対 URL** —— 相対だと、取りに来た機械が見つけられない。
      og:image は専用に作る。アイコンを流用すると、一覧で全部同じに見える。 -->
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="{{NAME}}">
-<meta property="og:locale" content="{{OG_LOCALE}}">
-<meta property="og:url" content="{{URL}}">
-<meta property="og:title" content="{{NAME}} — {{TAGLINE}}">
-<meta property="og:description" content="{{DESCRIPTION}}">
-<meta property="og:image" content="{{URL}}og.png">
-<meta property="og:image:alt" content="{{OG_IMAGE_ALT}}">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="{{NAME}} — {{TAGLINE}}">
-<meta name="twitter:description" content="{{DESCRIPTION}}">
-<meta name="twitter:image" content="{{URL}}og.png">
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="{{NAME}}" />
+    <meta property="og:locale" content="{{OG_LOCALE}}" />
+    <meta property="og:url" content="{{URL}}" />
+    <meta property="og:title" content="{{NAME}} — {{TAGLINE}}" />
+    <meta property="og:description" content="{{DESCRIPTION}}" />
+    <meta property="og:image" content="{{URL}}og.png" />
+    <meta property="og:image:alt" content="{{OG_IMAGE_ALT}}" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="{{NAME}} — {{TAGLINE}}" />
+    <meta name="twitter:description" content="{{DESCRIPTION}}" />
+    <meta name="twitter:image" content="{{URL}}og.png" />
 
-<link rel="stylesheet" href="style.css">
-<link rel="canonical" href="{{URL}}">
-<link rel="alternate" hreflang="{{LANG}}" href="{{URL}}">
-<link rel="alternate" hreflang="{{ALT_LANG}}" href="{{ALT_URL}}">
-<meta name="robots" content="index,follow,max-image-preview:large">
-</head>
-<body>
+    <link rel="stylesheet" href="style.css" />
+    <link rel="canonical" href="{{URL}}" />
+    <link rel="alternate" hreflang="{{LANG}}" href="{{URL}}" />
+    <link rel="alternate" hreflang="{{ALT_LANG}}" href="{{ALT_URL}}" />
+    <meta name="robots" content="index,follow,max-image-preview:large" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <!-- 1. 名乗り。製品名はここ止まり。 -->
+        <div class="mark">
+          <img src="icon.png" alt="" />
+          <b>{{NAME}}</b>
+          <nav class="lang" aria-label="{{LANG_LABEL}}">
+            <span aria-current="true">{{THIS_LANG}}</span
+            ><a href="{{ALT_URL}}" hreflang="{{ALT_LANG}}" lang="{{ALT_LANG}}">{{OTHER_LANG}}</a>
+          </nav>
+        </div>
 
-<div class="wrap">
-
-<header>
-  <!-- 1. 名乗り。製品名はここ止まり。 -->
-  <div class="mark">
-    <img src="icon.png" alt="">
-    <b>{{NAME}}</b>
-    <nav class="lang" aria-label="{{LANG_LABEL}}">
-      <span aria-current="true">{{THIS_LANG}}</span><a href="{{ALT_URL}}" hreflang="{{ALT_LANG}}" lang="{{ALT_LANG}}">{{OTHER_LANG}}</a>
-    </nav>
-  </div>
-
-  <!-- 2. 困りごと。読み手にすでに起きていることを書く。
+        <!-- 2. 困りごと。読み手にすでに起きていることを書く。
        製品名・技術名・「〜な人のための」を入れない。 -->
-  <h1>{{PROBLEM_1}}<br><span class="quiet">{{PROBLEM_2}}</span></h1>
+        <h1>{{PROBLEM_1}}<br /><span class="quiet">{{PROBLEM_2}}</span></h1>
 
-  <!-- 3. どう消すか。2 行目に効き目を置いて締める。 -->
-  <p class="lede">
-    {{SOLUTION_1}}<br>
-    <b>{{SOLUTION_2}}</b>
-  </p>
+        <!-- 3. どう消すか。2 行目に効き目を置いて締める。 -->
+        <p class="lede">
+          {{SOLUTION_1}}<br />
+          <b>{{SOLUTION_2}}</b>
+        </p>
 
-  <!-- 4. 入手口。**版数を書かない**（書いた翌日に嘘になる）。 -->
-  <div class="cta">
-    <a class="btn primary" href="{{DOWNLOAD_URL}}">{{DOWNLOAD_LABEL}}</a>
-    <a class="btn" href="{{REPO_URL}}">GitHub</a>
-    <span class="note">{{PLATFORMS}}・{{LICENSE}}</span>
-  </div>
-</header>
+        <!-- 4. 入手口。**版数を書かない**（書いた翌日に嘘になる）。 -->
+        <div class="cta">
+          <a class="btn primary" href="{{DOWNLOAD_URL}}">{{DOWNLOAD_LABEL}}</a>
+          <a class="btn" href="{{REPO_URL}}">GitHub</a>
+          <span class="note">{{PLATFORMS}}・{{LICENSE}}</span>
+        </div>
+      </header>
 
-<!-- 5. 実物 1 枚。figcaption は絵の説明ではなく、**h1 の困りごとと絵を結ぶ 1 文**。 -->
-<figure class="hero">
-  <img src="{{HERO_IMAGE}}" alt="{{HERO_ALT}}">
-  <figcaption>{{HERO_CAPTION}}</figcaption>
-</figure>
+      <!-- 5. 実物 1 枚。figcaption は絵の説明ではなく、**h1 の困りごとと絵を結ぶ 1 文**。 -->
+      <figure class="hero">
+        <img src="{{HERO_IMAGE}}" alt="{{HERO_ALT}}" />
+        <figcaption>{{HERO_CAPTION}}</figcaption>
+      </figure>
 
-<!-- 6. ここから本文。最初の section は必ず「なぜそれが起きるのか」にする。
+      <!-- 6. ここから本文。最初の section は必ず「なぜそれが起きるのか」にする。
      解決から書くと、困っていない人には読む理由が無い。 -->
-<section>
-  <h2>{{WHY_HEADING}}</h2>
-  <p class="problem">{{WHY_CHAIN}}</p>
-  <p>{{WHY_BODY}}</p>
-</section>
+      <section>
+        <h2>{{WHY_HEADING}}</h2>
+        <p class="problem">{{WHY_CHAIN}}</p>
+        <p>{{WHY_BODY}}</p>
+      </section>
 
-<!-- 以降は製品ごと。**「いま何ができるか」と「まだ出来ていないこと」を必ず両方置く。**
+      <!-- 以降は製品ごと。**「いま何ができるか」と「まだ出来ていないこと」を必ず両方置く。**
      出来ていないことを書かないと、入れてから気づくことになる。 -->
 
-<footer>
-  &copy; {{OWNER}} · {{LICENSE}} · <a href="{{REPO_URL}}">{{REPO_SHORT}}</a>
-</footer>
-
-</div>
-</body>
+      <footer>&copy; {{OWNER}} · {{LICENSE}} · <a href="{{REPO_URL}}">{{REPO_SHORT}}</a></footer>
+    </div>
+  </body>
 </html>
