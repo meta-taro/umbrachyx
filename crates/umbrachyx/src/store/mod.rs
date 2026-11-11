@@ -1164,9 +1164,7 @@ fn reveal(ring: Option<&Ring>, key: &[u8], value: Option<Bytes>) -> Option<Bytes
 /// Checked before anything is written, since a write could cut a key file
 /// that only looks torn.
 fn check_sealed(records: &[Record], ring: &Ring) -> Result<(), StoreError> {
-    let ring = ring
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let ring = ring.read();
     let mut missing = HashSet::new();
     let erased: HashSet<Fingerprint> = records
         .iter()

@@ -14,6 +14,8 @@
 //! and the AES-SIV output.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use aes_siv::KeyInit;
@@ -28,7 +30,37 @@ const HEADER_LEN: usize = 1 + FINGERPRINT_LEN;
 /// Every key there is, by fingerprint, shared with readers on other
 /// threads. Erasing a subject takes its key out of here as well as out of
 /// the key file, so no reader can open its values afterwards.
-pub(crate) type Ring = Arc<RwLock<HashMap<Fingerprint, Key>>>;
+pub(crate) type Ring = Arc<Keyring>;
+
+/// The keys, and what lets a reading thread keep its ciphers without
+/// taking the lock on every read: the ring's own number, and how many of
+/// its keys have been erased. A thread's ciphers are good only for the
+/// ring and the count they were set up under.
+pub(crate) struct Keyring {
+    id: u64,
+    erasures: AtomicU64,
+    keys: RwLock<HashMap<Fingerprint, Key>>,
+}
+
+/// Never the keys themselves.
+impl std::fmt::Debug for Keyring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Keyring({})", self.id)
+    }
+}
+
+/// The next ring's number. Never reused, unlike an address.
+static NEXT_RING: AtomicU64 = AtomicU64::new(1);
+
+impl Keyring {
+    pub(crate) fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<Fingerprint, Key>> {
+        self.keys.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<Fingerprint, Key>> {
+        self.keys.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 pub(crate) struct Sealer {
     keys: Keys<Box<dyn KeyStorage + Send>>,
@@ -44,7 +76,11 @@ impl Sealer {
         let ring = keys.all().map(|key| (fingerprint(key), *key)).collect();
         Self {
             keys,
-            ring: Arc::new(RwLock::new(ring)),
+            ring: Arc::new(Keyring {
+                id: NEXT_RING.fetch_add(1, Ordering::Relaxed),
+                erasures: AtomicU64::new(0),
+                keys: RwLock::new(ring),
+            }),
             ciphers: HashMap::new(),
         }
     }
@@ -61,10 +97,7 @@ impl Sealer {
             if self.ciphers.len() >= MAX_CIPHERS {
                 self.ciphers.clear();
             }
-            self.ring
-                .write()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(print, subject_key);
+            self.ring.write().insert(print, subject_key);
             self.ciphers.insert(print, cipher_of(&subject_key));
         }
         let cipher = self.ciphers.get_mut(&print).expect("just put there");
@@ -81,10 +114,10 @@ impl Sealer {
     /// here on even if the key file cannot be written; the store finishes
     /// the file when it next opens.
     pub(crate) fn erase(&mut self, subject: &[u8], key: &Fingerprint) -> Result<(), KeyError> {
-        self.ring
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(key);
+        self.ring.write().remove(key);
+        // After the key has left the ring, so a reader that sees the new
+        // count and drops its ciphers cannot find the key there again.
+        self.ring.erasures.fetch_add(1, Ordering::SeqCst);
         self.ciphers.remove(key);
         self.keys.erase(subject).map(drop)
     }
@@ -116,29 +149,43 @@ fn seal_with(cipher: &mut Aes256Siv, print: &Fingerprint, key: &[u8], value: &[u
     bytes
 }
 
+/// The ciphers a thread has opened values with, and the ring and its
+/// count of erasures they were set up under. Reads take no lock on the
+/// ring, which readers on many threads would otherwise all write to, and
+/// an erasure still reaches every thread before its next read.
+#[derive(Default)]
+struct Openers {
+    ring: u64,
+    erasures: u64,
+    ciphers: HashMap<Fingerprint, Aes256Siv>,
+}
+
 thread_local! {
-    /// The ciphers this thread has opened values with. `open` asks the ring
-    /// for the key first every time, so a cipher left here after its key
-    /// was erased is never used again.
-    static OPENERS: std::cell::RefCell<HashMap<Fingerprint, Aes256Siv>> =
-        std::cell::RefCell::new(HashMap::new());
+    static OPENERS: std::cell::RefCell<Openers> = std::cell::RefCell::default();
 }
 
 /// The value sealed in `sealed` for `key`, or `None` if its key is not in
 /// the ring or the bytes do not open under it.
 pub(crate) fn open(ring: &Ring, key: &[u8], sealed: &[u8]) -> Option<Bytes> {
     let needed = key_fingerprint(sealed)?;
-    let subject_key = *ring
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&needed)?;
     OPENERS.with_borrow_mut(|openers| {
-        if openers.len() >= MAX_CIPHERS && !openers.contains_key(&needed) {
-            openers.clear();
+        // Read before the ring: if a key is erased after this, the cipher
+        // made below is dropped on the next read.
+        let erasures = ring.erasures.load(Ordering::SeqCst);
+        let is_stale = openers.ring != ring.id || openers.erasures != erasures;
+        if is_stale || openers.ciphers.len() >= MAX_CIPHERS {
+            openers.ciphers.clear();
+            openers.ring = ring.id;
+            openers.erasures = erasures;
         }
-        openers
-            .entry(needed)
-            .or_insert_with(|| cipher_of(&subject_key))
+        let cipher = match openers.ciphers.entry(needed) {
+            Entry::Occupied(known) => known.into_mut(),
+            Entry::Vacant(unknown) => {
+                let subject_key = *ring.read().get(&needed)?;
+                unknown.insert(cipher_of(&subject_key))
+            }
+        };
+        cipher
             .decrypt([key], &sealed[HEADER_LEN..])
             .ok()
             .map(Bytes::from)
