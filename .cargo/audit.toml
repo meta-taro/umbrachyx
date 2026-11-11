@@ -1,0 +1,11 @@
+# cargo audit settings. Every ignored advisory says why it does not apply.
+[advisories]
+ignore = [
+    # crypto-bigint 0.5.5, timing variability in constant-time operations.
+    # Pulled in by biscuit-auth 6.0.0 through p256. Umbrachyx signs only with
+    # Ed25519 (biscuit's default key pair); P-256 can only appear in a token
+    # someone presents, and verifying it handles public data alone, so there
+    # is no secret for the timing to leak. Drop this line when biscuit-auth
+    # releases a version on crypto-bigint >= 0.7.6.
+    "RUSTSEC-2026-0387",
+]
