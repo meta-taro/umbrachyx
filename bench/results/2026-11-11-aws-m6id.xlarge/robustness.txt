@@ -1,0 +1,22 @@
+
+running 1 test
+test kill_the_server_during_writes has been running for over 60 seconds
+100 rounds, 762582 acknowledged SETs, none lost
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1127.25s
+
+
+running 1 test
+test kill_during_writes has been running for over 60 seconds
+1000 rounds, 80423 acknowledged writes, none lost
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 248.20s
+
+
+running 3 tests
+10000 seeds: 131346 restarts, 310418 records acknowledged at the end, 6809 corruptions refused, 1022 last-record damages cut off
+.store, 10000 seeds: 634758 commits (97760 groups), 153589 restarts, interrupted commits kept 6046 and lost 6388, clock went back 22437 times, 40965 branches made, 7700 merges, 10060 merges refused for conflicts, 16904 reverts
+.sealed store, 10000 seeds: 406949 commits, 70093 erasures, 120624 restarts, 15984 commits refused for a failed key write, 9561 erasures whose key file was finished later, interrupted erasures kept 1327 and lost 1258, 242569 commits to erased subjects
+.
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 49.77s
+

@@ -220,6 +220,16 @@ planning a SQL query, which Umbrachyx does not have. Dolt also stores its
 data in a prolly tree, and both grow only slightly with 100 times more
 records.
 
+**On the AWS release machine** (2026-11-11, 1,000,000 records, three
+runs): the same ten changes in two commits took Umbrachyx 17.3–17.4 µs and
+Dolt 287–351 µs. In one commit they took Umbrachyx 0.52–0.55 µs, because a
+commit compared with its parent is read from the cells it wrote, without
+walking either tree; that is the diff a viewer asks for most, but not the
+one to set beside Dolt's, which walks two trees. The laptop rows above were
+taken before that shortcut existed, so they walk the trees. Loading the
+million records took Umbrachyx 1.1–1.2 s and Dolt 6–7 s
+([`bench/results/2026-11-11-aws-m6id.xlarge/`](../bench/results/2026-11-11-aws-m6id.xlarge/)).
+
 ## Loading
 
 | Records | Umbrachyx (s) | Dolt `table import` (s) |
