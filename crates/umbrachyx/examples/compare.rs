@@ -31,6 +31,10 @@ const DIFF_RUNS: usize = 1_001;
 const DIFF_WARM_UP: Duration = Duration::from_millis(200);
 const SEED: u64 = 2026;
 const BRANCH: &str = "event/test";
+/// The same ten changes in two commits of five. A commit against its parent
+/// is read from the cells it wrote; across two commits the diff walks the
+/// trees, which is what Dolt's diff of two branches does.
+const TWO_COMMIT_BRANCH: &str = "event/test-in-two";
 
 type FileStore = Store<FileStorage, SystemClock>;
 type Error = Box<dyn std::error::Error>;
@@ -126,21 +130,33 @@ fn run(records: u64, work: &Path, dolt_dir: Option<&Path>) -> Result<(), Error> 
     if let Some(dir) = dolt_dir {
         write_dolt_changes(dir, &changes)?;
     }
-    let diff = median_diff(&store, changes.len())?;
+    let diff = median_diff(&store, BRANCH, changes.len())?;
+
+    store.create_branch(TWO_COMMIT_BRANCH, MAIN_BRANCH)?;
+    for half in changes.chunks(DIFF_CHANGES / 2) {
+        store.commit(
+            TWO_COMMIT_BRANCH,
+            half.iter().map(|(k, v)| set(k, v)).collect(),
+            by("five changes"),
+        )?;
+    }
+    let tree_diff = median_diff(&store, TWO_COMMIT_BRANCH, changes.len())?;
 
     println!(
         "| Records | Load (s) | get p50 / p99 (µs) | commit of one key p50 / p99 (ms) \
-         | diff of 10 changes, median (µs) |"
+         | diff of 10 changes in one commit, median (µs) \
+         | diff of 10 changes in two commits, median (µs) |"
     );
-    println!("|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|");
     println!(
-        "| {records} | {:.1} | {:.2} / {:.2} | {:.2} / {:.2} | {:.0} |",
+        "| {records} | {:.1} | {:.2} / {:.2} | {:.2} / {:.2} | {:.2} | {:.2} |",
         load.as_secs_f64(),
         micros(get.0),
         micros(get.1),
         micros(commit.0) / 1_000.0,
         micros(commit.1) / 1_000.0,
         micros(diff),
+        micros(tree_diff),
     );
     Ok(())
 }
@@ -156,8 +172,8 @@ fn load(store: &mut FileStore, rng: &mut Rng, records: u64) -> Result<(), Error>
     Ok(())
 }
 
-fn median_diff(store: &FileStore, expected: usize) -> Result<Duration, Error> {
-    let (main, branch) = (store.head(MAIN_BRANCH), store.head(BRANCH));
+fn median_diff(store: &FileStore, branch: &str, expected: usize) -> Result<Duration, Error> {
+    let (main, branch) = (store.head(MAIN_BRANCH), store.head(branch));
     let warm_up = Instant::now();
     while warm_up.elapsed() < DIFF_WARM_UP {
         black_box(store.diff(main.as_ref(), branch.as_ref())?);
