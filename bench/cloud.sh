@@ -82,7 +82,9 @@ for run in $(seq 1 "$runs"); do
   mkdir -p "$out/run-$run"
   bench/umbrachyx.sh >"$out/run-$run/umbrachyx.csv"
   bench/valkey.sh >"$out/run-$run/valkey.csv"
-  bench/postgres.sh >"$out/run-$run/postgres.csv"
+  # The comparison added last: if it fails, its error is kept beside the
+  # rows it did write and the rest of the run goes on.
+  bench/postgres.sh >"$out/run-$run/postgres.csv" 2>"$out/run-$run/postgres.stderr.txt" || true
   bench/connections.sh >"$out/run-$run/connections.csv" 2>"$out/run-$run/connections.stderr.txt"
   bench/memory.sh >"$out/run-$run/memory.csv"
   rm -rf "$scratch/dolt-input"
