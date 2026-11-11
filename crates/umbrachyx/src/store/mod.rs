@@ -174,6 +174,12 @@ pub enum StoreError {
     UnknownName(String),
     /// The start of an id that more than one commit has.
     AmbiguousName(String),
+    /// `name` steps back further along `branch` than its `commits` reach.
+    TooFarBack {
+        name: String,
+        branch: String,
+        commits: usize,
+    },
     BranchExists(String),
     /// Empty, or longer than a label should be.
     BadBranchName,
@@ -209,6 +215,24 @@ impl fmt::Display for StoreError {
             Self::NotOnBranch(id) => write!(f, "commit {} is not on this branch", short(id)),
             Self::UnknownName(name) => write!(f, "no branch or commit named {name:?}"),
             Self::AmbiguousName(name) => write!(f, "more than one commit starts with {name:?}"),
+            Self::TooFarBack {
+                name,
+                branch,
+                commits,
+            } if *commits == 0 => {
+                write!(f, "{branch:?} has no commits yet, so {name:?} names none")
+            }
+            Self::TooFarBack {
+                name,
+                branch,
+                commits,
+            } => {
+                let plural = if *commits == 1 { "" } else { "s" };
+                write!(
+                    f,
+                    "{branch:?} has {commits} commit{plural}, so {name:?} goes back past its first"
+                )
+            }
             Self::BranchExists(name) => write!(f, "a branch named {name:?} already exists"),
             Self::BadBranchName => write!(f, "a branch name must be 1 to {MAX_BRANCH_NAME} bytes"),
             Self::Inconsistent(what) => write!(f, "the log cannot be applied: {what}"),
@@ -716,11 +740,15 @@ impl<S: Storage, C: Clock> Store<S, C> {
             None => (name, 0),
         };
         if self.branches.contains_key(branch) {
-            return self
-                .log(branch)
+            let line = self.log(branch);
+            return line
                 .get(back)
                 .map(|info| info.id)
-                .ok_or_else(|| StoreError::UnknownName(name.to_owned()));
+                .ok_or_else(|| StoreError::TooFarBack {
+                    name: name.to_owned(),
+                    branch: branch.to_owned(),
+                    commits: line.len(),
+                });
         }
         let prefix = name.to_ascii_lowercase();
         let is_hex = prefix.len() >= MIN_ID_PREFIX && prefix.bytes().all(|b| b.is_ascii_hexdigit());

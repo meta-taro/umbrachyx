@@ -455,6 +455,39 @@ fn history_commands_refuse_unknown_branches_and_wrong_arguments() {
     );
 }
 
+/// Going back further than a branch's commits says how many it has, rather
+/// than that the name is unknown: the branch is there, the step is too far.
+#[test]
+fn a_step_back_past_the_first_commit_says_how_many_commits_there_are() {
+    let dir = TempDir::new("too-far-back");
+    let (_committer, mut client) = start(&dir);
+    set_all(&mut client, &[("gold", "1")]);
+
+    let behind = format!("{BRANCH}~1");
+    client
+        .write_all(&command(&["UMBRA.DIFF", &behind, BRANCH]))
+        .expect("sends");
+
+    assert_eq!(
+        read_line(&mut client),
+        format!("-ERR \"{BRANCH}\" has 1 commit, so \"{behind}\" goes back past its first")
+    );
+}
+
+#[test]
+fn a_branch_without_commits_says_so_when_named() {
+    let dir = TempDir::new("no-commits");
+    let storage = FileStorage::open(&dir.0.join("log")).expect("opens file");
+    let store = Store::open(storage, SystemClock).expect("opens store");
+
+    let error = store.resolve(MAIN_BRANCH).expect_err("main has no commit");
+
+    assert_eq!(
+        error.to_string(),
+        format!("\"{MAIN_BRANCH}\" has no commits yet, so \"{MAIN_BRANCH}\" names none")
+    );
+}
+
 /// A branch with more cells than one page answers with where to go on, and
 /// the pages together hold every key once.
 #[test]
