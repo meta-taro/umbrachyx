@@ -451,6 +451,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
         requests: Vec<CommitRequest>,
     ) -> Result<Vec<Result<CommitId, StoreError>>, StoreError> {
         let time = self.next_time();
+        if let Some(sealer) = &mut self.sealer {
+            let written = requests
+                .iter()
+                .flat_map(|request| &request.edits)
+                .filter(|edit| edit.value.is_some());
+            sealer.make_keys_for(written.map(|edit| edit.key.as_slice()))?;
+        }
         let mut commits = Vec::with_capacity(requests.len());
         let mut refusals = Vec::with_capacity(requests.len());
         for mut request in requests {

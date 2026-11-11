@@ -220,24 +220,57 @@ impl<S: KeyStorage> Keys<S> {
         if let Some(key) = self.keys.get(subject) {
             return Ok(*key);
         }
-        let mut key = [0; KEY_LEN];
-        getrandom::getrandom(&mut key).map_err(|e| KeyError::Io(io::Error::other(e)))?;
-        let added = entry(subject, &key)?;
+        self.make_keys(std::iter::once(subject))?;
+        Ok(self.keys[subject])
+    }
+
+    /// Makes a key for each of `subjects` that has none, and makes them all
+    /// durable with one write. Either all of them are in use afterwards or
+    /// none is: a value sealed under a key that is not durable could never
+    /// be opened again.
+    pub fn make_keys<'a>(
+        &mut self,
+        subjects: impl Iterator<Item = &'a [u8]>,
+    ) -> Result<(), KeyError> {
+        let mut made: Vec<(&[u8], Key)> = Vec::new();
+        let mut added = Vec::new();
+        for subject in subjects {
+            let is_new =
+                !self.keys.contains_key(subject) && made.iter().all(|(other, _)| *other != subject);
+            if !is_new {
+                continue;
+            }
+            let mut key = [0; KEY_LEN];
+            getrandom::getrandom(&mut key).map_err(|e| KeyError::Io(io::Error::other(e)))?;
+            added.extend(entry(subject, &key)?);
+            made.push((subject, key));
+        }
+        if made.is_empty() {
+            return Ok(());
+        }
         if self.stale {
             let mut bytes = self.entries()?;
             bytes.extend(added);
             self.storage.replace(&bytes)?;
             self.stale = false;
         } else if let Err(error) = self.storage.append(&added) {
-            // Part of the entry may be on disk; appending after it would
-            // bury it where it reads as damage.
+            // Part of the entries may be on disk; appending after them
+            // would bury them where they read as damage.
             self.stale = true;
             return Err(error.into());
         }
-        self.keys.insert(subject.to_vec(), key);
-        self.by_fingerprint
-            .insert(fingerprint(&key), subject.to_vec());
-        Ok(key)
+        for (subject, key) in made {
+            self.keys.insert(subject.to_vec(), key);
+            self.by_fingerprint
+                .insert(fingerprint(&key), subject.to_vec());
+        }
+        Ok(())
+    }
+
+    /// The storage underneath, for tests to count its writes.
+    #[doc(hidden)]
+    pub fn storage(&self) -> &S {
+        &self.storage
     }
 
     /// Destroys the subject's key. Returns whether there was one. The key

@@ -329,3 +329,68 @@ fn a_damaged_last_key_the_log_uses_is_refused() {
     );
     assert_eq!(std::fs::read(dir.keys()).expect("reads"), bytes);
 }
+
+/// A key file that counts the writes that make keys durable.
+struct CountKeyWrites {
+    file: FileKeyStorage,
+    writes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl KeyStorage for CountKeyWrites {
+    fn read_all(&mut self) -> std::io::Result<Vec<u8>> {
+        self.file.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.file.append(bytes)
+    }
+
+    fn replace(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.file.replace(bytes)
+    }
+}
+
+/// Commits written together that bring many new subjects make all their
+/// keys durable with one write of the key file, as they share one sync of
+/// the log: a wave of new players is not a sync each.
+#[test]
+fn commits_written_together_make_their_new_keys_with_one_write() {
+    use umbrachyx::store::CommitRequest;
+    let dir = TempDir::new("keys-together");
+    let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let storage: Box<dyn KeyStorage + Send> = Box::new(CountKeyWrites {
+        file: FileKeyStorage::new(&dir.keys()),
+        writes: std::sync::Arc::clone(&writes),
+    });
+    let mut store = Store::open_sealed(
+        FileStorage::open(&dir.log()).expect("opens file"),
+        Keys::open(storage).expect("opens the key file"),
+        SystemClock,
+    )
+    .expect("opens");
+    let requests = (0..40)
+        .map(|n| CommitRequest {
+            branch: MAIN_BRANCH.to_owned(),
+            edits: vec![
+                set(&format!("player/{n}/gems"), "10"),
+                set(&format!("player/{n}/item"), "sword"),
+            ],
+            provenance: by("game:signup", "new player"),
+        })
+        .collect();
+
+    let results = store.commit_all(requests).expect("writes the group");
+
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop(store);
+    let reopened = dir.open().expect("reopens");
+    assert_eq!(
+        text(reopened.get(MAIN_BRANCH, b"player/39/item")).as_deref(),
+        Some("sword")
+    );
+}

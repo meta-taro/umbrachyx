@@ -89,6 +89,16 @@ impl Sealer {
         Arc::clone(&self.ring)
     }
 
+    /// Makes a key for every subject among `keys` that has none, all of
+    /// them durable with one write, so that sealing the values of many new
+    /// subjects does not write the key file once for each.
+    pub(crate) fn make_keys_for<'a>(
+        &mut self,
+        keys: impl Iterator<Item = &'a [u8]>,
+    ) -> Result<(), KeyError> {
+        self.keys.make_keys(keys.map(subject))
+    }
+
     /// Seals `value` for `key`, making its subject's key first if needed.
     pub(crate) fn seal(&mut self, key: &[u8], value: &[u8]) -> Result<Vec<u8>, KeyError> {
         let subject_key = self.keys.key_for(subject(key))?;

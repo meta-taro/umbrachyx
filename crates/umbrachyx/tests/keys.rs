@@ -313,3 +313,83 @@ fn a_key_whose_erasure_failed_is_not_used_again() {
     assert_eq!(reopened.get(b"player/42"), Some(&new));
     assert!(!contains(&bytes, &old));
 }
+
+/// Counts the writes that make keys durable.
+struct CountWrites {
+    file: FileKeyStorage,
+    writes: usize,
+}
+
+impl KeyStorage for CountWrites {
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        self.file.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.writes += 1;
+        self.file.append(bytes)
+    }
+
+    fn replace(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.writes += 1;
+        self.file.replace(bytes)
+    }
+}
+
+/// Keys for many new subjects at once are made durable with one write, not
+/// one each, and are the keys each subject has from then on.
+#[test]
+fn keys_for_many_new_subjects_are_made_with_one_write() {
+    let dir = TempDir::new("batch");
+    let storage = CountWrites {
+        file: FileKeyStorage::new(&dir.keys()),
+        writes: 0,
+    };
+    let mut keys = Keys::open(storage).expect("opens");
+    let had = keys.key_for(b"player/1").expect("makes a key");
+    let subjects: Vec<Vec<u8>> = (1..=50)
+        .map(|n| format!("player/{n}").into_bytes())
+        .collect();
+
+    let writes_before = keys.storage().writes;
+    keys.make_keys(subjects.iter().map(Vec::as_slice))
+        .expect("makes the keys");
+    let writes = keys.storage().writes - writes_before;
+    let made: Vec<_> = subjects
+        .iter()
+        .map(|subject| *keys.get(subject).expect("has a key"))
+        .collect();
+    keys.make_keys(subjects.iter().map(Vec::as_slice))
+        .expect("nothing to make");
+    let writes_again = keys.storage().writes - writes_before;
+    drop(keys);
+    let reopened = dir.open().expect("reopens");
+
+    assert_eq!(writes, 1);
+    assert_eq!(writes_again, 1, "subjects with keys need no write");
+    assert_eq!(made[0], had, "a subject keeps the key it had");
+    for (subject, key) in subjects.iter().zip(&made) {
+        assert_eq!(reopened.get(subject), Some(key));
+    }
+}
+
+/// A write of several keys that fails leaves none of them in use: values
+/// sealed under a key that is not durable could never be opened again.
+#[test]
+fn a_failed_write_of_many_keys_leaves_none_of_them() {
+    let dir = TempDir::new("batch-failed");
+    let mut keys = Keys::open(FailNextWrite::new(&dir.keys())).expect("opens");
+    let subjects: [&[u8]; 3] = [b"player/1", b"player/2", b"player/3"];
+
+    let failed = keys.make_keys(subjects.into_iter());
+    let none_kept = subjects.iter().all(|subject| keys.get(subject).is_none());
+    let later = keys.key_for(b"player/2").expect("makes a key");
+    drop(keys);
+    let reopened = dir.open().expect("reopens");
+
+    assert!(failed.is_err());
+    assert!(none_kept);
+    assert_eq!(reopened.get(b"player/2"), Some(&later));
+    assert_eq!(reopened.get(b"player/1"), None);
+    assert_eq!(reopened.get(b"player/3"), None);
+}

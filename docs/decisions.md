@@ -662,9 +662,15 @@ erases the subject while the history keeps its shape (see
   makes an erasure hold for every reader at once. It is worth taking
   again if a workload shows readers waiting on that lock.
 - **The first value of a new subject costs a sync of the key file**, on
-  top of the log's, made on the committer's thread. Writes that create
-  many subjects at once pay it once each; batching them is left until it
-  shows in a measurement.
+  top of the log's, **and commits written together share it.** The keys
+  of every new subject in a group are made first and made durable with
+  one write, before any value is sealed: either all are in use afterwards
+  or none, since a value sealed under a key that is not durable could
+  never be opened. It showed in a measurement: pipelined `SET`s that each
+  brought a new subject ran at 241 a second on the laptop, one sync of the
+  key file each, and at about 70,000 with the keys made together. A group
+  with a new subject still waits for two syncs, the key file's and then
+  the log's.
 - **The keys live in their own file next to the log** (`<log>.keys`),
   because the log is append-only and keeps every byte. The key file is the
   one place where something is destroyed: erasing writes it again without
