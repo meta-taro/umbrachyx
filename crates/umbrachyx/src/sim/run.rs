@@ -19,6 +19,8 @@ use super::rng::Rng;
 use crate::log::{Branch, Commit, Edit, Engine, Log, LogError, Record, Storage, Table, record};
 
 const STEPS: usize = 64;
+/// Bytes a reserving disk reads back in multiples of.
+const RESERVE: usize = 1_024;
 
 /// Out of 100, per step; the rest flip a bit and cut power.
 const APPEND_PERCENT: u64 = 80;
@@ -64,8 +66,15 @@ struct Run {
 
 /// Run one seed. An `Err` is a broken promise, with what was expected.
 pub fn run(seed: u64) -> Result<Outcome, String> {
-    let (log, recovered) =
-        Log::open(SimStorage::default()).map_err(|e| format!("empty log fails to open: {e}"))?;
+    // Every other seed runs on a file reserved ahead of its records, as
+    // the server's log is, so a torn write is followed by zeros. The
+    // reserve is small, for records to end on its edge now and then.
+    let disk = if seed % 2 == 1 {
+        SimStorage::reserving(RESERVE)
+    } else {
+        SimStorage::default()
+    };
+    let (log, recovered) = Log::open(disk).map_err(|e| format!("empty log fails to open: {e}"))?;
     if !recovered.is_empty() {
         return Err("an empty log returned records".to_owned());
     }

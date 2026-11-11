@@ -32,11 +32,19 @@ pub enum SyncFault {
 /// durable. A process crash keeps what is seen (the kernel still has it); a
 /// power cut keeps only what is durable, plus whatever of the unsynced change
 /// the disk happened to write.
+///
+/// A disk made with [`SimStorage::reserving`] is a file whose space was
+/// reserved and zeroed ahead of the records, as the server's log is: it
+/// reads back with zeros after what was written, up to the next multiple
+/// of the reserve, so a write a power cut tore sits in front of zeros
+/// rather than at the end of the file.
 #[derive(Debug, Default, Clone)]
 pub struct SimStorage {
     durable: Vec<u8>,
     current: Vec<u8>,
     next_sync_fault: Option<SyncFault>,
+    /// Zero when nothing is reserved.
+    reserve: usize,
 }
 
 impl SimStorage {
@@ -45,7 +53,24 @@ impl SimStorage {
     pub fn crash(&self, torn: usize) -> Self {
         let pending = self.appended_since_sync().unwrap_or_default();
         let kept = torn.min(pending.len());
-        Self::with_bytes([self.durable.as_slice(), &pending[..kept]].concat())
+        self.holding([self.durable.as_slice(), &pending[..kept]].concat())
+    }
+
+    /// An empty disk that reads back zeros up to the next multiple of
+    /// `reserve` bytes.
+    pub fn reserving(reserve: usize) -> Self {
+        Self {
+            reserve,
+            ..Self::default()
+        }
+    }
+
+    /// A disk like this one that durably holds `bytes`.
+    fn holding(&self, bytes: Vec<u8>) -> Self {
+        Self {
+            reserve: self.reserve,
+            ..Self::with_bytes(bytes)
+        }
     }
 
     /// A power cut. Bytes appended since the last sync are cut at a random
@@ -58,7 +83,7 @@ impl SimStorage {
             } else {
                 &self.current
             };
-            return Self::with_bytes(survivor.clone());
+            return self.holding(survivor.clone());
         };
         let cut = rng.below(pending.len() as u64 + 1) as usize;
         let mut torn = pending[..cut].to_vec();
@@ -75,7 +100,7 @@ impl SimStorage {
             }
             start = end;
         }
-        Self::with_bytes([self.durable.as_slice(), &torn].concat())
+        self.holding([self.durable.as_slice(), &torn].concat())
     }
 
     /// The process dies but the machine does not: everything written stays
@@ -85,6 +110,7 @@ impl SimStorage {
             durable: self.durable.clone(),
             current: self.current.clone(),
             next_sync_fault: None,
+            reserve: self.reserve,
         }
     }
 
@@ -134,13 +160,18 @@ impl SimStorage {
             durable: bytes.clone(),
             current: bytes,
             next_sync_fault: None,
+            reserve: 0,
         }
     }
 }
 
 impl Storage for SimStorage {
     fn read_all(&mut self) -> io::Result<Vec<u8>> {
-        Ok(self.current.clone())
+        let mut bytes = self.current.clone();
+        if self.reserve > 0 {
+            bytes.resize(bytes.len().next_multiple_of(self.reserve), 0);
+        }
+        Ok(bytes)
     }
 
     fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
@@ -257,6 +288,23 @@ mod tests {
 
         assert_eq!(after.read_all().expect("reads").len(), 30);
         assert_eq!(after.pending_len(), 20);
+    }
+
+    #[test]
+    fn a_reserving_disk_reads_zeros_after_what_was_written_through_crashes() {
+        let mut disk = SimStorage::reserving(1_000);
+        disk.append(&[0xAA; 1_500]).expect("appends");
+
+        let seen = disk.read_all().expect("reads");
+        let mut after_cut = disk.power_cut(&mut Rng::new(3));
+        let cut = after_cut.read_all().expect("reads");
+        let mut after_crash = disk.process_crash();
+
+        assert_eq!(seen.len(), 2_000);
+        assert!(seen[..1_500].iter().all(|&b| b == 0xAA));
+        assert!(seen[1_500..].iter().all(|&b| b == 0));
+        assert_eq!(cut.len() % 1_000, 0, "the reserve outlives a power cut");
+        assert_eq!(after_crash.read_all().expect("reads"), seen);
     }
 
     #[test]

@@ -385,11 +385,15 @@ fn check_frame(rest: &[u8]) -> Result<Option<Frame>, &'static str> {
 
 /// Whether a whole, checked frame starts anywhere after the first byte.
 ///
-/// Recovery-only. Most offsets are rejected on the length field alone, but a
-/// long tail of arbitrary bytes can make this slow; the simulation disk will
-/// measure that.
+/// Recovery-only. No frame starts in the zeros that end `rest`: a frame's
+/// length is never zero. A log file reserved ahead of its records ends in
+/// megabytes of them, so the search stops at the last byte that is not
+/// zero. Before that, most offsets are rejected on the length field alone.
 fn has_whole_frame_after_start(rest: &[u8]) -> bool {
-    (1..rest.len()).any(|start| check_frame(&rest[start..]).is_ok())
+    let Some(last) = rest.iter().rposition(|&byte| byte != 0) else {
+        return false;
+    };
+    (1..=last).any(|start| check_frame(&rest[start..]).is_ok())
 }
 
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
@@ -673,6 +677,38 @@ mod tests {
         assert!(
             matches!(error, LogError::Corrupt { offset: 0, .. }),
             "{error:?}"
+        );
+    }
+
+    /// A log reserved ahead of its records: megabytes of zeros after the
+    /// last record, or after a record cut short, are a tail to cut, found
+    /// without trying a frame at every one of them.
+    #[test]
+    fn a_long_zero_tail_is_cut_wherever_the_records_end() {
+        let records = vec![record("a", None), record("b", None)];
+        let whole = frames(&records);
+        let reserve = vec![0; 8 * 1024 * 1024];
+        let started = std::time::Instant::now();
+
+        for cut in [whole.len(), whole.len() - 20] {
+            let bytes = [&whole[..cut], &reserve[..]].concat();
+            let scan = scan(&bytes).expect("scans");
+
+            let kept = if cut == whole.len() { 2 } else { 1 };
+            assert_eq!(scan.records, records[..kept], "cut at {cut}");
+            assert!(scan.valid_len <= cut as u64, "cut at {cut}");
+        }
+        // The last byte of this record is a zero. Cut off and followed by
+        // the reserve's zeros, the bytes are those of the whole record, and
+        // it reads as written: nothing tells the two apart, and nothing
+        // needs to.
+        assert_eq!(whole.last(), Some(&0));
+        let bytes = [&whole[..whole.len() - 1], &reserve[..]].concat();
+        assert_eq!(scan(&bytes).expect("scans").records, records);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "scanning the zeros took {:?}",
+            started.elapsed()
         );
     }
 
