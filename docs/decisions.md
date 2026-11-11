@@ -451,7 +451,15 @@ checker to hold the shared secret that mints tokens.
   common, but each commit still copied the path from the root to every key
   it changed, about 8 KB per one-key commit, more than the history itself
   holds. Kept every 1,024 commits, the same writes take about 3.2 KB a
-  commit, much of it the commit and its cells, which no spacing removes.
+  commit. Most of that is still the kept trees, not the commits: counted
+  by the allocator over 200,000 one-key commits to 1,000,000 keys
+  (`cargo run --release --example memory_cost`), a commit leaves 3,405
+  bytes held, of which 635 are the commit and its cells and about 2,770
+  the kept trees' share. A kept tree holds its own copy of every leaf
+  changed since the one before it, and a leaf is 32 entries copied whole
+  for one changed key. Spacing alone gives back little: 4,145 bytes a
+  commit at every 256, 2,282 at every 8,192. A key that was only ever
+  written once costs 242 bytes.
   The cost moves to reading the past: a diff between two
   old commits rebuilds two trees, about 7 ms on average and 16 ms at worst
   where it took under 0.1 ms, measured in a Linux virtual machine on a
