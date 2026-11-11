@@ -16,14 +16,15 @@
 //! Reads need no token, and writes without one are taken unless the server
 //! requires authentication, so a server should listen only on this machine.
 //!
-//! Each connection has a thread. Commands sent together (pipelined) are
-//! answered together, in order. SETs sent together are written together,
+//! A few threads serve all the connections, each waiting on many sockets
+//! at once (see `event`). Commands sent together (pipelined) are answered
+//! together, in order. SETs sent together are written together,
 //! sharing syncs, and any other command waits for the SETs before it, so a
 //! GET reads what the same client set just before.
 
 use std::fmt;
-use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::Write;
+use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -34,6 +35,7 @@ use biscuit_auth::PublicKey;
 use crate::log::Edit;
 use crate::store::{CommitId, MAIN_BRANCH, Pending, Provenance, Reader, StoreError, Writer};
 
+mod event;
 mod history;
 mod keys;
 pub mod resp;
@@ -88,6 +90,8 @@ pub struct Server {
     public_key: Option<PublicKey>,
     /// Refuse writes from connections that have not authenticated.
     require_auth: bool,
+    /// Threads serving connections.
+    loops: usize,
 }
 
 impl Server {
@@ -106,6 +110,7 @@ impl Server {
             max_connections: MAX_CONNECTIONS,
             public_key: None,
             require_auth: false,
+            loops: default_loops(),
         })
     }
 
@@ -113,6 +118,14 @@ impl Server {
     pub fn public_key(self, public_key: PublicKey) -> Self {
         Self {
             public_key: Some(public_key),
+            ..self
+        }
+    }
+
+    /// How many threads serve the connections, at least one.
+    pub fn threads(self, threads: usize) -> Self {
+        Self {
+            loops: threads,
             ..self
         }
     }
@@ -135,6 +148,17 @@ impl Server {
     /// Accepts connections for as long as the process runs. A failure to
     /// accept or to start a connection's thread costs that connection only.
     pub fn serve(self, listener: TcpListener) -> ! {
+        let loops: Vec<event::Handle> = (0..self.loops.max(1))
+            .filter_map(|number| match event::spawn(self.clone(), number) {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    eprintln!("umbrachyx: a serving thread could not start: {error}");
+                    None
+                }
+            })
+            .collect();
+        assert!(!loops.is_empty(), "no serving thread could start");
+        let mut next = 0;
         loop {
             let (stream, peer) = match listener.accept() {
                 Ok(accepted) => accepted,
@@ -148,64 +172,17 @@ impl Server {
                 refuse(stream);
                 continue;
             };
-            let server = self.clone();
-            let started = thread::Builder::new()
-                .name(format!("resp {peer}"))
-                .spawn(move || server.connection(stream, peer, slot));
-            if let Err(error) = started {
-                eprintln!("umbrachyx: {peer}: no thread for the connection: {error}");
+            // Replies go out as they are ready, and a serving thread never
+            // waits on one socket.
+            let prepared = stream
+                .set_nodelay(true)
+                .and_then(|()| stream.set_nonblocking(true));
+            if let Err(error) = prepared {
+                eprintln!("umbrachyx: {peer}: {error}");
+                continue;
             }
-        }
-    }
-
-    fn connection(self, mut stream: TcpStream, peer: SocketAddr, _slot: Slot) {
-        // A connection that fails is closed; the server goes on. A client
-        // that hangs up is not worth a line of the log.
-        match self.talk(&mut stream) {
-            Ok(()) => {}
-            Err(error) if is_hang_up(&error) => {}
-            Err(error) => eprintln!("umbrachyx: {peer}: {error}"),
-        }
-    }
-
-    /// Reads commands and answers each batch that arrived together.
-    fn talk(&self, stream: &mut TcpStream) -> io::Result<()> {
-        stream.set_nodelay(true)?;
-        let mut session = Session::new();
-        let mut input = Vec::new();
-        let mut out = Vec::new();
-        let mut unanswered = Vec::new();
-        let mut chunk = vec![0; READ_CHUNK];
-        loop {
-            let read = stream.read(&mut chunk)?;
-            if read == 0 {
-                return Ok(());
-            }
-            input.extend_from_slice(&chunk[..read]);
-            let mut used = 0;
-            let result = loop {
-                match resp::parse(&input[used..]) {
-                    Ok(Some((command, len))) => {
-                        used += len;
-                        self.answer(&command, &mut session, &mut unanswered, &mut out);
-                        if out.len() >= MAX_PENDING_OUT {
-                            stream.write_all(&out)?;
-                            out.clear();
-                        }
-                    }
-                    Ok(None) => break Ok(()),
-                    Err(error) => break Err(error),
-                }
-            };
-            input.drain(..used);
-            settle(&mut unanswered, &mut out);
-            if let Err(error) = result {
-                Reply::Error(format!("ERR {error}")).write_to(&mut out);
-                stream.write_all(&out)?;
-                return Ok(());
-            }
-            stream.write_all(&out)?;
-            out.clear();
+            loops[next % loops.len()].give(stream, slot);
+            next = next.wrapping_add(1);
         }
     }
 
@@ -285,6 +262,14 @@ impl Server {
     }
 }
 
+/// A thread per processor up to this many: reads are answered on all of
+/// them at once, and past a few the client, not the server, is what waits.
+const MAX_DEFAULT_LOOPS: usize = 4;
+
+fn default_loops() -> usize {
+    thread::available_parallelism().map_or(1, |cores| cores.get().min(MAX_DEFAULT_LOOPS))
+}
+
 /// Where a command's reply comes from.
 enum Step {
     Reply(Reply),
@@ -319,16 +304,6 @@ fn refuse(mut stream: TcpStream) {
     Reply::Error("ERR max number of clients reached".to_owned()).write_to(&mut out);
     // The client is turned away either way; a failed write changes nothing.
     let _ = stream.write_all(&out);
-}
-
-fn is_hang_up(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::BrokenPipe
-            | io::ErrorKind::UnexpectedEof
-    )
 }
 
 /// One of the connections allowed at once, given back when dropped.

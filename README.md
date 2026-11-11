@@ -101,6 +101,14 @@ always`). Synthetic data, 32-byte values, 1,000,000 keys present.
 Latencies are medians unless marked p99. Umbrachyx comes first in each
 pair; an empty cell was not measured on that machine.
 
+These are the numbers of 0.1.0. Since then the log is zeroed ahead of its
+records, writers no longer hand their commits to another thread, and a
+few threads serve all connections instead of one each
+([`docs/decisions.md`](docs/decisions.md) has what each measured in a
+virtual machine); the table is measured again on the release machine
+before the next release, and the explanations under it describe the
+server as it was measured.
+
 | | AWS (release machine) | Laptop (macOS) | Linux CI runner |
 |---|---|---|---|
 | `GET` while 50 clients write | **~18× faster** (0.031 vs 0.575 ms) | **~650× faster** (0.015 vs 9.86 ms) | **~20–28× faster** (0.031–0.039 vs 0.78–0.86 ms) |

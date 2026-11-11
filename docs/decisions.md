@@ -14,6 +14,7 @@ without an entry here is not adopted.
 | `serde_json` | Reading and writing the JSON-RPC messages of the MCP session | The de facto JSON crate for Rust, MIT OR Apache-2.0, maintained by the serde authors. It was already built as a dependency of `biscuit-auth`, so it adds no crate. Used through `Value` only, without derive macros. The MCP protocol itself is written here rather than taken from the official Rust SDK, which runs on an async runtime the server does not use; the part served is four methods |
 | `getrandom` | The random bytes of each subject's encryption key | The operating system's random source, nothing else: the smallest way to get key material. MIT OR Apache-2.0, maintained by the rust-random project, and already built as a dependency of `biscuit-auth` at the same version, so it adds no crate |
 | `aes-siv` | Encrypting each value under its subject's key, so that destroying the key erases the subject | Deterministic authenticated encryption (RFC 5297) from RustCrypto, Apache-2.0 OR MIT, maintained with the rest of its AEADs. Deterministic is what the store needs: equal values must stay equal once encrypted for the tree, diffs and merges to work unchanged, and AES-SIV is built to be used that way rather than with a nonce we would have to invent. Default features are off; the random source is `getrandom`, already a dependency. It brings its RustCrypto building blocks (`aes`, `cmac`, `ctr` and their traits) |
+| `mio` | Asking the operating system which of many sockets are ready, so a few threads serve every connection | epoll, kqueue and Windows' completion ports behind one small interface, and nothing else: no runtime, no executor. Written against each by hand it would be three implementations to keep correct. MIT, maintained by the Tokio project and the layer Tokio itself stands on; features `os-poll` and `net` only |
 | `tikv-jemallocator` (binary only, not on Windows) | The `umbrachyx` binary's memory allocator | Every write copies and hashes tree nodes, each hash into a fresh buffer. With glibc's malloc, the C library took 12% of the server's time under SETs; with jemalloc, 6%, and pipelined SETs ran 10 to 18% faster in a Linux virtual machine ([`bench/results/2026-11-09-linux-vm-node-hash/`](../bench/results/2026-11-09-linux-vm-node-hash/)). jemalloc is the allocator Valkey and Redis build with, maintained by the TiKV project, MIT / Apache-2.0 for the Rust part and BSD-2-Clause for jemalloc. It is C built from source, so building needs a C compiler and `make`. mimalloc was measured too and was no faster without the change to hashing; it was not tried with it. Memory per write did not change with either. The library and its tests keep the system allocator; it does not build with the MSVC toolchain, so Windows keeps it too |
 
 ## The log
@@ -514,18 +515,36 @@ checker to hold the shared secret that mints tokens.
   (`NOAUTH`), and reads stay open either way.
 - **It listens only on 127.0.0.1**, because reads need no token and writes
   need one only with `--require-auth`.
-- **One thread per connection, at most 1,024 connections, no async
-  runtime.** It is the simplest design that serves the benchmarks, and it
-  adds no dependency. A connection past the limit is told so and closed.
-  A failure to accept a connection or to start its thread costs that
-  connection only. Idle connections are not timed out yet. The limit can
-  be raised with `serve --max-connections`. Measured against Valkey on
-  Linux, this design served 10,000 connections with slowest reads at about
-  half of Valkey's, so it stays for now. On macOS it holds up to about
-  1,000 connections; at 5,000 its slowest reads are five times Valkey's,
-  and past the thread limit (8,192 a process) it cannot serve at all.
-  Serving that many there, or far more anywhere, would need connections
-  that do not each hold a thread.
+- **A few threads serve all the connections, each waiting on many sockets
+  at once; no async runtime.** A thread asks the operating system which of
+  its sockets have something to read, reads each and carries out the
+  commands, waits once for the `SET`s they queued, which writes them with
+  one sync, and sends the replies. There are as many threads as
+  processors, up to four (`Server::threads`), and a new connection goes to
+  the next in turn. At most 1,024 connections unless `serve
+  --max-connections` says otherwise; one past the limit is told so and
+  closed. Idle connections are not timed out yet.
+  - **It replaced a thread per connection**, which was the simplest
+    design and added no dependency, and which was woken for every request
+    and put back to sleep after it. In a two-processor Linux virtual
+    machine, `GET`s from 50 and from 256 clients went from about 220,000
+    and 200,000 a second to about 320,000 and 300,000, where Valkey did
+    326,000 and 305,000; durable `SET`s from 256 clients from about 78,000
+    to about 120,000, where Valkey did 128,000. It also ends the thread
+    limit that kept macOS from serving 10,000 connections.
+  - **What it cost:** a `GET` from one client went from about 32,000 a
+    second to about 28,600, the same as Valkey's 28,700. A thread that
+    blocks on its one socket is woken straight into the read; a thread
+    waiting on many asks which first. Keeping a thread spinning for the
+    next request would win that back and would burn a processor on a
+    quiet server, so it is not done.
+  - **Reads are answered on every serving thread at once**, from the view;
+    only writes take turns. That is where more processors than these
+    measurements had should show.
+  - **A connection whose client does not take its replies is not read
+    from until it does**, so what waits for it stays under about 1 MiB,
+    and a client that sends without pause gives the others their turn
+    after each 1 MiB read.
 - **Every length a client sends is checked before anything is allocated
   for it**: at most 1,024 arguments, and at most 1 MiB for all the
   arguments of one command together. That bounds what a connection

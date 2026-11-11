@@ -7,6 +7,12 @@ compared, it says that too.
 
 ## Setup
 
+Everything below was measured on 0.1.0 or before it, when each connection
+had its own thread, one thread wrote every commit, and the log file grew
+with each record. The server has changed in all three since
+([`decisions.md`](decisions.md)); these numbers are measured again on the
+release machine before the next release.
+
 - Apple M4 MacBook Air (fanless, 32 GB), macOS 26.6.2, internal SSD with
   APFS, on AC power, 2026-11-03. One machine; nothing else heavy running.
 - Umbrachyx at the commit that last changed this page, built with
