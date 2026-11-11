@@ -726,9 +726,21 @@ choose its storage engine.
   column), so expiry and every narrowing count, and an expired token is
   refused. A token narrowed below its issuer's grant may not be told of a
   table it could read; it is never told of one it cannot.
-- **Not built**: a way for others to plug in engines, a log per engine,
-  and an append-only engine for events, which waits for the latest
-  engine's numbers.
+- **Not built**: a way for others to plug in engines, and a log per
+  engine.
+- **No append-only engine for events, for now** (decided after the
+  latest engine's numbers). Events are rows written once under new keys.
+  A latest table already holds those for about 780 bytes a SET where the
+  history holds about 2,400 (the first pass of `bench/memory.sh`, every
+  key new), and an event that is never changed loses nothing by keeping
+  only its latest value. What an append engine would add is reading rows
+  in the order they were written, and nothing reads that way yet: the
+  server's `SCAN` has no order, and there is no time-range command. It
+  would also need its own answers for `UMBRA.HISTORY`, `UMBRA.CELLS` and
+  `UMBRA.DIFF`, which tools would have to learn. **Build it when** a
+  command or a user needs rows in written order, or when events in a
+  latest table measure at more than half the memory per row of an append
+  engine prototype.
 - **Stop if** the latest engine does not at least halve the memory kept
   per SET in `bench/memory.sh`, or makes neither SET nor GET at least 10%
   faster; or if its branches fail the deterministic simulation or the
