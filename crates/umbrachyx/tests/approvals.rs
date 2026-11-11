@@ -5,7 +5,9 @@
 use std::path::{Path, PathBuf};
 
 use umbrachyx::log::{Edit, FileStorage};
-use umbrachyx::store::{Approved, MAIN_BRANCH, Provenance, Store, StoreError, SystemClock};
+use umbrachyx::store::{
+    Approved, MAIN_BRANCH, NotWaiting, Provenance, Store, StoreError, SystemClock,
+};
 use umbrachyx::tree::Bytes;
 
 type FileStore = Store<FileStorage, SystemClock>;
@@ -166,7 +168,10 @@ fn a_change_written_to_after_it_was_seen_is_not_approved() {
 
     let refused = store.approve(AGENT_BRANCH, &seen, by("person:lead", "looked fine"));
 
-    assert!(matches!(refused, Err(StoreError::NotWaiting(head)) if head == seen));
+    assert!(matches!(
+        refused,
+        Err(StoreError::NotWaiting(head, NotWaiting::Moved)) if head == seen
+    ));
     assert_eq!(store.head(MAIN_BRANCH), main_before);
 }
 
@@ -249,7 +254,10 @@ fn a_head_no_change_has_is_refused_for_reject_too() {
 
     let refused = store.reject(AGENT_BRANCH, &[9; 32], by("person:lead", "?"));
 
-    assert!(matches!(refused, Err(StoreError::NotWaiting(_))));
+    assert!(matches!(
+        refused,
+        Err(StoreError::NotWaiting(_, NotWaiting::None))
+    ));
     assert_eq!(store.pending().expect("lists").len(), 1);
 }
 
@@ -276,4 +284,43 @@ fn two_branches_at_one_head_are_told_apart_by_name() {
         .collect();
     assert_eq!(waiting, vec![AGENT_BRANCH.to_owned()]);
     assert!(store.rejection(AGENT_BRANCH).is_none());
+}
+
+#[test]
+fn a_change_already_decided_says_so() {
+    let dir = TempDir::new("decided");
+    let mut store = with_a_change(&dir.log());
+    let head = store.head(AGENT_BRANCH).expect("has commits");
+    store
+        .approve(AGENT_BRANCH, &head, by("person:lead", "first"))
+        .expect("approves");
+
+    let again = store.approve(AGENT_BRANCH, &head, by("person:other", "second"));
+    let reject = store.reject(AGENT_BRANCH, &head, by("person:other", "too late"));
+
+    assert!(matches!(
+        again,
+        Err(StoreError::NotWaiting(_, NotWaiting::Decided))
+    ));
+    assert!(matches!(
+        reject,
+        Err(StoreError::NotWaiting(_, NotWaiting::Decided))
+    ));
+}
+
+#[test]
+fn a_rejected_change_rejected_again_says_it_was_decided() {
+    let dir = TempDir::new("rejected-twice");
+    let mut store = with_a_change(&dir.log());
+    let head = store.head(AGENT_BRANCH).expect("has commits");
+    store
+        .reject(AGENT_BRANCH, &head, by("person:lead", "no"))
+        .expect("rejects");
+
+    let again = store.approve(AGENT_BRANCH, &head, by("person:other", "yes"));
+
+    assert!(matches!(
+        again,
+        Err(StoreError::NotWaiting(_, NotWaiting::Decided))
+    ));
 }

@@ -284,6 +284,10 @@ fn an_approver_merges_the_change_and_is_recorded() {
     };
 
     assert_eq!(client.ask(&["UMBRA.PENDING"]), Resp::Array(Vec::new()));
+    let Resp::Bulk(Some(log)) = client.ask(&["UMBRA.LOG", MAIN_BRANCH]) else {
+        panic!("LOG answers JSON");
+    };
+    assert!(log.contains(r#""approved_by":["person:lead"]"#), "{log}");
     let view = committer.reader().view();
     assert_eq!(
         view.get(MAIN_BRANCH, b"player/7/gems"),
@@ -354,7 +358,7 @@ fn a_head_that_moved_is_not_approved() {
         panic!("refused");
     };
 
-    assert!(refused.starts_with("NOTWAITING "), "{refused}");
+    assert!(refused.starts_with("NOTWAITING moved "), "{refused}");
     let view = committer.reader().view();
     assert_eq!(
         view.get(MAIN_BRANCH, b"player/7/gems"),

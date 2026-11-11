@@ -28,7 +28,7 @@ pub(crate) fn change(cell: &Cell, info: &CommitInfo) -> Value {
         "time_us": info.time,
         "who": info.provenance.who,
         "why": info.provenance.why,
-        "approved_by": info.provenance.approved_by,
+        "approved_by": approvers(info),
     })
 }
 
@@ -51,6 +51,16 @@ pub(crate) fn commit(info: &CommitInfo) -> Value {
         "time_us": info.time,
         "who": info.provenance.who,
         "why": info.provenance.why,
-        "approved_by": info.provenance.approved_by,
+        "approved_by": approvers(info),
     })
+}
+
+/// Who approved a commit, as a list: one name today, so a tool reading it
+/// need not change when an approval takes more than one person.
+fn approvers(info: &CommitInfo) -> Vec<&str> {
+    info.provenance
+        .approved_by
+        .iter()
+        .map(String::as_str)
+        .collect()
 }

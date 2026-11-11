@@ -688,8 +688,9 @@ for it is the gate for the first public release, with the speed work.
   is never granted together with a branch to write to, so an agent's
   token cannot approve its own change, or any other. A token that can
   approve cannot write; a person who also writes holds two tokens. The
-  merge records its approver in `approved_by`, one name; approvals by
-  two people would make it a list, a change of the log's format.
+  merge records its approver in `approved_by`. Replies give it as a list
+  already, empty when nobody approved, so tools need not change when an
+  approval takes two people; the log holds one name until then.
 - **A connection that has not authenticated** reads as before and may
   `SET` on the served branch, recorded with `unauthenticated` as who
   rather than an empty name; it may not approve or reject.
@@ -702,8 +703,11 @@ for it is the gate for the first public release, with the speed work.
   at a time is still to come.
 - **Refusals say why in their first word**, as Redis errors do:
   `NOAUTH` without a token, `NOPERM` for a token that may not approve a
-  key the change touches, `NOTWAITING` when the branch is no longer at
-  the head given, `CONFLICT` followed by the keys both sides changed.
+  key the change touches, `NOTWAITING` with a second word for why
+  (`moved`: written to since; `decided`: approved or rejected already;
+  `none`: never a change there), `CONFLICT` followed by the keys both
+  sides changed. A viewer says something different for each without
+  parsing the message.
 - **A change is named by its branch and head, not its head alone.** A
   branch made from another starts at the same head, and the store
   simulation found a rejection landing on the branch it came from when

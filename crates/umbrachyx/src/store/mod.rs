@@ -214,9 +214,31 @@ pub enum StoreError {
     /// The key's table keeps only its latest value, so it has none to give
     /// for a commit that is not the head of a branch.
     NoPast(Vec<u8>),
-    /// No change waiting has this head: it was approved, rejected or
-    /// written to since, or never was one.
-    NotWaiting(CommitId),
+    /// The branch has no change waiting at this head; the second field
+    /// says why.
+    NotWaiting(CommitId, NotWaiting),
+}
+
+/// Why a branch has no change waiting at a head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotWaiting {
+    /// The branch has been written to since that head.
+    Moved,
+    /// The change at that head was approved or rejected already.
+    Decided,
+    /// The branch never had a change at that head.
+    None,
+}
+
+impl NotWaiting {
+    /// One word for it, as tools match on.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Moved => "moved",
+            Self::Decided => "decided",
+            Self::None => "none",
+        }
+    }
 }
 
 impl fmt::Display for StoreError {
@@ -268,11 +290,14 @@ impl fmt::Display for StoreError {
                 "table {:?} keeps only the latest value; past commits hold none of it",
                 String::from_utf8_lossy(name)
             ),
-            Self::NotWaiting(head) => write!(
-                f,
-                "no change waiting has head {}: it was approved, rejected or written to since",
-                short(head)
-            ),
+            Self::NotWaiting(head, why) => {
+                let what = match why {
+                    NotWaiting::Moved => "the branch has been written to since",
+                    NotWaiting::Decided => "it was approved or rejected already",
+                    NotWaiting::None => "the branch never had a change there",
+                };
+                write!(f, "no change waiting at {}: {what}", short(head))
+            }
         }
     }
 }

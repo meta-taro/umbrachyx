@@ -192,7 +192,9 @@ fn decide(
 
 fn store_error(error: &StoreError) -> Reply {
     match error {
-        StoreError::NotWaiting(_) => Reply::Error(format!("NOTWAITING {error}")),
+        StoreError::NotWaiting(_, why) => {
+            Reply::Error(format!("NOTWAITING {} {error}", why.word()))
+        }
         _ => Reply::Error(format!("ERR {error}")),
     }
 }

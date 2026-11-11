@@ -329,7 +329,7 @@ fn a_commit_lands_on_the_tokens_branch_with_the_agent_as_author() {
     assert_eq!(item.0["value"], Value::Null);
     assert_eq!(history["changes"][0]["who"], SUBJECT);
     assert_eq!(history["changes"][0]["why"], "refund for ticket 8812");
-    assert_eq!(history["changes"][0]["approved_by"], Value::Null);
+    assert_eq!(history["changes"][0]["approved_by"], serde_json::json!([]));
     assert_eq!(history["changes"][0]["commit"], written["commit"]);
 }
 

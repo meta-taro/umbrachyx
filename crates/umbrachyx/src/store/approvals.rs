@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use super::merge::MergePlan;
 use super::{
-    Clock, CommitId, Conflict, MAIN_BRANCH, Provenance, Rejection, Storage, Store, StoreError,
+    Clock, CommitId, Conflict, MAIN_BRANCH, NotWaiting, Provenance, Rejection, Storage, Store,
+    StoreError,
 };
 use crate::log::{Record, Reject};
 use crate::tree::Bytes;
@@ -70,7 +71,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     ) -> Result<Approved, StoreError> {
         self.require_waiting(branch, head)?;
         match self.merge_plan(MAIN_BRANCH, branch)? {
-            MergePlan::UpToDate => Err(StoreError::NotWaiting(*head)),
+            MergePlan::UpToDate => Err(StoreError::NotWaiting(*head, NotWaiting::Decided)),
             MergePlan::Conflicts(conflicts) => Ok(Approved::Conflicts(
                 conflicts
                     .into_iter()
@@ -128,19 +129,29 @@ impl<S: Storage, C: Clock> Store<S, C> {
         self.rejections.get(branch)
     }
 
-    /// That `branch` has a change waiting and its head is `head`.
+    /// That `branch` has a change waiting and its head is `head`, or why
+    /// not: decided, moved on since, or never there.
     fn require_waiting(&self, branch: &str, head: &CommitId) -> Result<(), StoreError> {
         self.require_branch(branch)?;
         let main = self.head(MAIN_BRANCH);
         let on_main = main.map(|main| self.ancestors(main)).unwrap_or_default();
-        let waiting = branch != MAIN_BRANCH
-            && self.head(branch) == Some(*head)
-            && self.is_waiting(branch, head, &on_main);
-        if waiting {
-            Ok(())
+        let current = self.head(branch);
+        let rejected_here = self
+            .rejections
+            .get(branch)
+            .is_some_and(|rejection| rejection.head == *head);
+        let why = if on_main.contains(head) || rejected_here {
+            NotWaiting::Decided
+        } else if branch == MAIN_BRANCH {
+            NotWaiting::None
+        } else if current == Some(*head) {
+            return Ok(());
+        } else if current.is_some_and(|current| self.ancestors(current).contains(head)) {
+            NotWaiting::Moved
         } else {
-            Err(StoreError::NotWaiting(*head))
-        }
+            NotWaiting::None
+        };
+        Err(StoreError::NotWaiting(*head, why))
     }
 
     fn is_waiting(&self, branch: &str, head: &CommitId, on_main: &HashSet<CommitId>) -> bool {
