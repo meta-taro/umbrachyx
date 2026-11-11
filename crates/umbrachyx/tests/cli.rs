@@ -1,16 +1,20 @@
-//! The command-line tool's `serve` options, run as a separate process.
+//! The command-line tool run as separate processes: `serve` options, and a
+//! second process on a log already in use.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const BRANCH: &str = "bench";
 /// How long the server gets to start listening.
 const START_TRIES: usize = 200;
 const START_WAIT: Duration = Duration::from_millis(25);
+/// How long a second process may take to be told the log is in use. It
+/// should be told at once; this only has to be longer than starting it.
+const REFUSAL_LIMIT: Duration = Duration::from_secs(5);
 
 /// A fresh directory per test, removed when the test ends.
 struct TempDir(PathBuf);
@@ -119,4 +123,42 @@ fn serve_refuses_a_max_connections_that_is_not_a_positive_number() {
             "{bad}: {stderr}"
         );
     }
+}
+
+#[test]
+fn a_second_process_on_a_log_in_use_is_refused_at_once() {
+    let dir = TempDir::new("log-in-use");
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+    let port = free_port();
+    let port_arg = port.to_string();
+    let _server = Server(
+        dir.umbrachyx(&["serve", BRANCH, "--port", &port_arg])
+            .spawn()
+            .expect("starts"),
+    );
+    drop(connect(port));
+
+    let started = Instant::now();
+    let mut second = dir
+        .umbrachyx(&["get", "config"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("starts");
+    while second.try_wait().expect("polls").is_none() {
+        if started.elapsed() > REFUSAL_LIMIT {
+            let _ = second.kill();
+            panic!("a second process waited on the log instead of being refused");
+        }
+        thread::sleep(START_WAIT);
+    }
+    let output = second.wait_with_output().expect("finishes");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("already open"), "stderr: {stderr}");
 }
