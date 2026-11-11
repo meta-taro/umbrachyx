@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Every benchmark and robustness test on a fresh Ubuntu 24.04 machine, for
 # a release. Installs what it needs, builds Valkey from its release tag,
-# downloads Dolt's release, runs bench/umbrachyx.sh, bench/valkey.sh,
+# downloads Dolt's release, installs Ubuntu's PostgreSQL, runs
+# bench/umbrachyx.sh, bench/valkey.sh, bench/postgres.sh,
 # bench/connections.sh, bench/memory.sh and the diff and load comparison
 # with Dolt (the compare example and bench/dolt.sh, over
 # a million records) several times, then the robustness tests, and writes
@@ -27,7 +28,10 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 out="$HOME/umbrachyx-results/$(date -u +%F)-$machine"
 
 sudo apt-get update -qq
-sudo apt-get install -y -qq build-essential git pkg-config curl >/dev/null
+sudo apt-get install -y -qq build-essential git pkg-config curl postgresql >/dev/null
+# bench/postgres.sh makes its own server on the scratch disk; the one the
+# package starts would only take memory and processor time from the runs.
+sudo systemctl disable --now postgresql >/dev/null 2>&1 || true
 if ! command -v cargo >/dev/null; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
 fi
@@ -71,12 +75,14 @@ cd "$repo"
   rustup show active-toolchain
   valkey-server --version
   dolt version
+  "$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)/postgres" --version
 } >"$out/machine.txt"
 
 for run in $(seq 1 "$runs"); do
   mkdir -p "$out/run-$run"
   bench/umbrachyx.sh >"$out/run-$run/umbrachyx.csv"
   bench/valkey.sh >"$out/run-$run/valkey.csv"
+  bench/postgres.sh >"$out/run-$run/postgres.csv"
   bench/connections.sh >"$out/run-$run/connections.csv" 2>"$out/run-$run/connections.stderr.txt"
   bench/memory.sh >"$out/run-$run/memory.csv"
   rm -rf "$scratch/dolt-input"

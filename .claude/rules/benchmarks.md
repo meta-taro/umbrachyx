@@ -34,7 +34,7 @@
 
 - スポット／プリエンプティブルは途中で止められ、測り直しになるため使わない。
 - **条件を変えるときは**、理由を `docs/comparison.md` に書き、新旧の両方の機械で同じ commit を1回ずつ測って、つなぎ目を残す。
-- 毎回 Valkey と Dolt も同じ機械で測り直す。倍率は、同じ機械で測った値同士でしか出さない。
+- 毎回 Valkey・Dolt・PostgreSQL も同じ機械で測り直す。倍率は、同じ機械で測った値同士でしか出さない。
 - ほかの機械（ノート PC、Xserver VPS など）の数字は、参考の列として README に並べてよい。そのときは機械・プラン・CPU が専有か共有か・ディスクの種類を書く。
 
 ## 3. 流すもの
@@ -44,6 +44,7 @@
 ```sh
 bench/umbrachyx.sh
 bench/valkey.sh
+bench/postgres.sh             # PostgreSQL の主キーでの読み取りと更新（Ubuntu の版）
 bench/connections.sh          # 先に ulimit -n 65536
 bench/memory.sh               # 同じ SET を2回流したときのメモリ（RSS）
 cargo run --release -p umbrachyx --example compare -- 1000000 <dir>   # 差分と読み込み（Dolt と同じデータ）
