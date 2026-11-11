@@ -1,0 +1,147 @@
+/**
+ * OSS の入口ページ 共通スタイル（正本）
+ *
+ * 出どころは zumen の style.css（2026-09-22 時点）。7 枚の GitHub Pages を
+ * 横に並べて見たとき、**zumen だけが「読み手の困りごと」から始まっていて、
+ * 残り 6 枚は製品名から始まっていた**。伝わらない原因はページごとの出来ではなく、
+ * 7 枚が別々の作りに見えることと、h1 が情報ゼロの行になっていることの 2 つ。
+ * 勝っている 1 枚を正本にして、残りをそこへ寄せる。
+ *
+ * **ここには製品固有のものを足さない。** ギャラリー・絞り込み・地図のように
+ * その製品にしか無い部品は、各リポの `extra.css` に置く。ここへ足すと、
+ * 配った先全部がその製品の都合を背負う。
+ *
+ * 明暗は OS の設定に従う。**切り替えボタンは置かない** —— 入口のページで
+ * 最初に押させるものが見た目の設定だと、何の道具かを読む前に手が止まる。
+ */
+
+:root {
+  --bg: #ffffff; --bg-subtle: #fbfbfd; --border: #e8e8ed; --border-strong: #d4d4dc;
+  --fg: #1c1c22; --fg-2: #63636e; --fg-3: #9b9ba5; --accent: #5b5bd6; --accent-bg: #eeeefb;
+  --paper: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f0f13; --bg-subtle: #141418; --border: #26262d; --border-strong: #34343d;
+    --fg: #f4f4f6; --fg-2: #a0a0ab; --fg-3: #6b6b76; --accent: #7c7cf0; --accent-bg: #1e1e3a;
+    --paper: #0f0f13;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.75 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); }
+.wrap { max-width: 880px; margin: 0 auto; padding: 0 24px; }
+
+/* --- 1. 名乗り ------------------------------------------------------------
+   製品名はここ。**h1 へ製品名を置かない** —— 読み手はまだその名前を知らないので、
+   いちばん大きい行が情報ゼロになる。名前はアイコンの隣で足りる。 */
+header { padding: 88px 0 64px; }
+.mark { display: flex; align-items: center; gap: 12px; margin-bottom: 40px; }
+.mark img { width: 36px; height: 36px; border-radius: 8px; }
+.mark b { font-size: 17px; letter-spacing: .02em; }
+/* 言語の切り替え。いま見ているほうは押せない文字で出す ——
+   押せるものと押せないものが同じ見た目だと、押してから気づくことになる。 */
+.lang { margin-left: auto; display: flex; gap: 10px; font-size: 13px; }
+.lang span { color: var(--fg-3); }
+.lang a { color: var(--fg-2); text-decoration: none; }
+.lang a:hover { color: var(--accent); text-decoration: underline; }
+
+/* --- 2. 困りごと ----------------------------------------------------------
+   h1 は **読み手に起きていること**を 2 行で書く。後半を .quiet で落とすと、
+   前半（起きたこと）→ 後半（その結果）の順に読ませられる。 */
+h1 { font-size: 40px; line-height: 1.35; margin: 0 0 20px; letter-spacing: -.01em; }
+h1 .quiet { color: var(--fg-3); }
+
+/* --- 3. それをどう消すか --------------------------------------------------
+   2 行まで。2 行目に効き目を置いて <b> で締める。 */
+.lede { font-size: 18px; color: var(--fg-2); margin: 0 0 36px; max-width: 34em; }
+
+/* --- 4. 入手口 ------------------------------------------------------------
+   主ボタン 1 つ + 副 1〜2 つ + 対応 OS とライセンスの添え書き。
+   **版数を書かない** —— 書いた翌日に嘘になる。版はリリースページが持つ。 */
+.cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.btn {
+  display: inline-block; padding: 11px 20px; border-radius: 8px; text-decoration: none;
+  border: 1px solid var(--border-strong); color: var(--fg); font-size: 15px;
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn:hover { border-color: var(--accent); }
+.note { color: var(--fg-3); font-size: 14px; }
+
+/* --- 5. 実物 1 枚 ---------------------------------------------------------
+   何を作る道具かは、絵が答えるのがいちばん速い。**入手口のすぐ下**に置く。
+   figcaption は絵の説明ではなく、**h1 の困りごとと絵を結ぶ 1 文**を書く。 */
+.hero { margin: 0 0 8px; }
+.hero img {
+  display: block; width: 100%; height: auto; background: var(--paper);
+  border: 1px solid var(--border); border-radius: 12px;
+}
+/* 図・スクリーンショットのように余白を持たない絵は、こちらで余白を付ける。 */
+.hero img.pad { padding: 22px; }
+.hero figcaption { color: var(--fg-3); font-size: 13.5px; margin-top: 12px; }
+
+/* --- 6. 以下、本文 -------------------------------------------------------- */
+section { padding: 56px 0; border-top: 1px solid var(--border); }
+h2 { font-size: 13px; letter-spacing: .12em; color: var(--fg-3); margin: 0 0 28px; font-weight: 600; }
+h3 { font-size: 20px; margin: 0 0 10px; }
+p { margin: 0 0 16px; }
+ul { margin: 0 0 16px; padding-left: 1.25em; }
+li { margin-bottom: 8px; }
+
+/* 本文の行を長くしすぎない。880px の全幅に 16px の日本語を流すと 1 行 55 字になり、
+   目が行を追えなくなる。カード（.cards）と図（pre）は横幅を使うので対象外。 */
+section > p, section > ul { max-width: 42em; }
+
+/* 困りごとを本文でもう一度、連鎖の形で書くときに使う。 */
+.problem { font-size: 20px; line-height: 1.9; }
+.problem b { color: var(--fg); }
+
+pre {
+  background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 8px;
+  padding: 16px 18px; overflow-x: auto; font-size: 13.5px; line-height: 1.7; margin: 0 0 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+pre .c { color: var(--fg-3); }
+p code, li code, td code { background: var(--bg-subtle); padding: 1px 5px; border-radius: 4px; border: 1px solid var(--border); }
+
+/* 横並びの説明。**列数を固定しない** —— 3 つ書く製品と 5 つ書く製品がある。 */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 32px; }
+
+/* 箱で並べるもの（入手先・対応表）。中身が伸びても揃う。 */
+.cards { list-style: none; padding: 0; margin: 0; display: grid; gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.cards > li, .card {
+  border: 1px solid var(--border); border-radius: 10px; padding: 20px;
+  background: var(--bg-subtle);
+}
+.card h3 { font-size: 16px; margin: 0 0 8px; }
+.card p { font-size: 14.5px; color: var(--fg-2); margin: 0; }
+/* いま出せるもの / まだのもの。**まだのものを隠さない** ——
+   隠すと、入れてから無いことに気づく。 */
+.badge {
+  display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 999px;
+  font-size: 11px; letter-spacing: .04em; vertical-align: middle;
+  background: var(--accent-bg); color: var(--accent); border: 1px solid var(--border);
+}
+.badge.muted { background: var(--bg); color: var(--fg-3); }
+
+.warn {
+  background: var(--accent-bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 18px 20px; font-size: 15px;
+}
+
+footer { padding: 48px 0 72px; color: var(--fg-3); font-size: 14px; border-top: 1px solid var(--border); }
+footer a { color: var(--fg-2); }
+
+@media (max-width: 760px) {
+  header { padding: 56px 0 44px; }
+  h1 { font-size: 30px; }
+  .lede { font-size: 17px; }
+  .problem { font-size: 18px; }
+}
