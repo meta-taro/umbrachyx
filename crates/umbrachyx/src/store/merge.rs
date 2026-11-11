@@ -46,6 +46,13 @@ pub enum Merged {
     Conflicts(Vec<Conflict>),
 }
 
+/// What a merge would do.
+pub(super) enum MergePlan {
+    UpToDate,
+    Conflicts(Vec<Conflict>),
+    Edits { edits: Vec<Edit>, theirs: CommitId },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reverted {
     Commit(CommitId),
@@ -87,7 +94,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// The diff of the tables that keep their history, as stored: sealed
     /// values stay sealed, so merges and undo compare and copy them without
     /// opening them. Undo therefore leaves latest-value tables alone.
-    fn changes(
+    pub(super) fn changes(
         &self,
         from: Option<&CommitId>,
         to: Option<&CommitId>,
@@ -103,7 +110,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     }
 
     /// A conflict as the caller reads it, values opened.
-    fn revealed_conflict(&self, conflict: Conflict) -> Conflict {
+    pub(super) fn revealed_conflict(&self, conflict: Conflict) -> Conflict {
         Conflict {
             base: self.reveal(&conflict.key, conflict.base),
             ours: self.reveal(&conflict.key, conflict.ours),
@@ -123,14 +130,32 @@ impl<S: Storage, C: Clock> Store<S, C> {
         from: &str,
         provenance: Provenance,
     ) -> Result<Merged, StoreError> {
+        match self.merge_plan(into, from)? {
+            MergePlan::UpToDate => Ok(Merged::UpToDate),
+            MergePlan::Conflicts(conflicts) => Ok(Merged::Conflicts(
+                conflicts
+                    .into_iter()
+                    .map(|c| self.revealed_conflict(c))
+                    .collect(),
+            )),
+            MergePlan::Edits { edits, theirs } => {
+                let id = self.commit_with(into, edits, provenance, Some(theirs))?;
+                Ok(Merged::Commit(id))
+            }
+        }
+    }
+
+    /// What merging `from` into `into` would write, without writing it.
+    /// Conflicts are as stored: sealed values stay sealed.
+    pub(super) fn merge_plan(&self, into: &str, from: &str) -> Result<MergePlan, StoreError> {
         self.require_branch(into)?;
         self.require_branch(from)?;
         let ours = self.head(into);
         let Some(theirs) = self.head(from) else {
-            return Ok(Merged::UpToDate);
+            return Ok(MergePlan::UpToDate);
         };
         if ours.is_some_and(|ours| self.ancestors(ours).contains(&theirs)) {
-            return Ok(Merged::UpToDate);
+            return Ok(MergePlan::UpToDate);
         }
         let base = ours.and_then(|ours| self.merge_base(ours, theirs));
         let ours_changed: BTreeMap<Bytes, Option<Bytes>> = self
@@ -153,14 +178,9 @@ impl<S: Storage, C: Clock> Store<S, C> {
         }
         if !conflicts.is_empty() {
             conflicts.sort_by(|a, b| a.key.cmp(&b.key));
-            let conflicts = conflicts
-                .into_iter()
-                .map(|c| self.revealed_conflict(c))
-                .collect();
-            return Ok(Merged::Conflicts(conflicts));
+            return Ok(MergePlan::Conflicts(conflicts));
         }
-        let id = self.commit_with(into, edits, provenance, Some(theirs))?;
-        Ok(Merged::Commit(id))
+        Ok(MergePlan::Edits { edits, theirs })
     }
 
     /// Writes to `branch` the opposite of what `commit` changed, if none of
@@ -240,7 +260,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// With criss-cross merges several can qualify; this takes the latest.
     ///
     /// The cost grows with the shared history; it is not yet bounded.
-    fn merge_base(&self, ours: CommitId, theirs: CommitId) -> Option<CommitId> {
+    pub(super) fn merge_base(&self, ours: CommitId, theirs: CommitId) -> Option<CommitId> {
         let ours = self.ancestors(ours);
         let shared: HashSet<CommitId> = self
             .ancestors(theirs)

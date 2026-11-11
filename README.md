@@ -177,7 +177,7 @@ the runner in `2026-11-04-linux-ci/`, the virtual machine in
 | Kill the server with SIGKILL while 16 clients send `SET`s (half pipelined) | 100 | 330,912 acknowledged, none lost |
 | Kill a process appending to the log | 1,000 | 3,719 acknowledged, none lost |
 | Simulated disk: power cuts tearing writes at any sector, failed syncs, bit flips | 10,000 seeds | 130,677 restarts; every acknowledged record back, 6,867 corruptions refused |
-| Simulated store: commits, branches, merges and reverts through crashes and a clock that goes back | 10,000 seeds | 635,173 commits, 152,927 restarts; every branch as acknowledged |
+| Simulated store: commits, branches, merges, reverts, approvals and rejections through crashes and a clock that goes back | 10,000 seeds | 596,644 commits, 151,846 restarts, 4,519 approvals, 10,535 rejections; every branch as acknowledged, every rejection kept |
 | Simulated encrypted store: commits, erasures and failed key file writes through crashes | 10,000 seeds | 406,949 commits, 70,093 erasures, 120,624 restarts; every value as acknowledged, no erased value read again |
 
 CI runs all of them on Linux and Windows for every change. The server test

@@ -36,6 +36,7 @@ use crate::keys::{Fingerprint, KeyError, KeyStorage, Keys};
 use crate::log::{Branch, Commit, Edit, Engine, Erase, Log, LogError, Record, Storage, Table};
 use crate::tree::{Bytes, Tree};
 
+mod approvals;
 mod committer;
 mod inspect;
 mod latest;
@@ -47,6 +48,7 @@ mod view;
 use seal::{Ring, Sealer};
 use tables::{Refusal, Tables};
 
+pub use approvals::{Approved, PendingChange};
 pub use committer::{Committer, Pending, Reader, Writer};
 pub use inspect::Inspect;
 pub use merge::{Conflict, Merged, Reverted, ValueChange};
@@ -114,6 +116,14 @@ pub struct Cell {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Erasure {
     pub subject: Vec<u8>,
+    pub provenance: Provenance,
+    pub time: u64,
+}
+
+/// The last change rejected on a branch, as the log records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rejection {
+    pub head: CommitId,
     pub provenance: Provenance,
     pub time: u64,
 }
@@ -204,6 +214,9 @@ pub enum StoreError {
     /// The key's table keeps only its latest value, so it has none to give
     /// for a commit that is not the head of a branch.
     NoPast(Vec<u8>),
+    /// No change waiting has this head: it was approved, rejected or
+    /// written to since, or never was one.
+    NotWaiting(CommitId),
 }
 
 impl fmt::Display for StoreError {
@@ -255,6 +268,11 @@ impl fmt::Display for StoreError {
                 "table {:?} keeps only the latest value; past commits hold none of it",
                 String::from_utf8_lossy(name)
             ),
+            Self::NotWaiting(head) => write!(
+                f,
+                "no change waiting has head {}: it was approved, rejected or written to since",
+                short(head)
+            ),
         }
     }
 }
@@ -296,6 +314,8 @@ pub struct Store<S: Storage, C: Clock> {
     sealer: Option<Sealer>,
     erasures: Vec<Erasure>,
     tables: Tables,
+    /// Per branch, the last change rejected on it.
+    rejections: BTreeMap<String, Rejection>,
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
@@ -344,6 +364,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             sealer,
             erasures: Vec::new(),
             tables: Tables::default(),
+            rejections: BTreeMap::new(),
         };
         for record in &records {
             store
@@ -842,6 +863,23 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 self.last_time = self.last_time.max(table.time);
                 Ok(Vec::new())
             }
+            Record::Reject(reject) => {
+                self.require_branch(&reject.branch)?;
+                self.rejections.insert(
+                    reject.branch.clone(),
+                    Rejection {
+                        head: reject.head,
+                        provenance: Provenance {
+                            who: reject.who.clone(),
+                            why: reject.why.clone(),
+                            approved_by: None,
+                        },
+                        time: reject.time,
+                    },
+                );
+                self.last_time = self.last_time.max(reject.time);
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -1081,7 +1119,7 @@ fn check_sealed(records: &[Record], ring: &Ring) -> Result<(), StoreError> {
         })
         .collect();
     let commits = records.iter().flat_map(|record| match record {
-        Record::Branch(_) | Record::Erase(_) | Record::Table(_) => &[][..],
+        Record::Branch(_) | Record::Erase(_) | Record::Table(_) | Record::Reject(_) => &[][..],
         Record::Commit(commit) => std::slice::from_ref(commit),
         Record::Group(commits) => commits.as_slice(),
     });

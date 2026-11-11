@@ -671,11 +671,12 @@ work.
   The branch's name is returned but a viewer need not show it. Each
   change is one element, a flat list of field names and values, so a
   viewer that draws Redis replies as tables needs no conversion.
-- **`UMBRA.APPROVE <head> <reason>`** merges the change into `main` only
-  if the branch's head is still `<head>`: a person approves the diff they
+- **`UMBRA.APPROVE <branch> <head> <reason>`** merges the change into
+  `main` only if the branch's head is still `<head>`: a person approves the diff they
   saw, and anything an agent wrote after it is refused, not merged
   unseen. A conflict merges nothing and returns the conflicting keys.
-- **`UMBRA.REJECT <head> <reason>`** closes the change without merging.
+- **`UMBRA.REJECT <branch> <head> <reason>`** closes the change without
+  merging.
   The rejection is a record in the log with who and why, like an erasure,
   so the list and the history agree after a restart.
 - **Who approves is the connection, not an argument.** A connection
@@ -699,6 +700,11 @@ work.
   nothing else, and only for a token that may approve.
 - **The diff is `UMBRA.DIFF`**, with a page per table so a large change
   can be read in parts.
+- **A change is named by its branch and head, not its head alone.** A
+  branch made from another starts at the same head, and the store
+  simulation found a rejection landing on the branch it came from when
+  the head alone was given. A viewer passes the branch `UMBRA.PENDING`
+  returned; a person need not see it.
 - **Not in this version:** reopening a rejected change (an agent offers
   it again on a new branch) and approvals that need two people.
 

@@ -21,6 +21,8 @@ pub enum Record {
     Erase(Erase),
     /// A table declared to be held by an engine.
     Table(Table),
+    /// A change waiting on a branch, closed without merging.
+    Reject(Reject),
 }
 
 /// Changes to one branch, made together, with who made them, why, who
@@ -108,6 +110,18 @@ pub struct Table {
     pub time: u64,
 }
 
+/// A branch's change, as it stood at `head`, rejected: who, why and when.
+/// Commits written to the branch after it make a new change.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Reject {
+    pub branch: String,
+    pub head: [u8; 32],
+    pub who: String,
+    pub why: String,
+    /// Microseconds since the Unix epoch, from the store's clock.
+    pub time: u64,
+}
+
 /// A new branch, starting where `from` is now.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Branch {
@@ -147,6 +161,7 @@ const KIND_BRANCH: u8 = 2;
 const KIND_GROUP: u8 = 3;
 const KIND_ERASE: u8 = 4;
 const KIND_TABLE: u8 = 5;
+const KIND_REJECT: u8 = 6;
 /// The version and kind bytes that start every payload.
 const KIND_PREFIX: usize = 2;
 /// The bytes in front of a group's commits: the version, kind and count.
@@ -209,6 +224,15 @@ fn encode_payload(record: &Record) -> Result<Vec<u8>, LogError> {
                 table.approved_by.as_deref().map(str::as_bytes),
             );
             payload.extend_from_slice(&table.time.to_le_bytes());
+            payload
+        }
+        Record::Reject(reject) => {
+            let mut payload = vec![FORMAT_VERSION, KIND_REJECT];
+            push_field(&mut payload, reject.branch.as_bytes());
+            push_field(&mut payload, &reject.head);
+            push_field(&mut payload, reject.who.as_bytes());
+            push_field(&mut payload, reject.why.as_bytes());
+            payload.extend_from_slice(&reject.time.to_le_bytes());
             payload
         }
     };
@@ -388,6 +412,13 @@ fn decode_payload(payload: &[u8]) -> Option<Record> {
         KIND_GROUP => Record::Group(decode_group(&mut cursor)?),
         KIND_ERASE => Record::Erase(decode_erase(&mut cursor)?),
         KIND_TABLE => Record::Table(decode_table(&mut cursor)?),
+        KIND_REJECT => Record::Reject(Reject {
+            branch: cursor.text()?,
+            head: <[u8; 32]>::try_from(cursor.field()?).ok()?,
+            who: cursor.text()?,
+            why: cursor.text()?,
+            time: cursor.u64()?,
+        }),
         _ => return None,
     };
     cursor.rest.is_empty().then_some(record)
@@ -766,6 +797,20 @@ mod tests {
             approved_by: approved_by.map(str::to_owned),
             time: 1_800_000_000_000_002,
         })
+    }
+
+    #[test]
+    fn reject_records_round_trip() {
+        let reject = Record::Reject(Reject {
+            branch: "agent/support".to_owned(),
+            head: [7; 32],
+            who: "person:lead".to_owned(),
+            why: "wrong ticket — 別件".to_owned(),
+            time: 1_800_000_000_000_003,
+        });
+        let records = vec![record("a", None), reject, group(&["b"])];
+
+        assert_eq!(scan(&frames(&records)).expect("scans").records, records);
     }
 
     #[test]

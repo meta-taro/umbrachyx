@@ -7,7 +7,9 @@
 //!   wrote to it, and branches see nothing of each other's later commits;
 //! - a commit whose sync was interrupted is there whole or not at all, and
 //!   so is a group of commits written with one sync;
-//! - recorded times never go backwards, across commits and restarts.
+//! - recorded times never go backwards, across commits and restarts;
+//! - a change approved into `main` stays there, and a change rejected
+//!   stays rejected and off the list of changes waiting.
 //!
 //! Half the keys are in a table held by the latest-value engine, so every
 //! promise above holds for it too; undoing a commit must leave that table
@@ -21,7 +23,8 @@ use super::disk::{SimStorage, SyncFault};
 use super::rng::Rng;
 use crate::log::{Edit, Engine, LogError};
 use crate::store::{
-    Clock, CommitRequest, MAIN_BRANCH, Merged, Provenance, Reverted, Store, StoreError,
+    Approved, Clock, CommitId, CommitRequest, MAIN_BRANCH, Merged, Provenance, Reverted, Store,
+    StoreError,
 };
 
 const STEPS: usize = 64;
@@ -43,6 +46,12 @@ const LATEST_TABLE: &str = "pos";
 const NEW_BRANCH_PERCENT: u64 = 8;
 const MERGE_PERCENT: u64 = 8;
 const REVERT_PERCENT: u64 = 4;
+/// Out of 100, per commit step: approve or reject a change waiting. Drawn
+/// from its own generator, so adding reviews left the other choices of a
+/// seed as they were.
+const REVIEW_PERCENT: u64 = 6;
+/// Mixed into the seed for the review generator.
+const REVIEW_SALT: u64 = 0x5eed_a991_2026_1111;
 /// Out of 100, per plain commit step: write several commits with one sync.
 const GROUP_PERCENT: u64 = 25;
 const MAX_GROUP: u64 = 5;
@@ -69,6 +78,9 @@ pub struct Outcome {
     pub merges: usize,
     pub merge_conflicts: usize,
     pub reverts: usize,
+    pub approvals: usize,
+    pub approvals_refused_for_conflicts: usize,
+    pub rejections: usize,
 }
 
 /// A clock a seed controls. It mostly moves forward a little, and sometimes
@@ -111,6 +123,9 @@ struct Run {
     /// The time of the latest acknowledged commit.
     acknowledged_time: u64,
     outcome: Outcome,
+    review: Rng,
+    /// Per branch, the head of the last change rejected on it.
+    rejected: BTreeMap<String, CommitId>,
 }
 
 pub fn run(seed: u64) -> Result<Outcome, String> {
@@ -128,6 +143,8 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
         in_flight: None,
         acknowledged_time: 0,
         outcome: Outcome::default(),
+        review: Rng::new(seed ^ REVIEW_SALT),
+        rejected: BTreeMap::new(),
     };
     for step in 0..STEPS {
         run.step(step)?;
@@ -149,6 +166,9 @@ impl Run {
     }
 
     fn commit(&mut self, step: usize) -> Result<(), String> {
+        if self.review.percent(REVIEW_PERCENT) {
+            return self.review(step);
+        }
         if self.rng.percent(NEW_BRANCH_PERCENT) {
             return self.new_branch(step);
         }
@@ -260,6 +280,73 @@ impl Run {
         Ok(())
     }
 
+    /// Approves or rejects one change waiting. An approval that merges
+    /// becomes what `main` should hold; one that conflicts writes nothing;
+    /// a rejection takes the change off the list.
+    fn review(&mut self, step: usize) -> Result<(), String> {
+        let pending = self
+            .store
+            .pending()
+            .map_err(|e| format!("step {step}: listing changes waiting: {e}"))?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let change = &pending[self.review.below(pending.len() as u64) as usize];
+        let (branch, head) = (change.branch.clone(), change.head);
+        if self.review.percent(50) {
+            let main_before = self.store.head(MAIN_BRANCH);
+            let approved = self
+                .store
+                .approve(&branch, &head, provenance(step))
+                .map_err(|e| format!("step {step}: approving {branch}: {e}"))?;
+            match approved {
+                Approved::Commit(_) => {
+                    self.outcome.approvals += 1;
+                    self.models
+                        .insert(MAIN_BRANCH.to_owned(), entries_of(&self.store, MAIN_BRANCH));
+                }
+                Approved::Conflicts(_) if self.store.head(MAIN_BRANCH) == main_before => {
+                    self.outcome.approvals_refused_for_conflicts += 1;
+                }
+                Approved::Conflicts(_) => {
+                    return Err(format!("step {step}: a refused approval moved main"));
+                }
+            }
+            self.trace(step, format!("approve {branch}"));
+        } else {
+            self.store
+                .reject(&branch, &head, provenance(step))
+                .map_err(|e| format!("step {step}: rejecting {branch}: {e}"))?;
+            self.rejected.insert(branch.clone(), head);
+            self.outcome.rejections += 1;
+            self.trace(step, format!("reject {branch}"));
+        }
+        self.check_rejections(step)
+    }
+
+    /// Each branch's last rejection is as recorded, and a branch still at
+    /// the head it was rejected at is not waiting.
+    fn check_rejections(&self, step: usize) -> Result<(), String> {
+        let waiting: Vec<String> = self
+            .store
+            .pending()
+            .map_err(|e| format!("step {step}: listing changes waiting: {e}"))?
+            .into_iter()
+            .map(|change| change.branch)
+            .collect();
+        for (branch, head) in &self.rejected {
+            if self.store.rejection(branch).map(|r| r.head) != Some(*head) {
+                return Err(format!(
+                    "step {step}: the rejection of {branch} was not kept"
+                ));
+            }
+            if self.store.head(branch) == Some(*head) && waiting.contains(branch) {
+                return Err(format!("step {step}: rejected {branch} is waiting again"));
+            }
+        }
+        Ok(())
+    }
+
     /// Undoing a branch's latest commit cannot conflict, and must give back
     /// what the branch held before it in the tables that keep history,
     /// leaving the latest-value table as it is.
@@ -324,6 +411,7 @@ impl Run {
             .map_err(|e| format!("step {step}: store fails to reopen: {e}"))?;
         self.check_recovered(step)?;
         self.check_time(step)?;
+        self.check_rejections(step)?;
         self.acknowledged_time = self.store.last_time();
         Ok(())
     }
@@ -467,6 +555,9 @@ mod tests {
             total.merges += outcome.merges;
             total.merge_conflicts += outcome.merge_conflicts;
             total.reverts += outcome.reverts;
+            total.approvals += outcome.approvals;
+            total.approvals_refused_for_conflicts += outcome.approvals_refused_for_conflicts;
+            total.rejections += outcome.rejections;
         }
         total
     }
@@ -490,6 +581,9 @@ mod tests {
         assert!(total.merges >= 100, "{total:?}");
         assert!(total.merge_conflicts >= 50, "{total:?}");
         assert!(total.reverts >= 100, "{total:?}");
+        assert!(total.approvals >= 50, "{total:?}");
+        assert!(total.approvals_refused_for_conflicts >= 10, "{total:?}");
+        assert!(total.rejections >= 50, "{total:?}");
     }
 
     #[test]
@@ -503,7 +597,8 @@ mod tests {
         println!(
             "store, {seeds} seeds: {} commits ({} groups), {} restarts, interrupted commits kept {} \
              and lost {}, clock went back {} times, {} branches made, {} merges, \
-             {} merges refused for conflicts, {} reverts",
+             {} merges refused for conflicts, {} reverts, {} approvals ({} refused for \
+             conflicts), {} rejections",
             total.commits,
             total.groups,
             total.restarts,
@@ -513,7 +608,10 @@ mod tests {
             total.branches_made,
             total.merges,
             total.merge_conflicts,
-            total.reverts
+            total.reverts,
+            total.approvals,
+            total.approvals_refused_for_conflicts,
+            total.rejections
         );
     }
 
