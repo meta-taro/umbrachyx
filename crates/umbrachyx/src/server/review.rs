@@ -93,6 +93,11 @@ fn element(change: &PendingChange) -> Reply {
         bulk(&change.branch),
         bulk("head"),
         bulk(&hex(&change.head)),
+        bulk("base"),
+        match &change.base {
+            Some(base) => bulk(&hex(base)),
+            None => Reply::Bulk(None),
+        },
         bulk("authors"),
         Reply::Array(change.authors.iter().map(|who| bulk(who)).collect()),
         bulk("why"),

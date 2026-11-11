@@ -191,6 +191,22 @@ fn a_conflict_is_flagged_and_approving_it_writes_nothing() {
     let change = store.pending().expect("lists").remove(0);
     assert!(change.main_moved);
     assert!(change.conflicts);
+    // From the base, the diff is the branch's own change, without the
+    // potion main bought since.
+    let own = store
+        .diff(change.base.as_ref(), Some(&change.head))
+        .expect("diffs");
+    let values: Vec<_> = own
+        .iter()
+        .map(|c| (c.key.to_vec(), c.before.as_deref().map(<[u8]>::to_vec)))
+        .collect();
+    assert_eq!(
+        values,
+        vec![
+            (b"player/7/gems".to_vec(), Some(b"30".to_vec())),
+            (b"player/7/item".to_vec(), None),
+        ]
+    );
     let approved = store
         .approve(&change.branch, &change.head, by("person:lead", "go"))
         .expect("answers");

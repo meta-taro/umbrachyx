@@ -229,6 +229,7 @@ fn pending_lists_each_change_as_one_flat_element() {
     );
     assert_eq!(field(change, "main_moved"), &Resp::Integer(0));
     assert_eq!(field(change, "conflicts"), &Resp::Integer(0));
+    assert!(matches!(field(change, "base"), Resp::Bulk(Some(base)) if base.len() == 64));
     assert!(matches!(field(change, "first"), Resp::Integer(_)));
     assert!(matches!(field(change, "last"), Resp::Integer(_)));
 }

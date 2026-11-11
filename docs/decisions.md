@@ -665,7 +665,10 @@ for it is the gate for the first public release, with the speed work.
   not approved or rejected yet. Every branch counts, not only agents', so
   a person's experiment on a branch shows up the same way.
 - **`UMBRA.PENDING`** lists them: who wrote them and why, when the first
-  and the last commit were made, the head commit's id, how many keys
+  and the last commit were made, the head commit's id, the base (the
+  latest commit the branch shares with `main`, so that the diff from base
+  to head shows what the branch changed and nothing `main` changed
+  since), how many keys
   change in each table (the first part of the key), whether `main` has
   moved since the branch started, and whether merging would conflict.
   The branch's name is returned but a viewer need not show it. Each

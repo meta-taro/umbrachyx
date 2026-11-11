@@ -24,6 +24,11 @@ pub struct PendingChange {
     pub branch: String,
     /// The commit a person approves or rejects.
     pub head: CommitId,
+    /// The latest commit the branch shares with `main`: where it started,
+    /// or where it last took `main` in. The diff from here to `head` is
+    /// what the branch changed, and nothing `main` changed since. `None`
+    /// when they share no commit.
+    pub base: Option<CommitId>,
     /// Who wrote the change's commits, oldest first, each once.
     pub authors: Vec<String>,
     /// Why, from the latest commit.
@@ -199,6 +204,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         Ok(Some(PendingChange {
             branch: branch.to_owned(),
             head,
+            base,
             authors,
             why: newest.provenance.why.clone(),
             first: oldest.time,

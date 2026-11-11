@@ -437,3 +437,61 @@ fn reading_at_a_commit_the_store_never_made_is_refused() {
         "got {read:?}"
     );
 }
+
+/// Within one group, each commit sees what the commits before it in the
+/// group wrote: a removal of a key the group just added takes effect, and
+/// each commit's diff against its parent shows the value it replaced.
+#[test]
+fn commits_in_a_group_see_the_commits_before_them() {
+    let dir = TempDir::new("group-chain");
+    let mut store = open(&dir.log());
+    store
+        .commit(MAIN_BRANCH, vec![set("a", "0")], by("seed", "start"))
+        .expect("commits");
+
+    let ids: Vec<_> = store
+        .commit_all(vec![
+            request(MAIN_BRANCH, vec![set("a", "1"), set("new", "n")], "agent:1"),
+            request(MAIN_BRANCH, vec![remove("new"), set("a", "2")], "agent:2"),
+            request(MAIN_BRANCH, vec![remove("new"), set("a", "3")], "agent:3"),
+        ])
+        .expect("the group is written")
+        .into_iter()
+        .map(|result| result.expect("commits"))
+        .collect();
+
+    assert_eq!(value(&store, MAIN_BRANCH, "a").as_deref(), Some("3"));
+    assert_eq!(value(&store, MAIN_BRANCH, "new"), None);
+    let changed = |from: usize, to: usize| -> Vec<(String, Option<String>, Option<String>)> {
+        store
+            .diff(Some(&ids[from]), Some(&ids[to]))
+            .expect("diffs")
+            .into_iter()
+            .map(|change| {
+                let text = |bytes: Option<umbrachyx::tree::Bytes>| {
+                    bytes.map(|b| String::from_utf8_lossy(&b).into_owned())
+                };
+                (
+                    String::from_utf8_lossy(&change.key).into_owned(),
+                    text(change.before),
+                    text(change.after),
+                )
+            })
+            .collect()
+    };
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        changed(0, 1),
+        vec![
+            ("a".to_owned(), some("1"), some("2")),
+            ("new".to_owned(), some("n"), None),
+        ]
+    );
+    // The third commit's removal of `new` found nothing to remove.
+    assert_eq!(changed(1, 2), vec![("a".to_owned(), some("2"), some("3"))]);
+
+    drop(store);
+    let reopened = open(&dir.log());
+    assert_eq!(value(&reopened, MAIN_BRANCH, "a").as_deref(), Some("3"));
+    assert_eq!(value(&reopened, MAIN_BRANCH, "new"), None);
+}
