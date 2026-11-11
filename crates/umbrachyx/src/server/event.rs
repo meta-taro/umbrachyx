@@ -47,6 +47,13 @@ const EVENTS: usize = 1024;
 /// Bytes read from one connection before the others get their turn.
 const READ_BUDGET: usize = 1024 * 1024;
 
+/// Whether a socket that gave less than was asked for can be left without
+/// reading it again until it says it would block. On Unix every arrival is
+/// a new event, so the second read, one system call a request, is saved.
+/// On Windows a socket is only watched again once a read has said it would
+/// block: left after a short read, it is never heard from again.
+const HAS_EDGE_ON_ARRIVAL: bool = cfg!(unix);
+
 /// Whether commits are queued for the thread that writes them.
 #[derive(Default)]
 pub(super) struct Queued {
@@ -363,7 +370,7 @@ impl Connection {
                 Ok(read) => {
                     self.input.extend_from_slice(&chunk[..read]);
                     self.execute(server);
-                    if read < chunk.len() {
+                    if HAS_EDGE_ON_ARRIVAL && read < chunk.len() {
                         // The socket had no more: it will say when it does.
                         return;
                     }
