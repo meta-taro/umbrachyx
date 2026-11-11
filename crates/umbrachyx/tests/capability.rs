@@ -435,3 +435,78 @@ fn a_holder_cannot_rename_themselves_or_move_their_branch() {
     assert_eq!(holder.branch, BRANCH);
     assert_eq!(write, Err(Denied::OutOfScope));
 }
+
+fn approver_grant() -> Grant<'static> {
+    Grant {
+        operations: &[Operation::Read, Operation::Approve],
+        subject: "person:lead",
+        ..grant()
+    }
+}
+
+/// Approving a change into `main`, one changed key at a time.
+fn approval(key: &str) -> Request<'_> {
+    Request {
+        operation: Operation::Approve,
+        branch: MAIN_BRANCH,
+        key,
+        column: "",
+        purpose: PURPOSE,
+        now: now(),
+    }
+}
+
+#[test]
+fn a_token_that_may_approve_approves_changes_to_its_keys() {
+    let root = KeyPair::new();
+    let token = issue(&root, &approver_grant());
+
+    assert_eq!(
+        capability::authorize(&token, root.public(), &approval(&slot(1))),
+        Ok(())
+    );
+    assert_eq!(
+        capability::authorize(&token, root.public(), &approval(OTHER_PLAYER_SLOT)),
+        Err(Denied::OutOfScope)
+    );
+}
+
+#[test]
+fn an_agents_token_cannot_approve() {
+    let root = KeyPair::new();
+    let token = issue(&root, &grant());
+
+    assert_eq!(
+        capability::authorize(&token, root.public(), &approval(&slot(1))),
+        Err(Denied::OutOfScope)
+    );
+}
+
+#[test]
+fn a_token_that_may_approve_cannot_write() {
+    let root = KeyPair::new();
+    let token = issue(&root, &approver_grant());
+
+    assert_eq!(
+        capability::authorize(
+            &token,
+            root.public(),
+            &request(Operation::Write, &slot(1), "item")
+        ),
+        Err(Denied::OutOfScope)
+    );
+}
+
+#[test]
+fn a_token_that_both_writes_and_approves_is_not_issued() {
+    let root = KeyPair::new();
+    let both = Grant {
+        operations: &[Operation::Write, Operation::Approve],
+        ..grant()
+    };
+
+    assert!(matches!(
+        capability::issue(&root, &both),
+        Err(capability::TokenError::WritesAndApproves)
+    ));
+}

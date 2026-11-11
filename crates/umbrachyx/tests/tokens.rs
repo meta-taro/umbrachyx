@@ -282,3 +282,54 @@ fn umbrachyx_mcp_does_not_start_with_a_token_from_another_root() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("the token is not valid"), "{stderr}");
 }
+
+fn issue_approver(key: &Path, operations: &str) -> Output {
+    umbrachyx(
+        &[
+            "token",
+            "issue",
+            "--key",
+            key.to_str().expect("utf-8"),
+            "--subject",
+            "person:lead",
+            "--prefix",
+            "player/",
+            "--columns",
+            "gems",
+            "--operations",
+            operations,
+            "--purpose",
+            PURPOSE,
+            "--expires-in",
+            "8h",
+        ],
+        "",
+    )
+}
+
+#[test]
+fn a_token_that_approves_is_issued_without_a_branch() {
+    let dir = TempDir::new("approver");
+    let key = dir.path("root.key");
+    keygen(&key);
+
+    let token = stdout(&issue_approver(&key, "read,approve"));
+
+    assert!(!token.is_empty());
+}
+
+#[test]
+fn a_token_that_writes_and_approves_is_refused() {
+    let dir = TempDir::new("writes-and-approves");
+    let key = dir.path("root.key");
+    keygen(&key);
+
+    let output = issue_approver(&key, "write,approve");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot also approve"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

@@ -63,6 +63,8 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   keygen <file>               a new root key into <file>; prints its public key
   token issue --key <file> --subject S --branch B --prefix P --columns C,..
               --operations read,write --purpose U --expires-in 8h
+                              a person's token: --operations read,approve and
+                              no --branch; a token never both writes and approves
   token narrow --public-key K [--operation O] [--prefix P] [--column C]
                [--expires-in D]       reads a token on stdin, prints it narrowed
   token show --public-key K   reads a token on stdin, prints who holds it

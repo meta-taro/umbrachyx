@@ -297,6 +297,12 @@ a prototype).
   is never `main`: such a token is not issued, and every token also
   refuses writes to `main`. So an agent's writes always land on a branch,
   and the agent cannot choose which. Reads are not tied to the branch.
+- **A token may approve, or write, never both.** `approve` lets its
+  holder merge a change into `main`, checked for every key the change
+  touches against the token's key prefix and purpose. A token is not
+  issued with both `write` and `approve`, so nobody passes their own
+  change, and an agent's token, which writes, cannot approve at all. A
+  token that does not write names no branch.
 - **Who holds a token is read from the issuer's block only**, so a holder
   cannot rename themselves or move their branch by appending facts. The
   name is what the database records as the author of their commits.

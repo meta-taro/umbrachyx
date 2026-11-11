@@ -52,6 +52,9 @@ pub fn token(args: &Args) -> Result<ExitCode, String> {
     }
 }
 
+/// The branch named in a token that never writes.
+const NO_WRITES: &str = "-";
+
 fn issue(args: &Args) -> Result<ExitCode, String> {
     let path = args.option("key")?;
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
@@ -60,6 +63,16 @@ fn issue(args: &Args) -> Result<ExitCode, String> {
         .map(operation)
         .collect::<Result<Vec<_>, _>>()?;
     let columns: Vec<&str> = list(args.option("columns")?).collect();
+    // A token that does not write has no branch to name; the policy only
+    // reads the branch for a write.
+    if operations.contains(&Operation::Write) && operations.contains(&Operation::Approve) {
+        return Err(capability::TokenError::WritesAndApproves.to_string());
+    }
+    let branch = match args.options.get("branch") {
+        Some(branch) => branch.as_str(),
+        None if !operations.contains(&Operation::Write) => NO_WRITES,
+        None => return Err("--branch is required for a token that writes".to_owned()),
+    };
     let grant = Grant {
         operations: &operations,
         key_prefix: args.option("prefix")?,
@@ -67,7 +80,7 @@ fn issue(args: &Args) -> Result<ExitCode, String> {
         purpose: args.option("purpose")?,
         expires: expiry(args.option("expires-in")?)?,
         subject: args.option("subject")?,
-        branch: args.option("branch")?,
+        branch,
     };
     let token = capability::issue(&KeyPair::from(&private), &grant).map_err(|e| e.to_string())?;
     print_token(&token)
@@ -145,7 +158,10 @@ fn operation(name: &str) -> Result<Operation, String> {
     match name {
         "read" => Ok(Operation::Read),
         "write" => Ok(Operation::Write),
-        _ => Err(format!("{name:?} is not an operation (read or write)")),
+        "approve" => Ok(Operation::Approve),
+        _ => Err(format!(
+            "{name:?} is not an operation (read, write or approve)"
+        )),
     }
 }
 

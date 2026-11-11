@@ -31,6 +31,10 @@ pub use crate::store::MAIN_BRANCH;
 pub enum Operation {
     Read,
     Write,
+    /// Merging a change into `main`, one changed key at a time. Never in
+    /// the same token as `Write`, so whoever writes a change cannot also
+    /// pass it.
+    Approve,
 }
 
 impl Operation {
@@ -38,6 +42,7 @@ impl Operation {
         match self {
             Self::Read => "read",
             Self::Write => "write",
+            Self::Approve => "approve",
         }
     }
 }
@@ -124,6 +129,8 @@ pub enum TokenError {
     Biscuit(Token),
     /// A token whose writes would go to `main` is never issued.
     WritesToMain,
+    /// A token that writes never also approves.
+    WritesAndApproves,
 }
 
 impl fmt::Display for TokenError {
@@ -133,6 +140,10 @@ impl fmt::Display for TokenError {
             Self::WritesToMain => write!(
                 f,
                 "capability token: writes must go to a branch, not {MAIN_BRANCH}"
+            ),
+            Self::WritesAndApproves => write!(
+                f,
+                "capability token: a token that writes cannot also approve"
             ),
         }
     }
@@ -166,6 +177,11 @@ pub fn issue(root: &KeyPair, grant: &Grant<'_>) -> Result<Vec<u8>, TokenError> {
     if grant.branch == MAIN_BRANCH {
         return Err(TokenError::WritesToMain);
     }
+    if grant.operations.contains(&Operation::Write)
+        && grant.operations.contains(&Operation::Approve)
+    {
+        return Err(TokenError::WritesAndApproves);
+    }
     // The check on main stays even though the branch is never main: it is
     // what tells a write to main apart from a write to another branch.
     let mut builder = BiscuitBuilder::new().code_with_params(
@@ -175,7 +191,7 @@ pub fn issue(root: &KeyPair, grant: &Grant<'_>) -> Result<Vec<u8>, TokenError> {
         key_prefix({prefix});
         purpose({purpose});
         check if time($t), $t <= {expires};
-        check if operation("read") or branch($b), $b != {main};
+        check if operation("read") or operation("approve") or branch($b), $b != {main};
         "#,
         params([
             ("subject", grant.subject.into()),
@@ -307,6 +323,10 @@ pub fn authorize(token: &[u8], root: PublicKey, request: &Request<'_>) -> Result
                      key($k), key_prefix($p), $k.starts_with($p),
                      column($c), column_allowed($c),
                      declared_purpose($u), purpose($u);
+            allow if operation("approve"), operation_allowed("approve"),
+                     branch({main}),
+                     key($k), key_prefix($p), $k.starts_with($p),
+                     declared_purpose($u), purpose($u);
             "#,
             params([
                 ("operation", request.operation.name().into()),
@@ -315,6 +335,7 @@ pub fn authorize(token: &[u8], root: PublicKey, request: &Request<'_>) -> Result
                 ("column", request.column.into()),
                 ("purpose", request.purpose.into()),
                 ("now", request.now.into()),
+                ("main", MAIN_BRANCH.into()),
             ]),
             HashMap::new(),
         )
