@@ -38,6 +38,7 @@ that is already there before the light arrives.
 > and what it shows still needs work, is in
 > [`docs/comparison.md`](docs/comparison.md). No format is stable. Do not
 > build on it. The design starts at [`docs/concept.md`](docs/concept.md).
+> What each version added is in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Numbers so far
 
