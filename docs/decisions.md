@@ -655,7 +655,9 @@ work.
   and the last commit were made, the head commit's id, how many keys
   change in each table (the first part of the key), whether `main` has
   moved since the branch started, and whether merging would conflict.
-  The branch's name is returned but a viewer need not show it.
+  The branch's name is returned but a viewer need not show it. Each
+  change is one element, a flat list of field names and values, so a
+  viewer that draws Redis replies as tables needs no conversion.
 - **`UMBRA.APPROVE <head> <reason>`** merges the change into `main` only
   if the branch's head is still `<head>`: a person approves the diff they
   saw, and anything an agent wrote after it is refused, not merged
@@ -664,18 +666,28 @@ work.
   The rejection is a record in the log with who and why, like an erasure,
   so the list and the history agree after a restart.
 - **Who approves is the connection, not an argument.** A connection
-  authenticates with a capability token; the token's holder is recorded
+  authenticates with a capability token, sent as Redis sends a password:
+  `AUTH <token>` or `AUTH <user> <token>` (the user name is ignored), so
+  a viewer that keeps a Redis password in its keychain can keep the token
+  there unchanged; the token's holder is recorded
   as the one who approved or rejected. Approving needs an operation that
   is never granted together with a branch to write to, so an agent's
   token cannot approve its own change, or any other. A token that can
-  approve cannot write; a person who also writes holds two tokens.
+  approve cannot write; a person who also writes holds two tokens. An
+  approval records its approvers as a list, of one for now, so requiring
+  two later does not change the format.
+- **A connection that has not authenticated** reads as before and may
+  `SET` on the served branch, recorded with `unauthenticated` as who
+  rather than an empty name; it may not approve or reject.
+  `serve --require-auth` refuses its writes as well; the default stays as
+  it is for now.
 - **This is the one way a server writes to `main`.** The server still
   serves one branch for `SET`; `APPROVE` writes a merge to `main` and
   nothing else, and only for a token that may approve.
 - **The diff is `UMBRA.DIFF`**, with a page per table so a large change
   can be read in parts.
-- **Not decided yet:** whether a rejected branch can be reopened, and
-  whether an approval needs more than one person.
+- **Not in this version:** reopening a rejected change (an agent offers
+  it again on a new branch) and approvals that need two people.
 
 ## Engines per table (being built)
 
