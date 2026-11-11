@@ -15,12 +15,16 @@ use std::time::SystemTime;
 
 use biscuit_auth::PublicKey;
 
+use super::MAX_PAGE;
 use super::resp::Reply;
 use super::session::Session;
 use crate::capability::{Denied, Operation, Request};
 use crate::store::{
-    Approved, CommitId, MAIN_BRANCH, PendingChange, Provenance, StoreError, Writer, hex,
+    Approved, CommitId, Decided, MAIN_BRANCH, PendingChange, Provenance, StoreError, Writer, hex,
 };
+
+/// Decisions listed when no number is asked for.
+const DEFAULT_DECISIONS: usize = 100;
 
 /// How many conflicting keys a refused approval names.
 const MAX_CONFLICTS_SHOWN: usize = 20;
@@ -35,6 +39,14 @@ pub(super) fn answer(
 ) -> Option<Reply> {
     Some(match (name, args) {
         ("UMBRA.PENDING", []) => pending(writer),
+        ("UMBRA.DECISIONS", []) => decisions(writer, DEFAULT_DECISIONS),
+        ("UMBRA.DECISIONS", [limit]) => match std::str::from_utf8(limit)
+            .ok()
+            .and_then(|limit| limit.parse::<usize>().ok())
+        {
+            Some(limit) => decisions(writer, limit.min(MAX_PAGE)),
+            None => Reply::Error("ERR the number of decisions is not a number".to_owned()),
+        },
         ("UMBRA.APPROVE", [branch, head, reason]) => decide(
             writer,
             session,
@@ -53,10 +65,12 @@ pub(super) fn answer(
             reason,
             Decision::Reject,
         ),
-        ("UMBRA.PENDING" | "UMBRA.APPROVE" | "UMBRA.REJECT", _) => Reply::Error(format!(
-            "ERR wrong number of arguments for '{}' command",
-            name.to_ascii_lowercase()
-        )),
+        ("UMBRA.PENDING" | "UMBRA.APPROVE" | "UMBRA.REJECT" | "UMBRA.DECISIONS", _) => {
+            Reply::Error(format!(
+                "ERR wrong number of arguments for '{}' command",
+                name.to_ascii_lowercase()
+            ))
+        }
         _ => return None,
     })
 }
@@ -71,6 +85,41 @@ fn pending(writer: &Writer) -> Reply {
     match writer.ask(|store| store.pending()) {
         Ok(Ok(changes)) => Reply::Array(changes.iter().map(element).collect()),
         Ok(Err(error)) | Err(error) => Reply::Error(format!("ERR {error}")),
+    }
+}
+
+/// The newest decisions, each one flat array of field names and values.
+fn decisions(writer: &Writer, limit: usize) -> Reply {
+    let bulk = |text: &str| Reply::Bulk(Some(text.as_bytes().to_vec()));
+    match writer.ask(move |store| store.decisions(limit)) {
+        Ok(decisions) => Reply::Array(
+            decisions
+                .iter()
+                .map(|decision| {
+                    let (word, commit) = match decision.decided {
+                        Decided::Approved(merge) => ("approved", bulk(&hex(&merge))),
+                        Decided::Rejected => ("rejected", Reply::Bulk(None)),
+                    };
+                    Reply::Array(vec![
+                        bulk("decision"),
+                        bulk(word),
+                        bulk("branch"),
+                        bulk(&decision.branch),
+                        bulk("head"),
+                        bulk(&hex(&decision.head)),
+                        bulk("by"),
+                        bulk(&decision.provenance.who),
+                        bulk("why"),
+                        bulk(&decision.provenance.why),
+                        bulk("time"),
+                        Reply::Integer(i64::try_from(decision.time).unwrap_or(i64::MAX)),
+                        bulk("commit"),
+                        commit,
+                    ])
+                })
+                .collect(),
+        ),
+        Err(error) => Reply::Error(format!("ERR {error}")),
     }
 }
 

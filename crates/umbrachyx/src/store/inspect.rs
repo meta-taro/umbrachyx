@@ -6,8 +6,8 @@
 //! names only reads, so a question cannot write.
 
 use super::{
-    Approved, Cell, Clock, CommitId, CommitInfo, PendingChange, Provenance, Store, StoreError,
-    ValueChange, decode_cell,
+    Approved, Cell, Clock, CommitId, CommitInfo, Decision, PendingChange, Provenance, Store,
+    StoreError, ValueChange, decode_cell,
 };
 use crate::log::{Engine, Storage};
 use crate::tree::Bytes;
@@ -41,6 +41,8 @@ pub trait Inspect {
     fn pending(&self) -> Result<Vec<PendingChange>, StoreError>;
     /// [`Store::change_keys`].
     fn change_keys(&self, branch: &str, head: &CommitId) -> Result<Vec<Bytes>, StoreError>;
+    /// [`Store::decisions`].
+    fn decisions(&self, limit: usize) -> Vec<Decision>;
 }
 
 /// What a person decides about a change waiting ([`Store::approve`],
@@ -202,5 +204,9 @@ impl<S: Storage, C: Clock> Inspect for Store<S, C> {
 
     fn change_keys(&self, branch: &str, head: &CommitId) -> Result<Vec<Bytes>, StoreError> {
         Store::change_keys(self, branch, head)
+    }
+
+    fn decisions(&self, limit: usize) -> Vec<Decision> {
+        Store::decisions(self, limit).into_iter().cloned().collect()
     }
 }

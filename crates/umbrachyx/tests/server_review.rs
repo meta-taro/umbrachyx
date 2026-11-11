@@ -420,3 +420,40 @@ fn an_approver_rejects_and_the_change_leaves_the_list() {
     assert_eq!(rejection.provenance.who, "person:lead");
     assert_eq!(rejection.provenance.why, "wrong player");
 }
+
+#[test]
+fn decisions_lists_what_was_approved_and_rejected() {
+    let dir = TempDir::new("decisions");
+    let root = KeyPair::new();
+    let (_committer, stream) = start(&dir, &root);
+    let mut client = Client::new(stream);
+    let (branch, head) = the_change(&mut client);
+    assert_eq!(
+        client.ask(&["AUTH", &approver(&root)]),
+        Resp::Simple("OK".to_owned())
+    );
+    assert_eq!(client.ask(&["UMBRA.DECISIONS"]), Resp::Array(Vec::new()));
+    let Resp::Bulk(Some(merge)) = client.ask(&["UMBRA.APPROVE", &branch, &head, "checked 8812"])
+    else {
+        panic!("an approval answers the merge's id");
+    };
+
+    let Resp::Array(decisions) = client.ask(&["UMBRA.DECISIONS", "5"]) else {
+        panic!("DECISIONS answers an array");
+    };
+
+    assert_eq!(decisions.len(), 1);
+    let decision = &decisions[0];
+    let text = |value: &str| Resp::Bulk(Some(value.to_owned()));
+    assert_eq!(field(decision, "decision"), &text("approved"));
+    assert_eq!(field(decision, "branch"), &text(AGENT_BRANCH));
+    assert_eq!(field(decision, "head"), &text(&head));
+    assert_eq!(field(decision, "by"), &text("person:lead"));
+    assert_eq!(field(decision, "why"), &text("checked 8812"));
+    assert_eq!(field(decision, "commit"), &text(&merge));
+    assert!(matches!(field(decision, "time"), Resp::Integer(_)));
+    let Resp::Error(refused) = client.ask(&["UMBRA.DECISIONS", "many"]) else {
+        panic!("a count that is not a number is refused");
+    };
+    assert!(refused.starts_with("ERR "), "{refused}");
+}

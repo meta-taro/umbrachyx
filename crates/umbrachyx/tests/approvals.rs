@@ -340,3 +340,64 @@ fn a_rejected_change_rejected_again_says_it_was_decided() {
         Err(StoreError::NotWaiting(_, NotWaiting::Decided))
     ));
 }
+
+/// Every approval and rejection is kept, newest first, with the branch,
+/// the head decided on, who decided and why, and for an approval the merge
+/// it made; a merge nobody approved is not a decision. The same after
+/// reopening.
+#[test]
+fn decisions_are_listed_newest_first_and_survive_reopening() {
+    use umbrachyx::store::Decided;
+    let dir = TempDir::new("decisions");
+    let mut store = with_a_change(&dir.log());
+    let first_head = store.head(AGENT_BRANCH).expect("has commits");
+    store
+        .reject(AGENT_BRANCH, &first_head, by("person:lead", "wrong player"))
+        .expect("rejects");
+    store
+        .commit(
+            AGENT_BRANCH,
+            vec![set("player/8/gems", "530")],
+            by("agent:support", "the right player"),
+        )
+        .expect("commits");
+    let second_head = store.head(AGENT_BRANCH).expect("has commits");
+    let Approved::Commit(merge) = store
+        .approve(AGENT_BRANCH, &second_head, by("person:lead", "checked"))
+        .expect("approves")
+    else {
+        panic!("expected a merge");
+    };
+    store
+        .create_branch("ops/fix", MAIN_BRANCH)
+        .expect("branches");
+    store
+        .commit(
+            "ops/fix",
+            vec![set("config/x", "1")],
+            by("ops:lead", "a fix"),
+        )
+        .expect("commits");
+    store
+        .merge(MAIN_BRANCH, "ops/fix", by("ops:lead", "merged by hand"))
+        .expect("merges");
+
+    let check = |store: &FileStore| {
+        let decisions = store.decisions(10);
+        assert_eq!(decisions.len(), 2, "{decisions:?}");
+        let (approved, rejected) = (&decisions[0], &decisions[1]);
+        assert_eq!(approved.decided, Decided::Approved(merge));
+        assert_eq!(approved.branch, AGENT_BRANCH);
+        assert_eq!(approved.head, second_head);
+        assert_eq!(approved.provenance.who, "person:lead");
+        assert_eq!(approved.provenance.why, "checked");
+        assert_eq!(rejected.decided, Decided::Rejected);
+        assert_eq!(rejected.head, first_head);
+        assert_eq!(rejected.provenance.why, "wrong player");
+        assert!(rejected.time <= approved.time);
+        assert_eq!(store.decisions(1).len(), 1);
+    };
+    check(&store);
+    drop(store);
+    check(&open(&dir.log()));
+}

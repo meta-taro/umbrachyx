@@ -128,6 +128,26 @@ pub struct Rejection {
     pub time: u64,
 }
 
+/// A change approved into `main` or rejected, as the log records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    pub decided: Decided,
+    /// The branch the change was on.
+    pub branch: String,
+    /// The head of the branch the decision was made on.
+    pub head: CommitId,
+    /// Who decided, and why.
+    pub provenance: Provenance,
+    pub time: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decided {
+    /// With the merge into `main` it made.
+    Approved(CommitId),
+    Rejected,
+}
+
 #[derive(Debug, Clone)]
 pub struct CommitInfo {
     pub id: CommitId,
@@ -361,6 +381,8 @@ pub struct Store<S: Storage, C: Clock> {
     tables: Tables,
     /// Per branch, the last change rejected on it.
     rejections: BTreeMap<String, Rejection>,
+    /// Every approval and rejection, oldest first.
+    decisions: Vec<Decision>,
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
@@ -411,6 +433,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             erasures: Vec::new(),
             tables: Tables::default(),
             rejections: BTreeMap::new(),
+            decisions: Vec::new(),
         };
         for record in &records {
             store
@@ -926,6 +949,17 @@ impl<S: Storage, C: Clock> Store<S, C> {
             }
             Record::Reject(reject) => {
                 self.require_branch(&reject.branch)?;
+                self.decisions.push(Decision {
+                    decided: Decided::Rejected,
+                    branch: reject.branch.clone(),
+                    head: reject.head,
+                    provenance: Provenance {
+                        who: reject.who.clone(),
+                        why: reject.why.clone(),
+                        approved_by: None,
+                    },
+                    time: reject.time,
+                });
                 self.rejections.insert(
                     reject.branch.clone(),
                     Rejection {
@@ -999,6 +1033,20 @@ impl<S: Storage, C: Clock> Store<S, C> {
         head.since_tree = since_tree;
         for key in &touched {
             self.tables.note_written(key);
+        }
+        // A merge into main that somebody approved is a decision about
+        // the change it merged.
+        if let (MAIN_BRANCH, Some(head), Some(_)) =
+            (commit.branch.as_str(), commit.merged, &commit.approved_by)
+        {
+            let branch = self.commits.get(&head).map(|merged| merged.branch.clone());
+            self.decisions.push(Decision {
+                decided: Decided::Approved(id),
+                branch: branch.unwrap_or_default(),
+                head,
+                provenance: info.provenance.clone(),
+                time: commit.time,
+            });
         }
         self.commits.insert(id, Arc::new(info));
         self.last_time = self.last_time.max(commit.time);

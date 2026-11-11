@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use super::merge::MergePlan;
 use super::{
-    Clock, CommitId, Conflict, MAIN_BRANCH, NotWaiting, Provenance, Rejection, Storage, Store,
-    StoreError,
+    Clock, CommitId, Conflict, Decision, MAIN_BRANCH, NotWaiting, Provenance, Rejection, Storage,
+    Store, StoreError,
 };
 use crate::log::{Record, Reject};
 use crate::tree::Bytes;
@@ -127,6 +127,11 @@ impl<S: Storage, C: Clock> Store<S, C> {
             .into_iter()
             .map(|change| change.key)
             .collect())
+    }
+
+    /// The newest `limit` approvals and rejections, newest first.
+    pub fn decisions(&self, limit: usize) -> Vec<&Decision> {
+        self.decisions.iter().rev().take(limit).collect()
     }
 
     /// The last change rejected on `branch`.

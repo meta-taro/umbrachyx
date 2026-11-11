@@ -807,6 +807,13 @@ for it is the gate for the first public release, with the speed work.
   nothing else, and only for a token that may approve.
 - **The diff is `UMBRA.DIFF`.** Reading a large change a table and a page
   at a time is still to come.
+- **`UMBRA.DECISIONS [count]`** lists the approvals and rejections,
+  newest first, each one flat array like a change waiting: the decision,
+  the branch, the head it was made on, who made it and why, when, and for
+  an approval the merge it made. Whoever runs an agent wants to read why
+  its change was turned down. An approval is found in the log as a merge
+  into `main` that names who approved it; a merge nobody approved is not
+  a decision.
 - **Refusals say why in their first word**, as Redis errors do:
   `NOAUTH` without a token, `NOPERM` for a token that may not approve a
   key the change touches, `NOTWAITING` with a second word for why
