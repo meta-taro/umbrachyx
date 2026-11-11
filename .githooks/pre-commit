@@ -1,0 +1,33 @@
+#!/bin/sh
+# Runs the checks CI runs first (fmt, clippy, tests) before a commit is made,
+# so a commit that would fail them is stopped here rather than after a push.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+#
+# The checks read the working tree, not only what is staged: run them with
+# unstaged edits put aside if those edits could change the result.
+
+set -eu
+
+# Commits that touch no Rust, Cargo or toolchain file cannot change what
+# these checks see, so they skip them (docs-only commits stay quick).
+CHECKED_PATHS='\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$'
+
+if ! git diff --cached --name-only --diff-filter=ACMRD | grep -Eq "$CHECKED_PATHS"; then
+    echo "pre-commit: no Rust or Cargo files staged; checks skipped"
+    exit 0
+fi
+
+run() {
+    echo "pre-commit: $*"
+    if ! "$@"; then
+        echo "pre-commit: failed: $*" >&2
+        echo "pre-commit: fix it and commit again; nothing was committed" >&2
+        exit 1
+    fi
+}
+
+# The same commands, with the same flags, as .github/workflows/ci.yml.
+run cargo fmt --all --check
+run cargo clippy --workspace --all-targets --locked -- -D warnings
+run cargo test --workspace --locked

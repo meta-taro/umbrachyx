@@ -169,6 +169,18 @@ designed so that they work against Umbrachyx as well. The adapter reads them
 from the server, with the `UMBRA.` commands described in
 [`docs/decisions.md`](docs/decisions.md).
 
+## Working on it
+
+CI runs `cargo fmt --check`, `cargo clippy` and `cargo test` on Linux and
+Windows. To run the same three before each commit, enable the hook once per
+clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+Commits that touch no Rust or Cargo file skip the checks.
+
 ## License
 
 [MIT](LICENSE)
