@@ -114,7 +114,8 @@ cargo test -p umbrachyx --lib --release ten_thousand_seeds -- --ignored --nocapt
 
 | 順 | 誰が | 何を |
 |---|---|---|
-| 1 | 人 | AWS / GCP のコンソールで VM を作る（§2 の条件）。SSH の鍵を ssh-agent に入れ、sshboard に接続を登録する |
+| 1 | 人 | AWS / GCP のコンソールで VM を作る（§2 の条件）。SSH の鍵を作り、ssh-agent に入れる |
+| 1b | AI | sshboard の `register_connection` で、その VM への接続を登録する（宛先・ユーザー名・ポートだけ。鍵は ssh-agent のものを使い、鍵のパスや秘密は渡さない） |
 | 2 | 人 | sshboard のコンソールを開き、「AI に渡す」で AI に渡す |
 | 3 | AI | ローカル NVMe をフォーマットしてマウントし（sshboard が AI の `mkfs` を拒むなら、ここは人が行う）、`git clone` で測るタグを取り出して、`bench/cloud.sh` を `nohup` で流す |
 | 4 | AI | 結果のフォルダを sshboard で回収し、`bench/results/<日付>-<機械名>/` に置いて、README の表を直す（commit まで） |
@@ -122,5 +123,6 @@ cargo test -p umbrachyx --lib --release ten_thousand_seeds -- --ignored --nocapt
 | 6 | 人 | VM を終了（terminate）し、一覧から消えたことを確かめる。push する |
 
 - 測定機は使い捨てで、秘密情報を置かない。それでも、渡されたコンソールで AI がやるのは手順3〜5だけにする。
-- sshboard の設定ファイル（接続・`readonly.toml`・`operations.toml`）は人が書く。AI は書かない。
+- 測定機への接続の登録は、AI が `register_connection` で行ってよい（2026-11-11、オーナーの判断）。鍵・パスワード・パスフレーズは扱わない。
+- `readonly.toml`・`operations.toml`（AI に何をさせてよいかの一覧）は、引き続き人が書く。AI は書かない。
 - `nohup` で流すので、SSH が切れても、コンソールを人が取り返しても、測定は最後まで走る。進み具合は `nohup.out` と結果のフォルダで見る。
