@@ -462,6 +462,25 @@ checker to hold the shared secret that mints tokens.
   tree more often trades memory back for those reads: trees kept close
   together still each hold their own copy of every path changed between
   them.
+- **No hash index of current values beside the tree** (measured, not
+  taken). A table that keeps its history answers a `GET` by walking the
+  prolly tree; an index of current values would answer it with one
+  lookup, as a table declared `latest` already does. The latest table is
+  therefore the most such an index could give, and it gives little. In
+  the process, with no network and 1,000,000 keys, a read costs about
+  560 ns from the tree and 410 ns from the hash table
+  (`cargo run --release --example read_cost`, on a laptop); the tree's
+  figure was 880 ns before nodes kept their keys in one buffer. Over the
+  Redis protocol, in a Linux virtual machine with 500,000 keys and three
+  runs each, `GET`s per second from a history table and from a latest
+  table were 33,400 to 33,900 against 31,300 to 33,700 from one client,
+  272,000 to 316,000 against 244,000 to 305,000 from 50 clients, and
+  1.33 million against 1.36 million from 50 clients sending 16 at a
+  time: no difference but about 2% in the last. A request costs far more
+  in the round trip than in the lookup. The index would also add memory
+  per key, which is where the store is furthest behind. **Look again
+  if** a profile of `GET` shows the tree walk above a tenth of the
+  server's time.
 - **A commit is named by a BLAKE3 hash** of its parent, branch, provenance,
   time and edits. The hash of the tree is left out, because each cell in
   the tree names the commit that wrote it.
