@@ -1,6 +1,7 @@
 //! What reading the past costs once most commits keep only the cells they
-//! wrote: the diff of an old commit against its parent, and against the
-//! fifth commit before it, which rebuilds both trees.
+//! wrote: the diff of an old commit against its parent, against the fifth
+//! and the thousandth commit before it, one key's value at an old commit,
+//! and the whole state an old commit held.
 //!
 //! `cargo run --release --example old_reads [-- <commits>]`
 //!
@@ -17,6 +18,8 @@ use umbrachyx::store::{CommitId, CommitRequest, MAIN_BRANCH, Provenance, Store, 
 const DEFAULT_COMMITS: usize = 200_000;
 const GROUP: usize = 64;
 const PROBES: usize = 300;
+/// Reads of a whole past state, which take far longer each.
+const WHOLE_PROBES: usize = 20;
 
 type FileStore = Store<FileStorage, SystemClock>;
 
@@ -74,6 +77,21 @@ fn time_diffs(store: &FileStore, ids: &[CommitId], back: usize) -> (f64, f64) {
     (total / PROBES as f64, slowest)
 }
 
+/// Mean and slowest time in milliseconds of `read` at commits spread over
+/// the whole history, `probes` of them.
+fn time_reads(ids: &[CommitId], probes: usize, read: impl Fn(usize, &CommitId)) -> (f64, f64) {
+    let (mut total, mut slowest) = (0.0_f64, 0.0_f64);
+    for probe in 0..probes {
+        let at = (probe * 7919) % ids.len();
+        let started = Instant::now();
+        read(at, &ids[at]);
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        total += ms;
+        slowest = slowest.max(ms);
+    }
+    (total / probes as f64, slowest)
+}
+
 fn main() {
     let commits = std::env::args().nth(1).map_or(DEFAULT_COMMITS, |arg| {
         arg.parse().expect("a number of commits")
@@ -86,10 +104,23 @@ fn main() {
 
     println!("| Diff, {commits} commits | mean (ms) | slowest (ms) |");
     println!("|---|---|---|");
-    for (label, back) in [("against its parent", 1), ("against the fifth before", 5)] {
+    for (label, back) in [
+        ("against its parent", 1),
+        ("against the fifth before", 5),
+        ("against the thousandth before", 1000),
+    ] {
         let (mean, slowest) = time_diffs(&store, &ids, back);
         println!("| an old commit {label} | {mean:.3} | {slowest:.3} |");
     }
+    let (mean, slowest) = time_reads(&ids, PROBES, |at, id| {
+        let key = format!("key:{:012}", (at * 31) % commits);
+        store.get_at(id, key.as_bytes()).expect("reads");
+    });
+    println!("| one key's value at an old commit | {mean:.3} | {slowest:.3} |");
+    let (mean, slowest) = time_reads(&ids, WHOLE_PROBES, |_, id| {
+        store.diff(None, Some(id)).expect("diffs");
+    });
+    println!("| everything an old commit held, against nothing | {mean:.3} | {slowest:.3} |");
     drop(store);
     let _ = std::fs::remove_file(&path);
 }

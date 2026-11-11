@@ -443,33 +443,47 @@ checker to hold the shared secret that mints tokens.
   for a new one. A reader holds the lock only to copy that pointer, never
   while the committer syncs, and a writer that has been answered reads its
   own write back.
-- **Every past state can be read, but only one commit in 1,024 along each
-  line of history keeps its whole tree.** The others keep the cells they
-  wrote and the cells those replaced. A past tree is rebuilt from the
-  nearest kept tree before it, replaying each key's latest cell once.
-  This replaced a tree per commit: versions share the nodes they have in
-  common, but each commit still copied the path from the root to every key
-  it changed, about 8 KB per one-key commit, more than the history itself
-  holds. Kept every 1,024 commits, the same writes take about 3.2 KB a
-  commit. Most of that is still the kept trees, not the commits: counted
-  by the allocator over 200,000 one-key commits to 1,000,000 keys
-  (`cargo run --release --example memory_cost`), a commit leaves 3,405
-  bytes held, of which 635 are the commit and its cells and about 2,770
-  the kept trees' share. A kept tree holds its own copy of every leaf
-  changed since the one before it, and a leaf is 32 entries copied whole
-  for one changed key. Spacing alone gives back little: 4,145 bytes a
-  commit at every 256, 2,282 at every 8,192. A key that was only ever
-  written once costs 242 bytes.
-  The cost moves to reading the past: a diff between two
-  old commits rebuilds two trees, about 7 ms on average and 16 ms at worst
-  where it took under 0.1 ms, measured in a Linux virtual machine on a
-  laptop with 200,000 commits
-  ([`bench/results/2026-11-09-linux-vm-sparse-trees/`](../bench/results/2026-11-09-linux-vm-sparse-trees/)).
-  A commit against its parent, what a viewer shows most, needs no tree:
-  it is read from the commit's cells and is faster than before. Keeping a
-  tree more often trades memory back for those reads: trees kept close
-  together still each hold their own copy of every path changed between
-  them.
+- **Every past state can be read, and no commit keeps a whole tree.**
+  Only the head of each branch has one. Every commit keeps the cells it
+  wrote and the cells those replaced, which is enough to go either way
+  along a line of history:
+  - **A past tree** is made when asked for, from the head of its branch by
+    putting back what was written since, or from nothing by replaying
+    what was written before, whichever is nearer.
+  - **A diff between two commits on one line** is read from the cells
+    written between them, with no tree. It costs the commits in between.
+  - **A key's value at an old commit** is found along the key's own
+    chain: each cell names the commit that wrote it, and that commit holds
+    the cell it replaced. It costs the times the key was written since.
+  - **A merge** reads what the incoming branch changed and looks each key
+    up at the head it merges into, so it does not cost how far that
+    branch has moved.
+
+  Earlier forms kept trees. A tree per commit copied the path from the
+  root to every key it changed, about 8 KB per one-key commit. One tree
+  per 1,024 commits took about 3.2 KB a commit, and most of that was
+  still the trees: counted by the allocator over 200,000 one-key commits
+  to 1,000,000 keys (`cargo run --release --example memory_cost`), a
+  commit left 3,405 bytes held, of which about 635 were the commit and
+  its cells. A kept tree holds its own copy of every leaf changed since
+  the one before it, and a leaf is 32 entries copied whole for one
+  changed key, so spacing alone gave back little: 4,145 bytes a commit
+  at every 256, 2,282 at every 8,192. With no kept trees a commit leaves
+  619 bytes, and over the Redis protocol a SET takes 620 bytes of
+  resident memory where it took about 3,200. A key written only once
+  costs 242 bytes.
+
+  Reading the past got faster where a viewer reads it and slower in one
+  place, measured on a laptop over 200,000 commits
+  ([`bench/results/2026-11-12-laptop-no-kept-trees/`](../bench/results/2026-11-12-laptop-no-kept-trees/)):
+  a diff against the fifth commit before went from 5.1 ms to 0.007 ms,
+  against the thousandth from 4.9 ms to 0.44 ms, one key's value at an
+  old commit from 0.048 ms to 0.002 ms. **The whole state of an old
+  commit went from 3.7 ms to 43.5 ms**, and it grows with the history,
+  where it used to be bounded by 1,024 commits. The same holds for a
+  diff between commits on different branches when neither is a head.
+  **Look again if** a command people use reads whole old states often:
+  a few trees remembered after they are made would bound it.
 - **No hash index of current values beside the tree** (measured, not
   taken). A table that keeps its history answers a `GET` by walking the
   prolly tree; an index of current values would answer it with one
@@ -961,8 +975,10 @@ choose its storage engine.
   engine.
 - **No append-only engine for events, for now** (decided after the
   latest engine's numbers). Events are rows written once under new keys.
-  A latest table already holds those for about 780 bytes a SET where the
-  history holds about 2,400 (the first pass of `bench/memory.sh`, every
+  A latest table already held those for about 780 bytes a SET where the
+  history held about 2,400 when this was decided (since then the history
+  stopped keeping trees and holds about as little on a branch; see "The
+  store") (the first pass of `bench/memory.sh`, every
   key new), and an event that is never changed loses nothing by keeping
   only its latest value. What an append engine would add is reading rows
   in the order they were written, and nothing reads that way yet: the

@@ -117,7 +117,7 @@ fn main() {
             .expect("fills");
     }
     let filled = LIVE.load(Ordering::Relaxed);
-    let (trees, cells) = (store.trees_kept(), store.cells_kept());
+    let cells = store.cells_kept();
     let mut x = 0x9E37_79B9_7F4A_7C15_u64;
     for _ in 0..commits {
         x ^= x << 13;
@@ -129,11 +129,10 @@ fn main() {
     }
     let held = LIVE.load(Ordering::Relaxed) - filled;
     println!(
-        "keys={keys} sealed={} filled_bytes_per_key={} bytes_per_commit={} trees_kept=+{} cells_kept=+{}",
+        "keys={keys} sealed={} filled_bytes_per_key={} bytes_per_commit={} cells_kept=+{}",
         !plain,
         filled / keys,
         held / commits,
-        store.trees_kept() - trees,
         store.cells_kept() - cells,
     );
 }

@@ -1,6 +1,7 @@
 //! A long history on a real file: every past state stays readable exactly
-//! as it was, through diffs, key histories and a merge, while only some
-//! commits keep a whole tree in memory.
+//! as it was, through diffs, key histories and a merge, while no commit
+//! keeps a whole tree in memory: past states are made from the head of a
+//! branch or from its start, whichever is nearer.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,16 +14,14 @@ type FileStore = Store<FileStorage, SystemClock>;
 type Snapshot = BTreeMap<String, String>;
 
 const SIDE: &str = "side";
-/// Long enough that main passes two kept trees and the branch one.
+/// Long enough that commits lie nearer the start, nearer the head, and
+/// far from both.
 const MAIN_COMMITS: usize = 2_200;
 const SIDE_FROM: usize = 100;
-/// A branch taken from `SIDE` after `SIDE` has passed a kept tree of its own.
+/// A branch taken from `SIDE` late in its history.
 const LATE: &str = "late";
 const LATE_FROM: usize = 2_150;
 const KEYS_PER_BRANCH: u64 = 16;
-/// The store keeps a whole tree for one commit in this many along each
-/// line of history.
-const TREE_EVERY: usize = 1024;
 
 /// A fresh directory per test, removed when the test ends.
 struct TempDir(PathBuf);
@@ -208,7 +207,7 @@ fn assert_every_state_reads_back(store: &FileStore, model: &Model) {
             "entries at a commit"
         );
         // Every value of every commit would take long; one commit in five
-        // still reaches each distance from a kept tree.
+        // still reaches each distance from the head.
         if n % 5 != 0 {
             continue;
         }
@@ -262,6 +261,11 @@ fn assert_diffs_match(store: &FileStore, model: &Model) {
             expected_diff(before, after),
             "the diff between two commits"
         );
+        assert_eq!(
+            diff(store, to, from),
+            expected_diff(after, before),
+            "the diff between two commits, read backwards"
+        );
     }
     // What a viewer shows most: a commit against its parent.
     for (id, after) in model.commits.iter().step_by(3) {
@@ -314,27 +318,4 @@ fn every_past_state_reads_back_exactly_after_a_long_history() {
     drop(store);
     let store = open(&dir.log());
     assert_all(&store, &model);
-}
-
-#[test]
-fn only_some_commits_keep_a_whole_tree() {
-    let dir = TempDir::new("trees");
-    let mut store = open(&dir.log());
-    let model = write_history(&mut store);
-    let commits = model.commits.len();
-    // One tree in about every TREE_EVERY commits along each line of
-    // history, and one more where the branch starts. Main is long enough
-    // to keep two, so the history test above reads past kept trees.
-    let allowed = commits / TREE_EVERY + 2;
-    let at_least = MAIN_COMMITS / TREE_EVERY;
-
-    let kept = store.trees_kept();
-    assert!(
-        (at_least..=allowed).contains(&kept),
-        "{kept} of {commits} commits keep a whole tree; {at_least} to {allowed} should"
-    );
-
-    drop(store);
-    let store = open(&dir.log());
-    assert_eq!(store.trees_kept(), kept, "the same after opening again");
 }

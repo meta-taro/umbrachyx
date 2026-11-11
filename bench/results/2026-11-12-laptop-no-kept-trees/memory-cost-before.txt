@@ -1,0 +1,1 @@
+keys=1000000 sealed=true filled_bytes_per_key=242 bytes_per_commit=3405 trees_kept=+196 cells_kept=+200000

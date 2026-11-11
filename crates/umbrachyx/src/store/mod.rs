@@ -5,12 +5,14 @@
 //! is it applied. Opening the store replays the log, so nothing the store
 //! holds can be missing from the log.
 //!
-//! Every commit keeps the cells it wrote and the cells they replaced; one
-//! in `TREE_EVERY` along each line of history also keeps its whole tree,
-//! and the tree of any other is rebuilt from the nearest one before it.
-//! Keeping a tree per commit would copy, for every commit, the path from
-//! the root to each key it changed. A branch is a name for a commit, and
-//! making one copies nothing.
+//! Every commit keeps the cells it wrote and the cells they replaced, and
+//! no tree: only the head of each branch has one. The tree of any other
+//! commit is made when asked for, from the head of its branch by putting
+//! back what was written since, or from nothing by replaying what was
+//! written before, whichever is nearer. A tree kept per commit, or one
+//! commit in so many, holds its own copy of every leaf changed since the
+//! tree before it, which was most of the memory a commit cost. A branch
+//! is a name for a commit, and making one copies nothing.
 //!
 //! Each value in the tree is a cell: the value, or a mark that it was
 //! removed, and the commit that last changed it. That commit kept the cell
@@ -161,6 +163,9 @@ pub struct CommitInfo {
     pub branch: String,
     pub provenance: Provenance,
     pub time: u64,
+    /// How many commits are before it along its first parents. Of two
+    /// commits on one line, the one with fewer is the earlier.
+    depth: u64,
     /// The cells this commit wrote to tables that keep their history,
     /// sorted by key.
     written: Vec<Written>,
@@ -168,10 +173,6 @@ pub struct CommitInfo {
     /// `main` only, so a merge can tell what a branch changed. On `main`
     /// such a table keeps no past.
     latest_written: Vec<Written>,
-    /// The whole tree after this commit, kept for one commit in about
-    /// `TREE_EVERY` along each line of history. The trees of the others
-    /// are rebuilt from the nearest one before them.
-    tree: Option<Tree>,
 }
 
 /// A cell a commit wrote, and the cell it replaced on its branch.
@@ -181,12 +182,6 @@ struct Written {
     cell: Bytes,
     replaced: Option<Bytes>,
 }
-
-/// How often along a line of history a commit keeps its whole tree.
-/// Rebuilding the tree of any commit then replays at most this many
-/// commits' cells, while memory grows with the cells written rather than
-/// with a copied path of the tree per commit.
-const TREE_EVERY: usize = 1024;
 
 impl CommitInfo {
     fn written(&self, key: &[u8]) -> Option<&Written> {
@@ -347,9 +342,6 @@ struct Head {
     state: Tree,
     /// The cells of latest-value tables. A removed key is not kept.
     latest: Hamt,
-    /// Commits along this line of history since the last that kept its
-    /// whole tree.
-    since_tree: usize,
     /// Cells written by the commits of a group being applied and not yet
     /// in `state`: a group's commits go into the tree together, once.
     /// Empty whenever no record is being applied.
@@ -438,7 +430,6 @@ impl<S: Storage, C: Clock> Store<S, C> {
                     commit: None,
                     state: Tree::empty(),
                     latest: Hamt::empty(),
-                    since_tree: 0,
                     pending: BTreeMap::new(),
                 },
             )]),
@@ -776,55 +767,112 @@ impl<S: Storage, C: Clock> Store<S, C> {
         entries
     }
 
-    /// The cell of `key` as `commit` left it: written by the commit itself
-    /// or one before it, found by walking back no further than the nearest
-    /// commit that keeps its whole tree. A latest-value table keeps no past:
-    /// its keys have a cell only at the head of a branch.
+    /// The cell of `key` as `commit` left it, found from the head of its
+    /// branch at the cost of the times the key was written since. A
+    /// latest-value table keeps no past: its keys have a cell only at the
+    /// head of a branch.
     fn cell_at(&self, commit: &CommitId, key: &[u8]) -> Option<Bytes> {
         if self.is_latest(key) {
             return self.head_of(commit)?.latest.get(key).cloned();
         }
-        let mut next = Some(*commit);
-        while let Some(id) = next {
-            let info = self.commits.get(&id)?;
-            if let Some(written) = info.written(key) {
-                return Some(written.cell.clone());
+        let at = self.commits.get(commit)?;
+        // A branch's head only ever moves on from its own commits, so
+        // `commit` is on the line of its branch's head.
+        let head = self.branches.get(&at.branch)?;
+        debug_assert!(self.line_head(at).is_some(), "a commit left its branch");
+        // The key's own chain: each cell names the commit that wrote it,
+        // and that commit holds the cell it replaced. The first one
+        // written at or before `commit` is the one that stood then.
+        let mut cell = head.state.get(key).cloned();
+        while let Some(current) = &cell {
+            let writer = self.commits.get(&decode_cell(current).changed_by)?;
+            if writer.depth <= at.depth {
+                break;
             }
-            if let Some(tree) = &info.tree {
-                return tree.get(key).cloned();
-            }
-            next = info.parent;
+            cell = writer.written(key)?.replaced.clone();
         }
-        None
+        cell
+    }
+
+    /// The head of the branch `commit` was written to, checked to have
+    /// `commit` on its line: a branch's head only moves on from its own
+    /// commits, so it always has.
+    fn line_head(&self, commit: &CommitInfo) -> Option<&Head> {
+        let head = self.branches.get(&commit.branch)?;
+        let tip = self.commits.get(&head.commit?)?;
+        let mut back = tip.depth.checked_sub(commit.depth)?;
+        let mut info = tip;
+        while back > 0 {
+            info = self.commits.get(&info.parent?)?;
+            back -= 1;
+        }
+        (info.id == commit.id).then_some(head)
     }
 
     /// The whole tree as `commit` left it: a branch's head as it is, any
-    /// other rebuilt from the nearest tree kept before it, or from the empty
-    /// tree, by replaying the cells written since.
+    /// other made from whichever end of its line is nearer, the head or
+    /// the start.
     fn tree_at(&self, commit: &CommitId) -> Option<Tree> {
         if let Some(head) = self.head_of(commit) {
             return Some(head.state.clone());
         }
-        // Walking back from the newest, the first cell seen for a key is the
-        // one that stands, so the replay is one insert of each key once.
+        let at = self.commits.get(commit)?;
+        let head = self.line_head(at)?;
+        let tip = self.commits.get(&head.commit?)?;
+        if tip.depth - at.depth <= at.depth {
+            Some(self.tree_undone(at, head))
+        } else {
+            self.tree_replayed(at)
+        }
+    }
+
+    /// The tree as `commit` left it, from nothing: every key written up
+    /// to it, with its last cell. Walking back from the newest, the first
+    /// cell seen for a key is the one that stands.
+    fn tree_replayed(&self, commit: &CommitInfo) -> Option<Tree> {
         let mut latest: BTreeMap<Bytes, Bytes> = BTreeMap::new();
-        let mut next = Some(*commit);
-        let base = loop {
-            let Some(id) = next else {
-                break Tree::empty();
-            };
-            let info = self.commits.get(&id)?;
-            if let Some(tree) = &info.tree {
-                break tree.clone();
-            }
+        let mut next = Some(commit);
+        while let Some(info) = next {
             for written in &info.written {
                 latest
                     .entry(written.key.clone())
                     .or_insert_with(|| written.cell.clone());
             }
+            next = match info.parent {
+                Some(parent) => Some(self.commits.get(&parent)?.as_ref()),
+                None => None,
+            };
+        }
+        Some(Tree::from_sorted(latest.into_iter().collect()))
+    }
+
+    /// The tree as `commit` left it, from the head of its branch: every
+    /// key written since is put back to the cell its first write since
+    /// replaced, or taken out if it replaced none.
+    fn tree_undone(&self, at: &CommitInfo, head: &Head) -> Tree {
+        let mut before: BTreeMap<Bytes, Option<Bytes>> = BTreeMap::new();
+        let mut next = head.commit;
+        while let Some(info) = next.and_then(|id| self.commits.get(&id)) {
+            if info.id == at.id {
+                break;
+            }
+            for written in &info.written {
+                before.insert(written.key.clone(), written.replaced.clone());
+            }
             next = info.parent;
-        };
-        Some(base.insert_sorted(latest.into_iter().collect()))
+        }
+        if before.len() >= head.state.len() / REBUILD_SHARE {
+            return rebuilt(&head.state, before);
+        }
+        let mut tree = head.state.clone();
+        let mut put_back = Vec::with_capacity(before.len());
+        for (key, cell) in before {
+            match cell {
+                Some(cell) => put_back.push((key, cell)),
+                None => tree = tree.remove(&key),
+            }
+        }
+        tree.insert_sorted(put_back)
     }
 
     /// The latest commit on `branch`, or `None` if it has none or does not
@@ -889,16 +937,6 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// The time recorded on the latest commit.
     pub fn last_time(&self) -> u64 {
         self.last_time
-    }
-
-    /// How many commits keep a whole tree. Tests use this to check that
-    /// memory grows with the edits, not with a tree per commit.
-    #[doc(hidden)]
-    pub fn trees_kept(&self) -> usize {
-        self.commits
-            .values()
-            .filter(|info| info.tree.is_some())
-            .count()
     }
 
     /// How many cells commits keep for diffs, history and merges. Tests use
@@ -1019,8 +1057,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             written_over(&latest_cells, |key| head.latest.get(key).cloned())
         };
         head.pending.extend(cells);
-        let since_tree = (head.since_tree + 1) % TREE_EVERY;
-        if !in_group || since_tree == 0 {
+        if !in_group {
             head.flush();
         }
         let latest = latest_cells
@@ -1032,8 +1069,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
                     latest.remove(&key)
                 }
             });
+        let depth = head
+            .commit
+            .and_then(|parent| self.commits.get(&parent))
+            .map_or(0, |parent| parent.depth + 1);
         let info = CommitInfo {
             id,
+            depth,
             parent: head.commit,
             merged: commit.merged,
             branch: commit.branch.clone(),
@@ -1045,11 +1087,9 @@ impl<S: Storage, C: Clock> Store<S, C> {
             time: commit.time,
             written,
             latest_written,
-            tree: (since_tree == 0).then(|| head.state.clone()),
         };
         head.commit = Some(id);
         head.latest = latest;
-        head.since_tree = since_tree;
         for key in &touched {
             self.tables.note_written(key);
         }
@@ -1159,6 +1199,28 @@ fn written_over(cells: &[(Bytes, Bytes)], held: impl Fn(&[u8]) -> Option<Bytes>)
             replaced: held(key),
         })
         .collect()
+}
+
+/// When this share of a tree's keys, one in so many, has to be put back,
+/// the tree is built anew from its entries instead of changed key by key.
+const REBUILD_SHARE: usize = 8;
+
+/// `tree` with each key in `before` put back to the cell given, or taken
+/// out where none is, built in one pass over both.
+fn rebuilt(tree: &Tree, before: BTreeMap<Bytes, Option<Bytes>>) -> Tree {
+    let mut entries = Vec::with_capacity(tree.len());
+    let mut changed = before.into_iter().peekable();
+    for (key, cell) in tree.iter() {
+        while let Some((earlier, cell)) = changed.next_if(|(changed, _)| changed < key) {
+            entries.extend(cell.map(|cell| (earlier, cell)));
+        }
+        match changed.next_if(|(changed, _)| changed == key) {
+            Some((key, cell)) => entries.extend(cell.map(|cell| (key, cell))),
+            None => entries.push((key.clone(), cell.clone())),
+        }
+    }
+    entries.extend(changed.filter_map(|(key, cell)| Some((key, cell?))));
+    Tree::from_sorted(entries)
 }
 
 /// A cell in the tree: the commit id, then a flag, then the value if any.

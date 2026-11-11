@@ -106,7 +106,51 @@ impl<S: Storage, C: Clock> Store<S, C> {
         {
             return Ok(written_changes(info));
         }
+        if let (Some(from), Some(to)) = (from, to) {
+            if let Some(changes) = self.line_changes(from, to) {
+                return Ok(changes);
+            }
+            if let Some(changes) = self.line_changes(to, from) {
+                return Ok(changes.into_iter().map(reversed).collect());
+            }
+        }
         Ok(value_changes(&self.state_at(from)?, &self.state_at(to)?))
+    }
+
+    /// What changed from `from` to `to` when `from` is before `to` along
+    /// its first parents: read from the cells written in between, at the
+    /// cost of those commits and no tree.
+    fn line_changes(&self, from: &CommitId, to: &CommitId) -> Option<Vec<ValueChange>> {
+        let (start, end) = (self.commits.get(from)?, self.commits.get(to)?);
+        let between = end.depth.checked_sub(start.depth)?;
+        // Newest first: a key's first cell seen is how it ended, and the
+        // last cell seen replaced how it started.
+        let mut ends: BTreeMap<&Bytes, (Option<&Bytes>, &Bytes)> = BTreeMap::new();
+        let mut info = end;
+        for _ in 0..between {
+            for written in &info.written {
+                ends.entry(&written.key).or_insert((None, &written.cell)).0 =
+                    written.replaced.as_ref();
+            }
+            info = self.commits.get(&info.parent?)?;
+        }
+        if info.id != start.id {
+            return None;
+        }
+        Some(
+            ends.into_iter()
+                .filter_map(|(key, (before, after))| {
+                    let before = before.and_then(|cell| decode_cell(cell).value);
+                    let after = decode_cell(after).value;
+                    (before != after).then(|| ValueChange {
+                        key: key.clone(),
+                        before,
+                        after,
+                        erased: false,
+                    })
+                })
+                .collect(),
+        )
     }
 
     /// A conflict as the caller reads it, values opened.
@@ -158,22 +202,22 @@ impl<S: Storage, C: Clock> Store<S, C> {
             return Ok(MergePlan::UpToDate);
         }
         let base = ours.and_then(|ours| self.merge_base(ours, theirs));
-        let ours_changed: BTreeMap<Bytes, Option<Bytes>> = self
-            .changes(base.as_ref(), ours.as_ref())?
-            .into_iter()
-            .map(|change| (change.key, change.after))
-            .collect();
+        // What `into` did to a key since the base is read off its head: it
+        // changed the key if the value there is no longer the base's. So a
+        // merge costs what `from` changed, however far `into` has moved.
+        let ours_now = &self.branches[into].state;
         let (mut edits, mut conflicts) = self.merge_latest(into, from);
         for change in self.changes(base.as_ref(), Some(&theirs))? {
-            match ours_changed.get(&change.key) {
-                None => edits.push(edit_to(&change.key, change.after.as_ref())),
-                Some(ours) if *ours == change.after => {}
-                Some(ours) => conflicts.push(Conflict {
+            let ours = live_value(ours_now, &change.key);
+            if ours == change.before {
+                edits.push(edit_to(&change.key, change.after.as_ref()));
+            } else if ours != change.after {
+                conflicts.push(Conflict {
                     key: change.key,
                     base: change.before,
-                    ours: ours.clone(),
+                    ours,
                     theirs: change.after,
-                }),
+                });
             }
         }
         if !conflicts.is_empty() {
@@ -303,6 +347,15 @@ fn value_changes(from: &Tree, to: &Tree) -> Vec<ValueChange> {
             })
         })
         .collect()
+}
+
+/// The same change, read the other way.
+fn reversed(change: ValueChange) -> ValueChange {
+    ValueChange {
+        before: change.after,
+        after: change.before,
+        ..change
+    }
 }
 
 /// What one commit changed, from its cells and the cells they replaced:
