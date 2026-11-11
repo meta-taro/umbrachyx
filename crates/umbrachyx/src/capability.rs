@@ -270,44 +270,8 @@ pub fn from_text(text: &str) -> Result<Vec<u8>, TokenError> {
     Ok(UnverifiedBiscuit::from_base64(text.trim())?.to_vec()?)
 }
 
-/// Reads who holds `token` and where its writes go. It does not decide any
-/// request: a token that has expired still has a holder.
-pub fn holder(token: &[u8], root: PublicKey) -> Result<Holder, Denied> {
-    let token = Biscuit::from(token, root).map_err(|_| Denied::Invalid)?;
-    // A query sees the authorizer's facts and the first block's only, as
-    // the policy does, so a holder's own blocks cannot change the answer.
-    let mut authorizer = AuthorizerBuilder::new()
-        .set_limits(LIMITS)
-        .build(&token)
-        .map_err(|_| Denied::Invalid)?;
-    let (subject, branch, purpose, key_prefix) = authorizer
-        .query_exactly_one(
-            "holder($s, $b, $p, $k) <- subject($s), write_branch($b), purpose($p), key_prefix($k)",
-        )
-        .map_err(|_| Denied::Invalid)?;
-    let columns: Vec<(String,)> = authorizer
-        .query("column($c) <- column_allowed($c)")
-        .map_err(|_| Denied::Invalid)?;
-    let mut columns: Vec<String> = columns.into_iter().map(|(column,)| column).collect();
-    columns.sort();
-    Ok(Holder {
-        subject,
-        branch,
-        purpose,
-        key_prefix,
-        columns,
-    })
-}
-
-/// Decides one request. Runs at the database's boundary, before the request
-/// reaches the log or the tree.
-pub fn authorize(token: &[u8], root: PublicKey, request: &Request<'_>) -> Result<(), Denied> {
-    let token = Biscuit::from(token, root).map_err(|_| Denied::Invalid)?;
-    // The policy is evaluated over the authorizer's facts and the first
-    // block's only, so facts a holder appends cannot satisfy it.
-    let mut authorizer = AuthorizerBuilder::new()
-        .code_with_params(
-            r#"
+/// What a request states, and what allows it.
+const POLICY: &str = r#"
             operation({operation});
             branch({branch});
             key({key});
@@ -327,30 +291,98 @@ pub fn authorize(token: &[u8], root: PublicKey, request: &Request<'_>) -> Result
                      branch({main}),
                      key($k), key_prefix($p), $k.starts_with($p),
                      declared_purpose($u), purpose($u);
-            "#,
-            params([
-                ("operation", request.operation.name().into()),
-                ("branch", request.branch.into()),
-                ("key", request.key.into()),
-                ("column", request.column.into()),
-                ("purpose", request.purpose.into()),
-                ("now", request.now.into()),
-                ("main", MAIN_BRANCH.into()),
-            ]),
-            HashMap::new(),
-        )
-        .map(|builder| builder.set_limits(LIMITS))
-        .and_then(|builder| builder.build(&token))
-        .map_err(|_| Denied::Invalid)?;
-    match authorizer.authorize() {
-        Ok(_) => Ok(()),
-        Err(Token::FailedLogic(
-            Logic::Unauthorized { checks, .. } | Logic::NoMatchingPolicy { checks },
-        )) => Err(reason(&checks)),
-        // Anything else, such as reaching the evaluation limits, is refused
-        // as invalid: a request is allowed only by a policy that matched.
-        Err(_) => Err(Denied::Invalid),
+            "#;
+
+/// A token whose signatures have been checked against the root key, kept
+/// so that the check is made once. Verifying the signatures is most of
+/// what deciding a request from a token's bytes costs, and a connection
+/// decides one for every write. Each request is still decided by biscuit,
+/// over all the token's blocks: only the signatures are not checked again,
+/// and they cannot change.
+pub struct Verified(Biscuit);
+
+impl Verified {
+    /// Refuses a token not signed by `root`, or damaged.
+    pub fn new(token: &[u8], root: PublicKey) -> Result<Self, Denied> {
+        Biscuit::from(token, root)
+            .map(Self)
+            .map_err(|_| Denied::Invalid)
     }
+
+    /// Who holds the token and where its writes go. It does not decide any
+    /// request: a token that has expired still has a holder.
+    pub fn holder(&self) -> Result<Holder, Denied> {
+        // A query sees the authorizer's facts and the first block's only,
+        // as the policy does, so a holder's own blocks cannot change the
+        // answer.
+        let mut authorizer = AuthorizerBuilder::new()
+            .set_limits(LIMITS)
+            .build(&self.0)
+            .map_err(|_| Denied::Invalid)?;
+        let (subject, branch, purpose, key_prefix) = authorizer
+            .query_exactly_one(
+                "holder($s, $b, $p, $k) <- subject($s), write_branch($b), purpose($p), key_prefix($k)",
+            )
+            .map_err(|_| Denied::Invalid)?;
+        let columns: Vec<(String,)> = authorizer
+            .query("column($c) <- column_allowed($c)")
+            .map_err(|_| Denied::Invalid)?;
+        let mut columns: Vec<String> = columns.into_iter().map(|(column,)| column).collect();
+        columns.sort();
+        Ok(Holder {
+            subject,
+            branch,
+            purpose,
+            key_prefix,
+            columns,
+        })
+    }
+
+    /// Decides one request. Runs at the database's boundary, before the
+    /// request reaches the log or the tree.
+    pub fn authorize(&self, request: &Request<'_>) -> Result<(), Denied> {
+        // The policy is evaluated over the authorizer's facts and the first
+        // block's only, so facts a holder appends cannot satisfy it.
+        let mut authorizer = AuthorizerBuilder::new()
+            .code_with_params(
+                POLICY,
+                params([
+                    ("operation", request.operation.name().into()),
+                    ("branch", request.branch.into()),
+                    ("key", request.key.into()),
+                    ("column", request.column.into()),
+                    ("purpose", request.purpose.into()),
+                    ("now", request.now.into()),
+                    ("main", MAIN_BRANCH.into()),
+                ]),
+                HashMap::new(),
+            )
+            .map(|builder| builder.set_limits(LIMITS))
+            .and_then(|builder| builder.build(&self.0))
+            .map_err(|_| Denied::Invalid)?;
+        match authorizer.authorize() {
+            Ok(_) => Ok(()),
+            Err(Token::FailedLogic(
+                Logic::Unauthorized { checks, .. } | Logic::NoMatchingPolicy { checks },
+            )) => Err(reason(&checks)),
+            // Anything else, such as reaching the evaluation limits, is
+            // refused as invalid: a request is allowed only by a policy
+            // that matched.
+            Err(_) => Err(Denied::Invalid),
+        }
+    }
+}
+
+/// Reads who holds `token` and where its writes go, checking its
+/// signatures first. See [`Verified::holder`].
+pub fn holder(token: &[u8], root: PublicKey) -> Result<Holder, Denied> {
+    Verified::new(token, root)?.holder()
+}
+
+/// Decides one request from a token's bytes, checking its signatures
+/// first. See [`Verified::authorize`].
+pub fn authorize(token: &[u8], root: PublicKey, request: &Request<'_>) -> Result<(), Denied> {
+    Verified::new(token, root)?.authorize(request)
 }
 
 /// An expired token is reported as expired even when the request is also

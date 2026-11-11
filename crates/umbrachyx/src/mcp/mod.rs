@@ -16,7 +16,7 @@ use std::time::SystemTime;
 use biscuit_auth::PublicKey;
 use serde_json::{Value, json};
 
-use crate::capability::{self, Denied, Holder, Operation, Request};
+use crate::capability::{Denied, Holder, Operation, Request, Verified};
 use crate::log::Storage;
 use crate::store::{Clock, Store};
 
@@ -35,8 +35,8 @@ const INVALID_PARAMS: i64 = -32602;
 
 pub struct Session<S: Storage, C: Clock> {
     store: Store<S, C>,
-    token: Vec<u8>,
-    root: PublicKey,
+    /// The token, its signatures checked once, when the session started.
+    token: Verified,
     holder: Holder,
 }
 
@@ -44,11 +44,11 @@ impl<S: Storage, C: Clock> Session<S, C> {
     /// Refuses a token not signed by `root`, so a session never starts with
     /// one that could not allow anything.
     pub fn new(store: Store<S, C>, token: &[u8], root: PublicKey) -> Result<Self, Denied> {
-        let holder = capability::holder(token, root)?;
+        let token = Verified::new(token, root)?;
+        let holder = token.holder()?;
         Ok(Self {
             store,
-            token: token.to_vec(),
-            root,
+            token,
             holder,
         })
     }
@@ -133,18 +133,14 @@ impl<S: Storage, C: Clock> Session<S, C> {
     /// `player/42/gems`. The purpose is the token's own.
     fn check(&self, operation: Operation, branch: &str, key: &str) -> Result<(), Denied> {
         let column = key.rsplit('/').next().unwrap_or(key);
-        capability::authorize(
-            &self.token,
-            self.root,
-            &Request {
-                operation,
-                branch,
-                key,
-                column,
-                purpose: &self.holder.purpose,
-                now: SystemTime::now(),
-            },
-        )
+        self.token.authorize(&Request {
+            operation,
+            branch,
+            key,
+            column,
+            purpose: &self.holder.purpose,
+            now: SystemTime::now(),
+        })
     }
 }
 

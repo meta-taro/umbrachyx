@@ -338,6 +338,17 @@ a prototype).
   issued with both `write` and `approve`, so nobody passes their own
   change, and an agent's token, which writes, cannot approve at all. A
   token that does not write names no branch.
+- **A token's signatures are checked once, when a connection or a session
+  is given it; each request is still decided by biscuit.** Checking the
+  signatures was most of the 60 to 85 µs a decision took from a token's
+  bytes, and a connection decides one for every write: pipelined `SET`s
+  from an authenticated connection ran at about 78,000 a second where an
+  unauthenticated one ran at 145,000. The verified token is kept and each
+  request evaluated against all its blocks, as before, at about 130,000 a
+  second. Reading the token's bounds out once and comparing keys ourselves
+  would be faster still, and would be an authorization scheme of our own;
+  a holder can append any check to a token, and only biscuit reads them
+  all.
 - **Who holds a token is read from the issuer's block only**, so a holder
   cannot rename themselves or move their branch by appending facts. The
   name is what the database records as the author of their commits.

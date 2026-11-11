@@ -17,7 +17,7 @@ use biscuit_auth::PublicKey;
 
 use super::resp::Reply;
 use super::session::Session;
-use crate::capability::{self, Denied, Operation, Request};
+use crate::capability::{Denied, Operation, Request};
 use crate::store::{
     Approved, CommitId, MAIN_BRANCH, PendingChange, Provenance, StoreError, Writer, hex,
 };
@@ -124,7 +124,7 @@ fn decide(
     reason: &[u8],
     decision: Decision,
 ) -> Reply {
-    let (Some((token, holder)), Some(root)) = (session.token(), root) else {
+    let (Some((token, holder)), Some(_)) = (session.token(), root) else {
         return Reply::Error("NOAUTH Authentication required.".to_owned());
     };
     let branch = String::from_utf8_lossy(branch).into_owned();
@@ -144,18 +144,14 @@ fn decide(
     };
     for key in &keys {
         let key = String::from_utf8_lossy(key);
-        let allowed = capability::authorize(
-            token,
-            root,
-            &Request {
-                operation: Operation::Approve,
-                branch: MAIN_BRANCH,
-                key: &key,
-                column: "",
-                purpose: &holder.purpose,
-                now: SystemTime::now(),
-            },
-        );
+        let allowed = token.authorize(&Request {
+            operation: Operation::Approve,
+            branch: MAIN_BRANCH,
+            key: &key,
+            column: "",
+            purpose: &holder.purpose,
+            now: SystemTime::now(),
+        });
         if let Err(denied) = allowed {
             return no_permission(denied);
         }

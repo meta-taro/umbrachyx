@@ -245,7 +245,7 @@ impl Server {
             }
             ("AUTH", args) => session.authenticate(self.public_key, args),
             ("SET", [key, value]) => {
-                match session.may_write(self.public_key, &self.branch, key, self.require_auth) {
+                match session.may_write(&self.branch, key, self.require_auth) {
                     Ok(()) => {
                         return Some(Step::Sent(self.set(key, value, session.provenance("SET"))));
                     }

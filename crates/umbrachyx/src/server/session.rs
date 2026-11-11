@@ -8,14 +8,15 @@ use std::time::SystemTime;
 use biscuit_auth::PublicKey;
 
 use super::resp::Reply;
-use crate::capability::{self, Denied, Holder, Operation, Request};
+use crate::capability::{self, Denied, Holder, Operation, Request, Verified};
 use crate::store::Provenance;
 
 /// The author recorded for a write from a connection without `AUTH`.
 pub const UNAUTHENTICATED: &str = "unauthenticated";
 
 pub(super) struct Session {
-    token: Option<(Vec<u8>, Holder)>,
+    /// The token, its signatures checked once, when it was given.
+    token: Option<(Verified, Holder)>,
 }
 
 impl Session {
@@ -40,9 +41,13 @@ impl Session {
             Ok(token) => token,
             Err(_) => return wrong_pass(),
         };
-        match capability::holder(&token, root) {
+        let verified = match Verified::new(&token, root) {
+            Ok(verified) => verified,
+            Err(_) => return wrong_pass(),
+        };
+        match verified.holder() {
             Ok(holder) => {
-                self.token = Some((token, holder));
+                self.token = Some((verified, holder));
                 Reply::Simple("OK")
             }
             Err(_) => wrong_pass(),
@@ -54,7 +59,6 @@ impl Session {
     /// writes without `AUTH`.
     pub(super) fn may_write(
         &self,
-        root: Option<PublicKey>,
         branch: &str,
         key: &[u8],
         require_auth: bool,
@@ -66,29 +70,23 @@ impl Session {
                 Ok(())
             };
         };
-        let root = root.expect("a connection authenticates only with a public key");
         let key = std::str::from_utf8(key).map_err(|_| no_permission(Denied::OutOfScope))?;
         let column = key.rsplit('/').next().unwrap_or(key);
-        capability::authorize(
-            token,
-            root,
-            &Request {
+        token
+            .authorize(&Request {
                 operation: Operation::Write,
                 branch,
                 key,
                 column,
                 purpose: &holder.purpose,
                 now: SystemTime::now(),
-            },
-        )
-        .map_err(no_permission)
+            })
+            .map_err(no_permission)
     }
 
     /// The token this connection authenticated with, and its holder.
-    pub(super) fn token(&self) -> Option<(&[u8], &Holder)> {
-        self.token
-            .as_ref()
-            .map(|(token, holder)| (token.as_slice(), holder))
+    pub(super) fn token(&self) -> Option<(&Verified, &Holder)> {
+        self.token.as_ref().map(|(token, holder)| (token, holder))
     }
 
     /// Who and why for a write from this connection.

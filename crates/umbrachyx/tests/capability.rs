@@ -510,3 +510,65 @@ fn a_token_that_both_writes_and_approves_is_not_issued() {
         Err(capability::TokenError::WritesAndApproves)
     ));
 }
+
+/// A token verified once answers every request as checking it from its
+/// bytes each time does: inside and outside its keys and columns, narrowed
+/// by its holder, expired, and for writes to main.
+#[test]
+fn a_token_verified_once_answers_as_one_checked_every_time() {
+    let root = KeyPair::new();
+    let (first, second) = (slot(1), slot(2));
+    let issued = issue(&root, &grant());
+    let narrowed = capability::narrow(
+        &issued,
+        root.public(),
+        &Narrowing {
+            operation: Some(Operation::Read),
+            key_prefix: Some(&first),
+            ..Narrowing::default()
+        },
+    )
+    .expect("narrows");
+    let later = Request {
+        now: now() + 2 * HOUR,
+        ..request(Operation::Read, &first, "count")
+    };
+    let to_main = Request {
+        branch: MAIN_BRANCH,
+        ..request(Operation::Write, &first, "item")
+    };
+    let requests = [
+        request(Operation::Read, &first, "count"),
+        request(Operation::Write, &first, "item"),
+        request(Operation::Read, &second, "count"),
+        request(Operation::Read, OTHER_PLAYER_SLOT, "count"),
+        request(Operation::Read, &first, "secret"),
+        later,
+        to_main,
+        approval(&first),
+    ];
+
+    for token in [&issued, &narrowed] {
+        let verified = capability::Verified::new(token, root.public()).expect("verifies");
+        for request in &requests {
+            assert_eq!(
+                verified.authorize(request),
+                capability::authorize(token, root.public(), request),
+                "{request:?}"
+            );
+        }
+        assert_eq!(
+            verified.holder().expect("has a holder"),
+            capability::holder(token, root.public()).expect("has a holder")
+        );
+    }
+}
+
+#[test]
+fn a_token_another_root_signed_does_not_verify() {
+    let token = issue(&KeyPair::new(), &grant());
+
+    let refused = capability::Verified::new(&token, KeyPair::new().public());
+
+    assert_eq!(refused.err(), Some(Denied::Invalid));
+}
