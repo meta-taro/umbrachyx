@@ -33,6 +33,10 @@ pub(crate) type Ring = Arc<RwLock<HashMap<Fingerprint, Key>>>;
 pub(crate) struct Sealer {
     keys: Keys<Box<dyn KeyStorage + Send>>,
     ring: Ring,
+    /// The cipher of each key sealed with so far. Setting one up expands
+    /// the key, which costs more than sealing a short value; and a key
+    /// here is already in the ring, so sealing takes no lock.
+    ciphers: HashMap<Fingerprint, Aes256Siv>,
 }
 
 impl Sealer {
@@ -41,6 +45,7 @@ impl Sealer {
         Self {
             keys,
             ring: Arc::new(RwLock::new(ring)),
+            ciphers: HashMap::new(),
         }
     }
 
@@ -51,11 +56,19 @@ impl Sealer {
     /// Seals `value` for `key`, making its subject's key first if needed.
     pub(crate) fn seal(&mut self, key: &[u8], value: &[u8]) -> Result<Vec<u8>, KeyError> {
         let subject_key = self.keys.key_for(subject(key))?;
-        self.ring
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(fingerprint(&subject_key), subject_key);
-        Ok(seal_with(&subject_key, key, value))
+        let print = fingerprint(&subject_key);
+        if !self.ciphers.contains_key(&print) {
+            if self.ciphers.len() >= MAX_CIPHERS {
+                self.ciphers.clear();
+            }
+            self.ring
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(print, subject_key);
+            self.ciphers.insert(print, cipher_of(&subject_key));
+        }
+        let cipher = self.ciphers.get_mut(&print).expect("just put there");
+        Ok(seal_with(cipher, &print, key, value))
     }
 }
 
@@ -72,6 +85,7 @@ impl Sealer {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(key);
+        self.ciphers.remove(key);
         self.keys.erase(subject).map(drop)
     }
 
@@ -84,16 +98,30 @@ impl Sealer {
     }
 }
 
-fn seal_with(subject_key: &Key, key: &[u8], value: &[u8]) -> Vec<u8> {
-    let mut cipher = Aes256Siv::new_from_slice(subject_key).expect("keys are KEY_LEN bytes");
+/// Ciphers kept per sealer and per reading thread before starting over.
+const MAX_CIPHERS: usize = 1_024;
+
+fn cipher_of(subject_key: &Key) -> Aes256Siv {
+    Aes256Siv::new_from_slice(subject_key).expect("keys are KEY_LEN bytes")
+}
+
+fn seal_with(cipher: &mut Aes256Siv, print: &Fingerprint, key: &[u8], value: &[u8]) -> Vec<u8> {
     let sealed = cipher
         .encrypt([key], value)
         .expect("AES-SIV seals any value with one header");
     let mut bytes = Vec::with_capacity(HEADER_LEN + sealed.len());
     bytes.push(SEALED);
-    bytes.extend(fingerprint(subject_key));
+    bytes.extend(print);
     bytes.extend(sealed);
     bytes
+}
+
+thread_local! {
+    /// The ciphers this thread has opened values with. `open` asks the ring
+    /// for the key first every time, so a cipher left here after its key
+    /// was erased is never used again.
+    static OPENERS: std::cell::RefCell<HashMap<Fingerprint, Aes256Siv>> =
+        std::cell::RefCell::new(HashMap::new());
 }
 
 /// The value sealed in `sealed` for `key`, or `None` if its key is not in
@@ -104,11 +132,17 @@ pub(crate) fn open(ring: &Ring, key: &[u8], sealed: &[u8]) -> Option<Bytes> {
         .read()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&needed)?;
-    let mut cipher = Aes256Siv::new_from_slice(&subject_key).expect("keys are KEY_LEN bytes");
-    cipher
-        .decrypt([key], &sealed[HEADER_LEN..])
-        .ok()
-        .map(Bytes::from)
+    OPENERS.with_borrow_mut(|openers| {
+        if openers.len() >= MAX_CIPHERS && !openers.contains_key(&needed) {
+            openers.clear();
+        }
+        openers
+            .entry(needed)
+            .or_insert_with(|| cipher_of(&subject_key))
+            .decrypt([key], &sealed[HEADER_LEN..])
+            .ok()
+            .map(Bytes::from)
+    })
 }
 
 /// Which key `sealed` needs, or `None` if it is not a sealed value.
