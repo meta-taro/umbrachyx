@@ -388,16 +388,31 @@ checker to hold the shared secret that mints tokens.
   missing from the log.
 - **A failed commit leaves the tree unchanged**, and the store, like the
   log, refuses further commits until it is reopened.
-- **Group commit runs on one thread that owns the store.** Writers on other
-  threads send it commits and wait for their answer; it writes every commit
-  that arrived during the previous sync as one group, with one sync, and
-  answers each writer once the group is durable. A commit to an unknown
-  branch is refused alone, and a commit too large for one record is
-  written alone, so neither fails the writers grouped with it. When the
-  previous group had several writers, it waits up to 50 µs for each further
-  commit, 0.5 ms in all: without that, the writers it just answered miss
-  the next sync and the writers split into two groups taking turns, which
-  doubled every wait with 8 writers. A single writer never waits.
+- **Group commit has no thread of its own: whoever waits for a commit
+  writes it, with every commit queued by then.** Commits are queued in the
+  order sent. A writer that waits and finds nobody writing takes the queue
+  and writes it with one sync, its own commit and everyone else's; the
+  others sleep until theirs is answered, and what arrives during that sync
+  is the next writer's group. A commit to an unknown branch is refused
+  alone, and a commit too large for one record is written alone, so
+  neither fails the writers grouped with it.
+  - **It replaced a thread that owned the store.** Handing a commit to
+    that thread and being woken with the answer cost a lone writer two
+    wake-ups, 20 to 40 µs, which was little beside a sync on a growing
+    file and a third of everything once the log was reserved. In a Linux
+    virtual machine a durable `SET` from one client went from about 10,300
+    a second to about 12,100, and from eight clients to about 44,000,
+    where Valkey with `appendfsync always` did about 5,500 and 19,000.
+  - **The thread also waited up to 50 µs for further commits** when a
+    group had several writers, so they would not split into two groups
+    taking turns. That wait is gone: with a sync this short it cost more
+    than it gathered.
+  - **A commit sent and never waited for** is written by the next writer,
+    the next question about the history, or the stop.
+  - **Where it loses:** with 256 clients the server did about 80,000
+    durable `SET`s a second and Valkey about 128,000. Each connection has
+    a thread, and 256 of them on two processors spend their time being
+    scheduled; that is the server's design, not the commit's.
 - **Readers on other threads read a view the committer publishes.** A view
   is each branch's name and the root of its tree; trees never change once
   built, so taking one copies a pointer per branch. After writing a group,
@@ -526,11 +541,11 @@ checker to hold the shared secret that mints tokens.
   they are guarded only by listening on this machine, so anyone who can
   reach the port also sees who changed what and why; values of erased
   subjects stay unreadable here as everywhere.
-- **The store answers them on the committer's thread, between groups of
+- **The store answers them in a writer's turn, between groups of
   commits.** A view holds each branch's tree but not the commits, and
   copying every commit into every view would cost each write group the
-  whole history. A question is sent down the same channel as commits, so
-  it sees every commit sent before it, and waits behind their sync. That
+  whole history. A question takes the turn to write and writes the queue
+  first, so it sees every commit sent before it, and waits behind a sync. That
   is fine for a person reading, and why `GET` still reads from a view.
 - **Cells, changes and commits come a page at a time, 1,000 at most.**
   Commits wait while a question is answered, so no question may walk a

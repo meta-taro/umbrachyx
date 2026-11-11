@@ -1,23 +1,30 @@
-//! Group commit: one thread owns the store and writes, with one sync, every
-//! commit that arrived while the previous sync was running.
+//! Group commit without a thread of its own: whoever waits for a commit
+//! writes it, together with every commit queued by then, with one sync.
 //!
 //! A sync costs the same for one commit as for many, so writers that would
-//! each wait for their own sync share one instead. Each writer is still
-//! answered only once its commit is durable.
+//! each wait for their own sync share one instead. Commits are queued in the
+//! order sent. A writer that waits and finds nobody writing takes the queue
+//! and writes it, its own commit and everyone else's; the others sleep until
+//! theirs is answered, and the commits that arrive during that sync are the
+//! next writer's group. A lone writer therefore writes its own commit on its
+//! own thread: handing it to another thread and being woken with the answer
+//! cost two wake-ups, more than the store's own work around the sync. Each
+//! writer is still answered only once its commit is durable.
 //!
-//! Readers on other threads read a [`View`] the committer publishes after
-//! each group, before it answers the group's writers, so a write is seen by
-//! every reader by the time its writer hears it is durable.
+//! Readers on other threads read a [`View`] published after each group,
+//! before the group's writers are answered, so a write is seen by every
+//! reader by the time its writer hears it is durable.
 //!
-//! Questions about the history, which a view does not hold, are sent down
-//! the same channel as commits and answered on the committer's thread, so
-//! a question sees every commit sent before it.
+//! Questions about the history, which a view does not hold, and decisions
+//! about changes waiting take the same turn as a writer and write the queue
+//! first, so each sees every commit sent before it.
+//!
+//! A commit sent and never waited for is written by the next writer, the
+//! next question, or the stop.
 
+use std::collections::VecDeque;
 use std::io;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
-use std::sync::{Arc, PoisonError, RwLock};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 
 use super::{Clock, CommitId, CommitRequest, Inspect, Provenance, Review, Store, StoreError, View};
 use crate::log::record::{GROUP_OVERHEAD, commit_len};
@@ -25,38 +32,193 @@ use crate::log::{Edit, LogError, MAX_PAYLOAD_LEN, Storage};
 
 type Answer = Result<CommitId, StoreError>;
 
-/// When several writers are active, how long the committer waits for one
-/// more commit before it syncs. The writers it just answered need a moment
-/// to send their next commit; syncing without them would split the writers
-/// into two groups taking turns, and double everyone's wait.
-const QUIET_GAP: Duration = Duration::from_micros(50);
-/// The longest it gathers, however steadily commits keep arriving.
-const MAX_GATHER: Duration = Duration::from_micros(500);
-
-enum Message {
-    Commit(Job),
-    Ask(Question),
-    Decide(Decision),
-    Stop,
-}
-
-/// Reads the store and sends the answer back.
-type Question = Box<dyn FnOnce(&dyn Inspect) + Send>;
-/// Approves or rejects a change and sends the answer back.
-type Decision = Box<dyn FnOnce(&mut dyn Review) + Send>;
+/// Reads the store.
+type Question<'a> = Box<dyn FnOnce(&dyn Inspect) + 'a>;
+/// Approves or rejects a change.
+type Decision<'a> = Box<dyn FnOnce(&mut dyn Review) + 'a>;
 
 struct Job {
     request: CommitRequest,
     /// The bytes the request adds to a group's payload.
     len: usize,
-    reply: SyncSender<Answer>,
+    answer: Arc<Slot>,
 }
 
-/// Owns a store on its own thread and groups the commits sent to it.
-pub struct Committer<S: Storage, C: Clock> {
-    messages: Sender<Message>,
+/// Where a commit's answer is left for whoever sent it.
+#[derive(Default)]
+struct Slot(Mutex<Option<Answer>>);
+
+impl Slot {
+    fn fill(&self, answer: Answer) {
+        *lock(&self.0) = Some(answer);
+    }
+
+    fn take(&self) -> Option<Answer> {
+        lock(&self.0).take()
+    }
+}
+
+/// A lock a panic elsewhere cannot leave unusable: what it guards is
+/// replaced whole, never left half changed.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The commits not yet written, and whether somebody is writing.
+#[derive(Default)]
+struct Turns {
+    queue: Mutex<Queue>,
+    /// Told whenever a turn ends.
+    ended: Condvar,
+}
+
+#[derive(Default)]
+struct Queue {
+    jobs: VecDeque<Job>,
+    is_taken: bool,
+}
+
+/// The turn to write, held by one thread at a time. Dropping it, also by a
+/// panic, lets the next one take it.
+struct Turn<'a>(&'a Turns);
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.queue).is_taken = false;
+        self.0.ended.notify_all();
+    }
+}
+
+impl Turns {
+    /// Waits for the turn to write.
+    fn take(&self) -> Turn<'_> {
+        let mut queue = lock(&self.queue);
+        while queue.is_taken {
+            queue = self
+                .ended
+                .wait(queue)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        queue.is_taken = true;
+        Turn(self)
+    }
+
+    /// The jobs at the front of the queue whose payload fits one record,
+    /// at least one if there is any.
+    fn next_group(&self) -> Vec<Job> {
+        let mut queue = lock(&self.queue);
+        let mut len = GROUP_OVERHEAD;
+        let mut group = Vec::new();
+        while let Some(job) = queue.jobs.front() {
+            if !group.is_empty() && len + job.len > MAX_PAYLOAD_LEN {
+                break;
+            }
+            len += job.len;
+            group.extend(queue.jobs.pop_front());
+        }
+        group
+    }
+}
+
+/// The store behind the turns, with its storage and clock hidden so that
+/// writers need not name them.
+trait Engine: Send + Sync {
+    fn turns(&self) -> &Turns;
+    /// Writes a group and answers it. The caller holds the turn.
+    fn write(&self, group: Vec<Job>);
+    /// Whether the store was there to ask. The caller holds the turn.
+    fn inspect(&self, question: Question<'_>) -> bool;
+    /// As `inspect`, and publishes the view after it.
+    fn review(&self, decision: Decision<'_>) -> bool;
+}
+
+struct Core<S: Storage, C: Clock> {
+    turns: Turns,
+    /// `None` once stopped.
+    store: Mutex<Option<Store<S, C>>>,
     published: Published,
-    thread: Option<JoinHandle<Store<S, C>>>,
+}
+
+impl<S: Storage, C: Clock> Core<S, C> {
+    fn write(&self, group: Vec<Job>) {
+        match lock(&self.store).as_mut() {
+            Some(store) => write_group(store, group, &self.published),
+            None => {
+                for job in group {
+                    job.answer.fill(Err(StoreError::Stopped));
+                }
+            }
+        }
+    }
+
+    /// Writes everything queued. The caller holds the turn.
+    fn write_queue(&self) {
+        loop {
+            let group = self.turns.next_group();
+            if group.is_empty() {
+                return;
+            }
+            self.write(group);
+        }
+    }
+
+    fn publish(&self, store: &Store<S, C>) {
+        let view = Arc::new(store.view());
+        *self
+            .published
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = view;
+    }
+
+    /// Writes what is queued and takes the store out.
+    fn stop(&self) -> Option<Store<S, C>> {
+        let _turn = self.turns.take();
+        self.write_queue();
+        lock(&self.store).take()
+    }
+}
+
+impl<S, C> Engine for Core<S, C>
+where
+    S: Storage + Send + 'static,
+    C: Clock + Send + 'static,
+{
+    fn turns(&self) -> &Turns {
+        &self.turns
+    }
+
+    fn write(&self, group: Vec<Job>) {
+        Core::write(self, group);
+    }
+
+    fn inspect(&self, question: Question<'_>) -> bool {
+        self.write_queue();
+        match lock(&self.store).as_ref() {
+            Some(store) => {
+                question(store);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn review(&self, decision: Decision<'_>) -> bool {
+        self.write_queue();
+        match lock(&self.store).as_mut() {
+            Some(store) => {
+                decision(store);
+                // An approval moves main; readers see it from here on.
+                self.publish(store);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Holds a store that many threads write to, grouping their commits.
+pub struct Committer<S: Storage, C: Clock> {
+    core: Arc<Core<S, C>>,
 }
 
 /// The latest view. Replacing it swaps one pointer, so readers wait on the
@@ -66,7 +228,7 @@ type Published = Arc<RwLock<Arc<View>>>;
 /// Sends commits to a [`Committer`]. Cheap to clone, one per writer thread.
 #[derive(Clone)]
 pub struct Writer {
-    messages: Sender<Message>,
+    engine: Arc<dyn Engine>,
 }
 
 /// Reads the views a [`Committer`] publishes. Cheap to clone, and still
@@ -82,49 +244,40 @@ where
     C: Clock + Send + 'static,
 {
     pub fn start(store: Store<S, C>) -> Self {
-        let (messages, received) = mpsc::channel();
         let published = Arc::new(RwLock::new(Arc::new(store.view())));
-        let publish_to = Arc::clone(&published);
-        let thread = thread::spawn(move || run(store, &received, &publish_to));
         Self {
-            messages,
-            published,
-            thread: Some(thread),
+            core: Arc::new(Core {
+                turns: Turns::default(),
+                store: Mutex::new(Some(store)),
+                published,
+            }),
         }
     }
 
     pub fn writer(&self) -> Writer {
         Writer {
-            messages: self.messages.clone(),
+            engine: Arc::clone(&self.core) as Arc<dyn Engine>,
         }
     }
 
     pub fn reader(&self) -> Reader {
         Reader {
-            published: Arc::clone(&self.published),
+            published: Arc::clone(&self.core.published),
         }
     }
 
-    /// Answers every commit sent before this call, then gives the store
-    /// back. Commits sent afterwards are refused with `Stopped`.
-    pub fn stop(mut self) -> Store<S, C> {
-        let thread = self.thread.take().expect("only stop and drop take it");
-        // The thread runs until it reads this, so the send fails only if
-        // the thread panicked, and join passes that panic on.
-        let _ = self.messages.send(Message::Stop);
-        thread
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    /// Writes and answers every commit sent before this call, then gives
+    /// the store back. Commits sent afterwards are refused with `Stopped`.
+    pub fn stop(self) -> Store<S, C> {
+        self.core.stop().expect("only stop and drop take the store")
     }
 }
 
 impl<S: Storage, C: Clock> Drop for Committer<S, C> {
     fn drop(&mut self) {
-        if let Some(thread) = self.thread.take() {
-            let _ = self.messages.send(Message::Stop);
-            // A panic on the committer thread was already reported there.
-            let _ = thread.join();
-        }
+        // Commits already sent are written, as they were when a thread
+        // wrote them; `stop` has left nothing to do.
+        drop(self.core.stop());
     }
 }
 
@@ -140,8 +293,9 @@ impl Writer {
         self.send(branch, edits, provenance).wait()
     }
 
-    /// Sends a commit without waiting for it, so commits sent one after
-    /// another can share a sync. They are written in the order sent.
+    /// Queues a commit without waiting for it, so commits sent one after
+    /// another can share a sync. They are written in the order sent, once
+    /// one of them, or any other, is waited for.
     pub fn send(&self, branch: &str, edits: Vec<Edit>, provenance: Provenance) -> Pending {
         let len = commit_len(
             branch,
@@ -156,62 +310,76 @@ impl Writer {
             edits,
             provenance,
         };
-        let (reply, answer) = mpsc::sync_channel(1);
-        // If the committer has stopped, the job comes back in the error and
-        // is dropped with its reply, so waiting gives `Stopped`.
-        let _ = self.messages.send(Message::Commit(Job {
+        let answer = Arc::new(Slot::default());
+        lock(&self.engine.turns().queue).jobs.push_back(Job {
             request,
             len,
-            reply,
-        }));
-        Pending { answer }
+            answer: Arc::clone(&answer),
+        });
+        Pending {
+            answer,
+            engine: Arc::clone(&self.engine),
+        }
     }
 
     /// Answers `question` from the store once the commits sent before it
     /// are written. It waits behind their sync, so it suits a person
     /// reading the history, not a hot path; reads of live values go
     /// through a [`Reader`].
-    pub fn ask<T: Send + 'static>(
-        &self,
-        question: impl FnOnce(&dyn Inspect) -> T + Send + 'static,
-    ) -> Result<T, StoreError> {
-        let (reply, answer) = mpsc::sync_channel(1);
-        let question: Question = Box::new(move |store| {
-            // The asker stopped waiting; nobody is left to tell.
-            let _ = reply.send(question(store));
-        });
-        // As for a commit: if the committer has stopped, the question is
-        // dropped with its reply, and waiting gives `Stopped`.
-        let _ = self.messages.send(Message::Ask(question));
-        answer.recv().map_err(|_| StoreError::Stopped)
+    pub fn ask<T>(&self, question: impl FnOnce(&dyn Inspect) -> T) -> Result<T, StoreError> {
+        let mut answer = None;
+        let _turn = self.engine.turns().take();
+        self.engine
+            .inspect(Box::new(|store| answer = Some(question(store))));
+        answer.ok_or(StoreError::Stopped)
     }
 
     /// Carries out `decision` on the store once the commits sent before it
     /// are written, and publishes the view after it.
-    pub fn decide<T: Send + 'static>(
-        &self,
-        decision: impl FnOnce(&mut dyn Review) -> T + Send + 'static,
-    ) -> Result<T, StoreError> {
-        let (reply, answer) = mpsc::sync_channel(1);
-        let decision: Decision = Box::new(move |store| {
-            let _ = reply.send(decision(store));
-        });
-        let _ = self.messages.send(Message::Decide(decision));
-        answer.recv().map_err(|_| StoreError::Stopped)
+    pub fn decide<T>(&self, decision: impl FnOnce(&mut dyn Review) -> T) -> Result<T, StoreError> {
+        let mut answer = None;
+        let _turn = self.engine.turns().take();
+        self.engine
+            .review(Box::new(|store| answer = Some(decision(store))));
+        answer.ok_or(StoreError::Stopped)
     }
 }
 
 /// A commit sent to a [`Committer`] and not yet answered.
 pub struct Pending {
-    answer: Receiver<Answer>,
+    answer: Arc<Slot>,
+    engine: Arc<dyn Engine>,
 }
 
 impl Pending {
-    /// The commit's id once it is durable.
+    /// The commit's id once it is durable. If nobody is writing, this
+    /// thread writes: its own commit and every other one queued.
     pub fn wait(self) -> Result<CommitId, StoreError> {
-        // The reply is dropped unanswered only if the committer stopped
-        // before reading the job.
-        self.answer.recv().map_err(|_| StoreError::Stopped)?
+        let turns = self.engine.turns();
+        let mut queue = lock(&turns.queue);
+        loop {
+            // Checked under the queue's lock, which a turn takes to end:
+            // an answer left while this thread was not looking is seen
+            // here, and one left after it wakes the wait below.
+            if let Some(answer) = self.answer.take() {
+                return answer;
+            }
+            if queue.is_taken {
+                queue = turns
+                    .ended
+                    .wait(queue)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            }
+            queue.is_taken = true;
+            drop(queue);
+            {
+                let _turn = Turn(turns);
+                let group = turns.next_group();
+                self.engine.write(group);
+            }
+            queue = lock(&turns.queue);
+        }
     }
 }
 
@@ -229,91 +397,28 @@ impl Reader {
     }
 }
 
-fn run<S: Storage, C: Clock>(
-    mut store: Store<S, C>,
-    received: &Receiver<Message>,
-    published: &Published,
-) -> Store<S, C> {
-    let mut carried = None;
-    let mut is_busy = false;
-    loop {
-        let message = carried
-            .take()
-            .unwrap_or_else(|| received.recv().unwrap_or(Message::Stop));
-        let first = match message {
-            Message::Commit(job) => job,
-            Message::Ask(question) => {
-                question(&store);
-                continue;
-            }
-            Message::Decide(decision) => {
-                decision(&mut store);
-                // An approval moves main; readers see it from here on.
-                let view = Arc::new(store.view());
-                *published.write().unwrap_or_else(PoisonError::into_inner) = view;
-                continue;
-            }
-            Message::Stop => return store,
-        };
-        let (group, next) = gather(first, received, is_busy);
-        is_busy = group.len() > 1;
-        write_group(&mut store, group, published);
-        carried = next;
-    }
-}
-
-/// `first` and every job already waiting, as long as their payload fits in
-/// one record; when `is_busy`, also the jobs that keep arriving, as set out
-/// by `QUIET_GAP` and `MAX_GATHER`. Returns the group, and the message that
-/// ended it: a job that did not fit, a question, or a stop, each of which
-/// must wait for the group to be written.
-fn gather(first: Job, received: &Receiver<Message>, is_busy: bool) -> (Vec<Job>, Option<Message>) {
-    let deadline = Instant::now() + MAX_GATHER;
-    let next = || {
-        if !is_busy {
-            return received.try_recv().ok();
-        }
-        let wait = deadline
-            .saturating_duration_since(Instant::now())
-            .min(QUIET_GAP);
-        received.recv_timeout(wait).ok()
-    };
-    let mut len = GROUP_OVERHEAD + first.len;
-    let mut group = vec![first];
-    while let Some(message) = next() {
-        let Message::Commit(job) = message else {
-            return (group, Some(message));
-        };
-        if len + job.len > MAX_PAYLOAD_LEN {
-            return (group, Some(Message::Commit(job)));
-        }
-        len += job.len;
-        group.push(job);
-    }
-    (group, None)
-}
-
 fn write_group<S: Storage, C: Clock>(
     store: &mut Store<S, C>,
     group: Vec<Job>,
     published: &Published,
 ) {
-    let (requests, replies): (Vec<_>, Vec<_>) = group
+    let (requests, slots): (Vec<_>, Vec<_>) = group
         .into_iter()
-        .map(|job| (job.request, job.reply))
+        .map(|job| (job.request, job.answer))
         .unzip();
-    // A writer that stopped waiting is no reason to stop answering others.
     match store.commit_all(requests) {
         Ok(answers) => {
+            // Published before any answer is left: a writer that finds its
+            // answer must be able to read its write.
             let view = Arc::new(store.view());
             *published.write().unwrap_or_else(PoisonError::into_inner) = view;
-            for (reply, answer) in replies.into_iter().zip(answers) {
-                let _ = reply.send(answer);
+            for (slot, answer) in slots.into_iter().zip(answers) {
+                slot.fill(answer);
             }
         }
         Err(error) => {
-            for reply in replies {
-                let _ = reply.send(Err(copy(&error)));
+            for slot in slots {
+                slot.fill(Err(copy(&error)));
             }
         }
     }
