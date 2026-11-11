@@ -639,6 +639,44 @@ erases the subject while the history keeps its shape (see
   file. Keeping the key file out of backups, or encrypting it under a key
   held elsewhere, is left to the operator for now.
 
+## Approving changes (proposal, not built)
+
+An agent's writes land on its branch, and a person decides what reaches
+`main`. Today that person has to know branches, diffs and merges. A
+viewer that tried it asked for less: a list of changes waiting, the diff,
+and approve or reject. This is the shape agreed with that viewer before
+building; it is the gate for the first public release with the speed
+work.
+
+- **A change waiting is a branch with commits `main` does not have**,
+  not approved or rejected yet. Every branch counts, not only agents', so
+  a person's experiment on a branch shows up the same way.
+- **`UMBRA.PENDING`** lists them: who wrote them and why, when the first
+  and the last commit were made, the head commit's id, how many keys
+  change in each table (the first part of the key), whether `main` has
+  moved since the branch started, and whether merging would conflict.
+  The branch's name is returned but a viewer need not show it.
+- **`UMBRA.APPROVE <head> <reason>`** merges the change into `main` only
+  if the branch's head is still `<head>`: a person approves the diff they
+  saw, and anything an agent wrote after it is refused, not merged
+  unseen. A conflict merges nothing and returns the conflicting keys.
+- **`UMBRA.REJECT <head> <reason>`** closes the change without merging.
+  The rejection is a record in the log with who and why, like an erasure,
+  so the list and the history agree after a restart.
+- **Who approves is the connection, not an argument.** A connection
+  authenticates with a capability token; the token's holder is recorded
+  as the one who approved or rejected. Approving needs an operation that
+  is never granted together with a branch to write to, so an agent's
+  token cannot approve its own change, or any other. A token that can
+  approve cannot write; a person who also writes holds two tokens.
+- **This is the one way a server writes to `main`.** The server still
+  serves one branch for `SET`; `APPROVE` writes a merge to `main` and
+  nothing else, and only for a token that may approve.
+- **The diff is `UMBRA.DIFF`**, with a page per table so a large change
+  can be read in parts.
+- **Not decided yet:** whether a rejected branch can be reopened, and
+  whether an approval needs more than one person.
+
 ## Engines per table (being built)
 
 Every value pays for the full history and the ordered tree today, and that
