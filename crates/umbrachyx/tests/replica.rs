@@ -39,8 +39,18 @@ impl TempDir {
         std::fs::copy(self.keys(from), self.keys(to)).expect("copies the key file");
     }
 
+    /// The log's bytes. Its store must be closed: while one is open the
+    /// file is locked, and on Windows nothing else can read it.
     fn log_bytes(&self, name: &str) -> Vec<u8> {
         std::fs::read(self.log(name)).expect("reads the log")
+    }
+
+    /// The log of a store that wrote `write` and was closed.
+    fn written(&self, name: &str, write: impl FnOnce(&mut SealedStore)) -> Vec<u8> {
+        let mut store = self.open(name);
+        write(&mut store);
+        drop(store);
+        self.log_bytes(name)
     }
 }
 
@@ -145,10 +155,9 @@ fn assert_same(replica: &SealedStore, primary: &SealedStore) {
 #[test]
 fn a_store_fed_another_ones_log_holds_the_same() {
     let dir = TempDir::new("same");
-    let mut primary = dir.open("primary");
-    write_history(&mut primary);
+    let frames = dir.written("primary", write_history);
     dir.copy_keys("primary", "replica");
-    let frames = dir.log_bytes("primary");
+    let primary = dir.open("primary");
     let mut replica = dir.open("replica");
 
     // As a connection delivers them: cut wherever, the rest with the next.
@@ -161,28 +170,28 @@ fn a_store_fed_another_ones_log_holds_the_same() {
 
     assert_eq!(taken + rest, frames.len());
     assert_same(&replica, &primary);
+    drop(replica);
     assert_eq!(
         dir.log_bytes("replica"),
         frames,
         "the same log, byte for byte"
     );
-    drop(replica);
     assert_same(&dir.open("replica"), &primary);
 }
 
 #[test]
 fn an_erasure_reaches_the_replica_and_destroys_its_copy_of_the_key() {
     let dir = TempDir::new("erase");
-    let mut primary = dir.open("primary");
-    write_history(&mut primary);
+    let before = dir.written("primary", write_history).len();
     dir.copy_keys("primary", "replica");
-    let before = dir.log_bytes("primary").len();
-    assert!(
-        primary
-            .erase(b"player/1", by("ops", "asked to be forgotten"))
-            .expect("erases")
-    );
-    let frames = dir.log_bytes("primary");
+    let frames = dir.written("primary", |primary| {
+        assert!(
+            primary
+                .erase(b"player/1", by("ops", "asked to be forgotten"))
+                .expect("erases")
+        );
+    });
+    let primary = dir.open("primary");
     let mut replica = dir.open("replica");
     replica
         .replicate(&frames[..before])
@@ -211,9 +220,7 @@ fn an_erasure_reaches_the_replica_and_destroys_its_copy_of_the_key() {
 #[test]
 fn records_sealed_under_keys_the_replica_lacks_are_refused_whole() {
     let dir = TempDir::new("keys");
-    let mut primary = dir.open("primary");
-    write_history(&mut primary);
-    let frames = dir.log_bytes("primary");
+    let frames = dir.written("primary", write_history);
     // No keys copied: nothing the primary wrote can be opened here.
     let mut replica = dir.open("replica");
 
@@ -224,16 +231,15 @@ fn records_sealed_under_keys_the_replica_lacks_are_refused_whole() {
         "{refused:?}"
     );
     assert_eq!(replica.head(MAIN_BRANCH), None, "nothing was applied");
+    drop(replica);
     assert!(dir.log_bytes("replica").is_empty(), "nothing was written");
 }
 
 #[test]
 fn damaged_records_are_refused() {
     let dir = TempDir::new("damage");
-    let mut primary = dir.open("primary");
-    write_history(&mut primary);
+    let mut frames = dir.written("primary", write_history);
     dir.copy_keys("primary", "replica");
-    let mut frames = dir.log_bytes("primary");
     let middle = frames.len() / 2;
     frames[middle] ^= 0x40;
     let mut replica = dir.open("replica");
