@@ -59,11 +59,15 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   export                      every record of the log as a line of JSON, for
                               jq and grep: commits with their changes,
                               branches, tables, rejections and erasures
-  serve <branch> [--port P] [--max-connections N] [--public-key K [--require-auth]]
+  serve <branch> [--port P] [--max-connections N] [--threads T]
+        [--public-key K [--require-auth]]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history.
                               With a public key, AUTH <token> names who
-                              writes; --require-auth refuses writes without it
+                              writes; --require-auth refuses writes without it.
+                              --threads is how many threads serve connections
+                              (one more writes); by default one a processor,
+                              four at most
   mcp --public-key K --token-file F
                               MCP over stdin and stdout, for one agent's token
 
@@ -133,8 +137,9 @@ impl Args {
             match name {
                 "remove" => parsed.removes.push(value),
                 "who" | "why" | "approved-by" | "from" | "limit" | "port" | "max-connections"
-                | "key" | "subject" | "branch" | "prefix" | "columns" | "column" | "operations"
-                | "operation" | "purpose" | "expires-in" | "public-key" | "token-file" => {
+                | "threads" | "key" | "subject" | "branch" | "prefix" | "columns" | "column"
+                | "operations" | "operation" | "purpose" | "expires-in" | "public-key"
+                | "token-file" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -459,6 +464,16 @@ fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
             .ok_or_else(|| format!("--max-connections {max:?} is not a positive number"))?,
         None => MAX_CONNECTIONS,
     };
+    let threads = match args.options.get("threads") {
+        Some(threads) => Some(
+            threads
+                .parse()
+                .ok()
+                .filter(|&threads: &usize| threads > 0)
+                .ok_or_else(|| format!("--threads {threads:?} is not a positive number"))?,
+        ),
+        None => None,
+    };
     let public_key = match args.options.get("public-key") {
         Some(_) => Some(tokens::public_key(args)?),
         None => None,
@@ -474,6 +489,9 @@ fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
         .require_auth(require_auth);
     if let Some(public_key) = public_key {
         server = server.public_key(public_key);
+    }
+    if let Some(threads) = threads {
+        server = server.threads(threads);
     }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
     eprintln!("serving {branch} on 127.0.0.1:{port}");

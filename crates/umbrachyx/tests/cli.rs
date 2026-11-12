@@ -317,3 +317,39 @@ fn export_prints_the_log_as_one_json_record_a_line() {
     let read = dir.run(&["get", BRANCH, "player/1/gems"]);
     assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), "40");
 }
+
+#[test]
+fn serve_takes_a_number_of_serving_threads_and_refuses_what_is_not_one() {
+    let dir = TempDir::new("threads");
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+    for bad in ["0", "-1", "many"] {
+        let output = dir.run(&["serve", BRANCH, "--threads", bad]);
+        assert!(!output.status.success(), "{bad}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("--threads {bad:?} is not a positive number")),
+            "{bad}: {stderr}"
+        );
+    }
+    let port = free_port();
+    let port_arg = port.to_string();
+    let _server = Server(
+        dir.umbrachyx(&["serve", BRANCH, "--port", &port_arg, "--threads", "1"])
+            .spawn()
+            .expect("starts"),
+    );
+
+    // One thread serves both connections.
+    let mut first = connect(port);
+    let mut second = connect(port);
+    for stream in [&mut first, &mut second] {
+        stream.write_all(b"*1\r\n$4\r\nPING\r\n").expect("writes");
+        let mut reply = [0; 7];
+        stream.read_exact(&mut reply).expect("reads");
+        assert_eq!(&reply, b"+PONG\r\n");
+    }
+}
