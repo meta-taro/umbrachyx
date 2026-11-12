@@ -15,9 +15,8 @@ const TARGET_FANOUT: u64 = 32;
 #[derive(Debug)]
 pub(super) enum Node {
     Leaf {
-        entries: Vec<Entry>,
+        leaf: Leaf,
         hash: OnceLock<Digest>,
-        index: OnceLock<Arc<KeyIndex>>,
     },
     Internal {
         children: Vec<Child>,
@@ -40,12 +39,136 @@ impl Child {
     }
 }
 
+/// A leaf's entries: its keys, shared by every version of the leaf that
+/// has the same keys, and its values in one buffer of its own.
+///
+/// Most writes change one value of a leaf and none of its keys. The new
+/// leaf then takes the old one's keys with one reference and copies the
+/// values as bytes. While a leaf held a counted pointer for each key and
+/// each value, such a write counted every one of them up to make the new
+/// leaf and down again when the old one went: about 130 counts for one
+/// changed value, each on memory that had not been touched for a while.
+/// On the machine releases are measured on, that was half of what the
+/// thread that writes did (`docs/decisions.md`, "The tree").
+#[derive(Debug)]
+pub(super) struct Leaf {
+    keys: Arc<Keys>,
+    /// Every value, one after another.
+    values: Box<[u8]>,
+    /// Where each value ends in `values`.
+    ends: Box<[usize]>,
+}
+
+/// A leaf's keys, with the index lookups search them by, built the first
+/// time one reaches the leaf.
+#[derive(Debug)]
+struct Keys {
+    keys: Box<[Bytes]>,
+    index: OnceLock<KeyIndex>,
+}
+
+impl Leaf {
+    pub fn len(&self) -> usize {
+        self.keys.keys.len()
+    }
+
+    pub fn keys(&self) -> &[Bytes] {
+        &self.keys.keys
+    }
+
+    pub fn value(&self, at: usize) -> &[u8] {
+        let start = at.checked_sub(1).map_or(0, |before| self.ends[before]);
+        &self.values[start..self.ends[at]]
+    }
+
+    /// The entry at `at`, if the leaf has that many.
+    pub fn get(&self, at: usize) -> Option<(&Bytes, &[u8])> {
+        Some((self.keys.keys.get(at)?, self.value(at)))
+    }
+
+    /// Every entry, in key order.
+    pub fn entries(&self) -> impl Iterator<Item = (&Bytes, &[u8])> {
+        self.keys
+            .keys
+            .iter()
+            .enumerate()
+            .map(|(at, key)| (key, self.value(at)))
+    }
+
+    fn index(&self) -> &KeyIndex {
+        self.keys
+            .index
+            .get_or_init(|| KeyIndex::new(self.keys.keys.iter().map(|key| &**key)))
+    }
+
+    /// Where `key` is, or where it would go, as `binary_search` answers.
+    pub fn search(&self, key: &[u8]) -> Result<usize, usize> {
+        self.index().search(key)
+    }
+
+    /// A leaf with the same keys, shared with this one, and the values at
+    /// the places in `changed` replaced. `changed` is sorted by place.
+    pub fn with_values(&self, changed: &[(usize, &[u8])]) -> Self {
+        let mut values = Vec::with_capacity(self.values.len());
+        let mut ends = Vec::with_capacity(self.len());
+        let mut changed = changed.iter().peekable();
+        for at in 0..self.len() {
+            match changed.next_if(|(place, _)| *place == at) {
+                Some((_, value)) => values.extend_from_slice(value),
+                None => values.extend_from_slice(self.value(at)),
+            }
+            ends.push(values.len());
+        }
+        Self {
+            keys: Arc::clone(&self.keys),
+            values: values.into(),
+            ends: ends.into(),
+        }
+    }
+}
+
+/// Gathers the entries of a leaf being made.
+#[derive(Default)]
+struct LeafBuilder {
+    keys: Vec<Bytes>,
+    values: Vec<u8>,
+    ends: Vec<usize>,
+}
+
+impl LeafBuilder {
+    fn push(&mut self, key: Bytes, value: &[u8]) {
+        self.keys.push(key);
+        self.values.extend_from_slice(value);
+        self.ends.push(self.values.len());
+    }
+
+    /// The leaf of what was pushed, leaving the builder empty.
+    fn finish(&mut self) -> Arc<Node> {
+        let built = std::mem::take(self);
+        Node::of_leaf(Leaf {
+            keys: Arc::new(Keys {
+                keys: built.keys.into(),
+                index: OnceLock::new(),
+            }),
+            values: built.values.into(),
+            ends: built.ends.into(),
+        })
+    }
+}
+
 impl Node {
     pub fn leaf(entries: Vec<Entry>) -> Arc<Self> {
+        let mut builder = LeafBuilder::default();
+        for (key, value) in entries {
+            builder.push(key, &value);
+        }
+        builder.finish()
+    }
+
+    pub fn of_leaf(leaf: Leaf) -> Arc<Self> {
         Arc::new(Self::Leaf {
-            entries,
+            leaf,
             hash: OnceLock::new(),
-            index: OnceLock::new(),
         })
     }
 
@@ -54,16 +177,6 @@ impl Node {
             children,
             hash: OnceLock::new(),
             index: OnceLock::new(),
-        })
-    }
-
-    /// A leaf with `entries`, whose keys are exactly `like`'s: it takes
-    /// over the key index `like` has built, if any.
-    pub fn leaf_with_keys_of(like: &Self, entries: Vec<Entry>) -> Arc<Self> {
-        Arc::new(Self::Leaf {
-            entries,
-            hash: OnceLock::new(),
-            index: like.built_index(),
         })
     }
 
@@ -78,8 +191,12 @@ impl Node {
     }
 
     fn built_index(&self) -> OnceLock<Arc<KeyIndex>> {
-        let (Self::Leaf { index, .. } | Self::Internal { index, .. }) = self;
-        index.get().cloned().map(OnceLock::from).unwrap_or_default()
+        match self {
+            Self::Internal { index, .. } => {
+                index.get().cloned().map(OnceLock::from).unwrap_or_default()
+            }
+            Self::Leaf { .. } => OnceLock::new(),
+        }
     }
 
     #[cfg(test)]
@@ -91,9 +208,9 @@ impl Node {
 
     pub fn hash(&self) -> &Digest {
         match self {
-            Self::Leaf { entries, hash, .. } => hash.get_or_init(|| {
+            Self::Leaf { leaf, hash } => hash.get_or_init(|| {
                 let mut hasher = NodeHasher::new(0);
-                for (key, value) in entries {
+                for (key, value) in leaf.entries() {
                     hasher.field(key);
                     hasher.field(value);
                 }
@@ -111,14 +228,14 @@ impl Node {
 
     pub fn len(&self) -> usize {
         match self {
-            Self::Leaf { entries, .. } => entries.len(),
+            Self::Leaf { leaf, .. } => leaf.len(),
             Self::Internal { children, .. } => children.len(),
         }
     }
 
     pub fn last_key(&self) -> Option<&Bytes> {
         match self {
-            Self::Leaf { entries, .. } => entries.last().map(|(key, _)| key),
+            Self::Leaf { leaf, .. } => leaf.keys().last(),
             Self::Internal { children, .. } => children.last().map(|child| &child.last_key),
         }
     }
@@ -134,10 +251,25 @@ impl Node {
 
 /// Cuts entries into leaves.
 pub(super) fn split_leaf(entries: Vec<Entry>) -> Vec<Arc<Node>> {
-    cut_after(entries, |(key, _)| ends_node(key, 0))
-        .into_iter()
-        .map(Node::leaf)
-        .collect()
+    cut_leaves(entries.iter().map(|(key, value)| (key.clone(), &**value)))
+}
+
+/// Cuts entries, in key order, into leaves: a leaf ends after each key
+/// that ends a node. No entries make no leaf.
+pub(super) fn cut_leaves<'a>(entries: impl Iterator<Item = (Bytes, &'a [u8])>) -> Vec<Arc<Node>> {
+    let mut leaves = Vec::new();
+    let mut builder = LeafBuilder::default();
+    for (key, value) in entries {
+        let is_end = ends_node(&key, 0);
+        builder.push(key, value);
+        if is_end {
+            leaves.push(builder.finish());
+        }
+    }
+    if !builder.keys.is_empty() {
+        leaves.push(builder.finish());
+    }
+    leaves
 }
 
 /// Cuts the children of `level` into nodes of that level.
@@ -381,9 +513,7 @@ impl Node {
     /// The node's keys (a leaf) or last keys (an internal node), indexed.
     pub fn key_index(&self) -> &KeyIndex {
         match self {
-            Self::Leaf { entries, index, .. } => {
-                index.get_or_init(|| Arc::new(KeyIndex::new(entries.iter().map(|(key, _)| &**key))))
-            }
+            Self::Leaf { leaf, .. } => leaf.index(),
             Self::Internal {
                 children, index, ..
             } => {

@@ -37,9 +37,10 @@ impl View {
     }
 
     /// A latest-value map holds only live keys, and no key is in both.
-    fn cell(&self, branch: &str, key: &[u8]) -> Option<&Bytes> {
+    fn cell(&self, branch: &str, key: &[u8]) -> Option<&[u8]> {
         let (tree, latest) = self.states.get(branch)?;
-        tree.get(key).or_else(|| latest.get(key))
+        tree.get(key)
+            .or_else(|| latest.get(key).map(|cell| &**cell))
     }
 
     /// The keys holding a value on `branch`, readable or erased, among the
@@ -54,7 +55,8 @@ impl View {
         let Some((tree, latest)) = self.states.get(branch) else {
             return (Vec::new(), false);
         };
-        let mut entries = tree.iter().chain(latest.iter()).skip(skip);
+        let latest = latest.iter().map(|(key, cell)| (key, &**cell));
+        let mut entries = tree.iter().chain(latest).skip(skip);
         let keys = entries
             .by_ref()
             .take(count)

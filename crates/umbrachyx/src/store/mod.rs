@@ -351,8 +351,30 @@ struct Head {
 
 impl Head {
     /// The cell `key` holds, counting what the group being applied wrote.
-    fn held(&self, key: &[u8]) -> Option<&Bytes> {
-        self.pending.get(key).or_else(|| self.state.get(key))
+    fn held(&self, key: &[u8]) -> Option<&[u8]> {
+        self.pending
+            .get(key)
+            .map(|cell| &**cell)
+            .or_else(|| self.state.get(key))
+    }
+
+    /// The cell `key` holds, as the commit that wrote it keeps it: the tree
+    /// has the cell's bytes, and the commit that replaces it would
+    /// otherwise keep a second copy of what the first already holds.
+    fn held_shared(
+        &self,
+        key: &[u8],
+        commits: &HashMap<CommitId, Arc<CommitInfo>>,
+    ) -> Option<Bytes> {
+        if let Some(cell) = self.pending.get(key) {
+            return Some(cell.clone());
+        }
+        let cell = self.state.get(key)?;
+        let kept = commits
+            .get(&decode_cell(cell).changed_by)
+            .and_then(|writer| writer.written(key))
+            .map(|written| written.cell.clone());
+        Some(kept.unwrap_or_else(|| cell.into()))
     }
 
     /// Puts the group's cells into the tree.
@@ -701,11 +723,11 @@ impl<S: Storage, C: Clock> Store<S, C> {
     fn raw_cell(&self, branch: &str, key: &[u8]) -> Option<Cell> {
         let head = self.branches.get(branch)?;
         let bytes = if self.is_latest(key) {
-            head.latest.get(key)
+            head.latest.get(key).map(|cell| &**cell)
         } else {
             head.state.get(key)
         };
-        bytes.map(|bytes| decode_cell(bytes))
+        bytes.map(decode_cell)
     }
 
     fn revealed(&self, key: &[u8], cell: Cell) -> Cell {
@@ -784,7 +806,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         // The key's own chain: each cell names the commit that wrote it,
         // and that commit holds the cell it replaced. The first one
         // written at or before `commit` is the one that stood then.
-        let mut cell = head.state.get(key).cloned();
+        let mut cell = head.state.get(key).map(Bytes::from);
         while let Some(current) = &cell {
             let writer = self.commits.get(&decode_cell(current).changed_by)?;
             if writer.depth <= at.depth {
@@ -1051,7 +1073,8 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let touched: Vec<Bytes> = all_cells.iter().map(|(key, _)| key.clone()).collect();
         let (latest_cells, cells): (Vec<_>, Vec<_>) =
             all_cells.into_iter().partition(|(key, _)| is_latest(key));
-        let written = written_over(&cells, |key| head.held(key).cloned());
+        let commits = &self.commits;
+        let written = written_over(&cells, |key| head.held_shared(key, commits));
         let latest_written = if commit.branch == MAIN_BRANCH {
             Vec::new()
         } else {
@@ -1172,7 +1195,7 @@ fn cells_of(
             Some(value) => value.is_some(),
             None => {
                 let held = if is_latest(&edit.key) {
-                    head.latest.get(&edit.key)
+                    head.latest.get(&edit.key).map(|cell| &**cell)
                 } else {
                     head.held(&edit.key)
                 };
@@ -1217,7 +1240,7 @@ fn rebuilt(tree: &Tree, before: BTreeMap<Bytes, Option<Bytes>>) -> Tree {
         }
         match changed.next_if(|(changed, _)| changed == key) {
             Some((key, cell)) => entries.extend(cell.map(|cell| (key, cell))),
-            None => entries.push((key.clone(), cell.clone())),
+            None => entries.push((key.clone(), cell.into())),
         }
     }
     entries.extend(changed.filter_map(|(key, cell)| Some((key, cell?))));

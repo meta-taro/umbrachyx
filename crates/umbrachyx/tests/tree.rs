@@ -125,8 +125,16 @@ fn lookups_and_old_versions_match_the_model() {
 
         for index in 0..key_space {
             let key = key(index);
-            assert_eq!(tree.get(&key), changed.get(&key), "seed {seed}");
-            assert_eq!(base.get(&key), model.get(&key), "old version, seed {seed}");
+            assert_eq!(
+                tree.get(&key),
+                changed.get(&key).map(|v| &**v),
+                "seed {seed}"
+            );
+            assert_eq!(
+                base.get(&key),
+                model.get(&key).map(|v| &**v),
+                "old version, seed {seed}"
+            );
         }
         assert_eq!(tree.len(), changed.len(), "seed {seed}");
     }
@@ -254,7 +262,7 @@ fn iterating_gives_every_entry_in_key_order() {
     let ops = random_ops(&mut rng, 20_000, 3_000);
     let (tree, changed) = apply(&build(&model), &model, &ops);
 
-    let entries: Vec<(Bytes, Bytes)> = tree.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let entries: Vec<(Bytes, Bytes)> = tree.iter().map(|(k, v)| (k.clone(), v.into())).collect();
 
     assert_eq!(entries, changed.into_iter().collect::<Vec<_>>());
     assert_eq!(Tree::empty().iter().count(), 0);
@@ -372,7 +380,7 @@ fn overwriting_existing_keys_keeps_the_shape_and_reads_the_new_values() {
                 .collect();
             tree = tree.insert_sorted(batch.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
             for (key, value) in batch {
-                assert_eq!(tree.get(&key), Some(&value), "seed {seed} round {round}");
+                assert_eq!(tree.get(&key), Some(&*value), "seed {seed} round {round}");
                 model.insert(key, value);
             }
         }
@@ -380,7 +388,7 @@ fn overwriting_existing_keys_keeps_the_shape_and_reads_the_new_values() {
         assert_eq!(tree.len(), model.len());
         assert_eq!(tree.root_hash(), build(&model).root_hash(), "seed {seed}");
         for (key, value) in &model {
-            assert_eq!(tree.get(key), Some(value), "seed {seed}");
+            assert_eq!(tree.get(key), Some(&**value), "seed {seed}");
         }
     }
 }

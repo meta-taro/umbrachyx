@@ -14,7 +14,7 @@ use std::sync::Arc;
 mod diff;
 mod node;
 
-use node::{Child, Entry, Node, split_internal, split_leaf};
+use node::{Child, Entry, Node, cut_leaves, split_internal, split_leaf};
 
 /// Keys and values are shared, not copied, between versions.
 pub type Bytes = Arc<[u8]>;
@@ -82,13 +82,13 @@ impl Tree {
         *self.root.hash()
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<&Bytes> {
+    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
         let mut node = &*self.root;
         loop {
             match node {
-                Node::Leaf { entries, .. } => {
-                    let index = node.key_index().search(key).ok()?;
-                    return Some(&entries[index].1);
+                Node::Leaf { leaf, .. } => {
+                    let index = leaf.search(key).ok()?;
+                    return Some(leaf.value(index));
                 }
                 Node::Internal { children, .. } => {
                     let index = node.key_index().search(key).unwrap_or_else(|at| at);
@@ -141,8 +141,11 @@ impl Tree {
         let mut node = &*self.root;
         loop {
             match node {
-                Node::Leaf { entries, .. } => {
-                    let at = entries.partition_point(|(key, _)| **key <= *after);
+                Node::Leaf { leaf, .. } => {
+                    let at = match leaf.search(after) {
+                        Ok(at) => at + 1,
+                        Err(at) => at,
+                    };
                     stack.push((node, at));
                     return Iter { stack };
                 }
@@ -212,27 +215,19 @@ impl Tree {
 /// and takes over the key index its predecessor built.
 fn insert_into(node: &Node, level: u32, batch: &[Entry]) -> (Vec<Arc<Node>>, usize) {
     match node {
-        Node::Leaf { entries, .. } => {
-            // One key, as most writes are: its place is found in the key
-            // index, not by comparing it with every key of the leaf.
-            if let [(key, value)] = batch {
-                let mut changed = entries.clone();
-                return match node.key_index().search(key) {
-                    Ok(at) => {
-                        changed[at].1 = value.clone();
-                        (vec![Node::leaf_with_keys_of(node, changed)], 0)
-                    }
-                    Err(at) => {
-                        changed.insert(at, (key.clone(), value.clone()));
-                        (split_leaf(changed), 1)
-                    }
-                };
+        Node::Leaf { leaf, .. } => {
+            // Where each key of the batch already is. When all of them
+            // are, as in every overwrite, only values change: the new
+            // leaf shares the old one's keys.
+            let places: Vec<(usize, &[u8])> = batch
+                .iter()
+                .map_while(|(key, value)| Some((leaf.search(key).ok()?, &**value)))
+                .collect();
+            if places.len() == batch.len() {
+                return (vec![Node::of_leaf(leaf.with_values(&places))], 0);
             }
-            let (merged, added) = merge_sorted(entries, batch);
-            if added == 0 {
-                return (vec![Node::leaf_with_keys_of(node, merged)], 0);
-            }
-            (split_leaf(merged), added)
+            let (merged, added) = merge_sorted(leaf, batch);
+            (cut_leaves(merged.into_iter()), added)
         }
         Node::Internal { children, .. } => {
             let mut new_children = Vec::with_capacity(children.len() + 1);
@@ -270,32 +265,34 @@ fn insert_into(node: &Node, level: u32, batch: &[Entry]) -> (Vec<Arc<Node>>, usi
     }
 }
 
-/// Merges two sorted runs; on a key in both, `new` wins. Also returns how
-/// many keys of `new` were not in `old`.
-fn merge_sorted(old: &[Entry], new: &[Entry]) -> (Vec<Entry>, usize) {
+/// A leaf's entries and a batch's, both sorted, as one sorted run; on a
+/// key in both, the batch wins. Also returns how many of the batch's keys
+/// were not in the leaf.
+fn merge_sorted<'a>(old: &'a node::Leaf, new: &'a [Entry]) -> (Vec<(Bytes, &'a [u8])>, usize) {
     let mut merged = Vec::with_capacity(old.len() + new.len());
-    let (mut i, mut j, mut added) = (0, 0, 0);
-    while i < old.len() && j < new.len() {
-        match old[i].0.cmp(&new[j].0) {
-            Ordering::Less => {
-                merged.push(old[i].clone());
-                i += 1;
-            }
-            Ordering::Greater => {
-                merged.push(new[j].clone());
-                j += 1;
-                added += 1;
-            }
-            Ordering::Equal => {
-                merged.push(new[j].clone());
-                i += 1;
-                j += 1;
+    let mut old = old.entries().peekable();
+    let mut new = new.iter().peekable();
+    let mut added = 0;
+    loop {
+        let order = match (old.peek(), new.peek()) {
+            (None, None) => break,
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (Some((key, _)), Some((other, _))) => key.cmp(&other),
+        };
+        if order != Ordering::Greater {
+            let (key, value) = old.next().expect("peeked");
+            if order == Ordering::Less {
+                merged.push((key.clone(), value));
             }
         }
+        if order != Ordering::Less {
+            let (key, value) = new.next().expect("peeked");
+            merged.push((key.clone(), &**value));
+            added += usize::from(order == Ordering::Greater);
+        }
     }
-    merged.extend_from_slice(&old[i..]);
-    merged.extend_from_slice(&new[j..]);
-    (merged, added + new.len() - j)
+    (merged, added)
 }
 
 /// Returns the nodes that replace `node`, or `None` if `key` is not under
@@ -304,11 +301,14 @@ fn merge_sorted(old: &[Entry], new: &[Entry]) -> (Vec<Entry>, usize) {
 /// ancestor if not. The last node returned may still be open.
 fn remove_from(node: &Node, level: u32, key: &[u8]) -> Option<Vec<Arc<Node>>> {
     match node {
-        Node::Leaf { entries, .. } => {
-            let index = entries.binary_search_by(|(k, _)| (**k).cmp(key)).ok()?;
-            let mut entries = entries.clone();
-            entries.remove(index);
-            Some(split_leaf(entries))
+        Node::Leaf { leaf, .. } => {
+            let index = leaf.search(key).ok()?;
+            let kept = leaf
+                .entries()
+                .enumerate()
+                .filter(|(at, _)| *at != index)
+                .map(|(_, (key, value))| (key.clone(), value));
+            Some(cut_leaves(kept))
         }
         Node::Internal { children, .. } => {
             let index = children.partition_point(|child| *child.last_key < *key);
@@ -337,9 +337,11 @@ fn remove_from(node: &Node, level: u32, key: &[u8]) -> Option<Vec<Arc<Node>>> {
 /// down the seam: the last child of `left` with the first child of `right`.
 fn merge(left: &Node, right: &Node, level: u32) -> Vec<Arc<Node>> {
     match (left, right) {
-        (Node::Leaf { entries: a, .. }, Node::Leaf { entries: b, .. }) => {
-            split_leaf(a.iter().chain(b).cloned().collect())
-        }
+        (Node::Leaf { leaf: a, .. }, Node::Leaf { leaf: b, .. }) => cut_leaves(
+            a.entries()
+                .chain(b.entries())
+                .map(|(key, value)| (key.clone(), value)),
+        ),
         (Node::Internal { children: a, .. }, Node::Internal { children: b, .. }) => {
             let (left_last, left_rest) = a.split_last().expect("internal nodes have children");
             let mut children: Vec<Child> = left_rest.to_vec();
@@ -364,7 +366,7 @@ fn merge(left: &Node, right: &Node, level: u32) -> Vec<Arc<Node>> {
 
 fn collect_leaf_ends(node: &Node, keys: &mut Vec<Bytes>) {
     match node {
-        Node::Leaf { entries, .. } => keys.extend(entries.last().map(|(key, _)| key.clone())),
+        Node::Leaf { leaf, .. } => keys.extend(leaf.keys().last().cloned()),
         Node::Internal { children, .. } => {
             for child in children {
                 collect_leaf_ends(&child.node, keys);
@@ -380,7 +382,7 @@ pub struct Iter<'a> {
 }
 
 impl<'a> Iterator for Iter<'a> {
-    type Item = (&'a Bytes, &'a Bytes);
+    type Item = (&'a Bytes, &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -389,8 +391,8 @@ impl<'a> Iterator for Iter<'a> {
             let at = *index;
             *index += 1;
             match node {
-                Node::Leaf { entries, .. } => match entries.get(at) {
-                    Some((key, value)) => return Some((key, value)),
+                Node::Leaf { leaf, .. } => match leaf.get(at) {
+                    Some(entry) => return Some(entry),
                     None => {
                         self.stack.pop();
                     }

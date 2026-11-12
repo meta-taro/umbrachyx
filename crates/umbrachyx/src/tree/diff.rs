@@ -2,8 +2,8 @@
 
 use std::cmp::Ordering;
 
-use super::node::{Entry, Node};
-use super::{Change, Diff, Digest};
+use super::node::Node;
+use super::{Bytes, Change, Diff, Digest};
 
 /// Walks both trees in key order, skipping any subtree that starts at the
 /// same place on both sides with the same hash. Equal subtrees hold equal
@@ -31,7 +31,7 @@ pub(super) fn diff(old: &Node, new: &Node) -> Diff {
                 let (key, value) = old.entry().expect("checked above");
                 changes.push(Change::Removed {
                     key: key.clone(),
-                    value: value.clone(),
+                    value: value.into(),
                 });
                 old.next();
             }
@@ -39,7 +39,7 @@ pub(super) fn diff(old: &Node, new: &Node) -> Diff {
                 let (key, value) = new.entry().expect("checked above");
                 changes.push(Change::Added {
                     key: key.clone(),
-                    value: value.clone(),
+                    value: value.into(),
                 });
                 new.next();
             }
@@ -49,8 +49,8 @@ pub(super) fn diff(old: &Node, new: &Node) -> Diff {
                 if old_value != new_value {
                     changes.push(Change::Modified {
                         key: key.clone(),
-                        old: old_value.clone(),
-                        new: new_value.clone(),
+                        old: old_value.into(),
+                        new: new_value.into(),
                     });
                 }
                 old.next();
@@ -123,9 +123,9 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn entry(&self) -> Option<&'a Entry> {
+    fn entry(&self) -> Option<(&'a Bytes, &'a [u8])> {
         match self.stack.last()? {
-            (Node::Leaf { entries, .. }, index) => entries.get(*index),
+            (Node::Leaf { leaf, .. }, index) => leaf.get(*index),
             (Node::Internal { .. }, _) => None,
         }
     }
