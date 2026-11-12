@@ -213,6 +213,21 @@ impl Tree {
 fn insert_into(node: &Node, level: u32, batch: &[Entry]) -> (Vec<Arc<Node>>, usize) {
     match node {
         Node::Leaf { entries, .. } => {
+            // One key, as most writes are: its place is found in the key
+            // index, not by comparing it with every key of the leaf.
+            if let [(key, value)] = batch {
+                let mut changed = entries.clone();
+                return match node.key_index().search(key) {
+                    Ok(at) => {
+                        changed[at].1 = value.clone();
+                        (vec![Node::leaf_with_keys_of(node, changed)], 0)
+                    }
+                    Err(at) => {
+                        changed.insert(at, (key.clone(), value.clone()));
+                        (split_leaf(changed), 1)
+                    }
+                };
+            }
             let (merged, added) = merge_sorted(entries, batch);
             if added == 0 {
                 return (vec![Node::leaf_with_keys_of(node, merged)], 0);
@@ -223,23 +238,30 @@ fn insert_into(node: &Node, level: u32, batch: &[Entry]) -> (Vec<Arc<Node>>, usi
             let mut new_children = Vec::with_capacity(children.len() + 1);
             let mut added = 0;
             let mut rest = batch;
-            for (index, child) in children.iter().enumerate() {
-                // Keys past the last child's last key go to the last child.
-                let take = if index + 1 == children.len() {
+            // The first child not yet copied or replaced.
+            let mut next = 0;
+            let last = children.len() - 1;
+            let index = node.key_index();
+            while let Some((first, _)) = rest.first() {
+                // The child the next key belongs under is found in the key
+                // index, not by comparing the key with every child. Keys
+                // past the last child's last key go to the last child.
+                let at = index.search(first).unwrap_or_else(|at| at).min(last);
+                new_children.extend_from_slice(&children[next..at]);
+                let child = &children[at];
+                let take = if at == last {
                     rest.len()
                 } else {
                     rest.partition_point(|(key, _)| *key <= child.last_key)
                 };
-                if take == 0 {
-                    new_children.push(child.clone());
-                    continue;
-                }
                 let (here, after) = rest.split_at(take);
                 let (replaced, count) = insert_into(&child.node, level - 1, here);
                 new_children.extend(replaced.into_iter().map(Child::of));
                 added += count;
                 rest = after;
+                next = at + 1;
             }
+            new_children.extend_from_slice(&children[next..]);
             if added == 0 {
                 return (vec![Node::internal_with_keys_of(node, new_children)], 0);
             }
