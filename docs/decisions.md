@@ -405,7 +405,18 @@ at p99 for an issued token of 432 bytes, and 85 µs and 103 µs once narrowed
 (560 bytes). Most of it is verifying the signatures and evaluating the
 Datalog. That is far more than a read from memory, so a token will be
 verified once per session and the decision cached per scope, not repeated
-for every key. This is a problem to solve, not a reason to leave biscuit:
+for every key. Since then the signatures are checked once per connection, and the
+policy is read from its text once per process instead of for every
+request: deciding one write from a checked token went from about 32 µs
+to about 18.5 µs (`cargo run --release --example authorize_cost`, on the
+same laptop). What is left is biscuit building its facts and rules for
+each request, mostly allocation; a built authorizer cannot be given a
+new request, so each one starts again. On the release machine a
+connection that sent a token wrote 32,979 times a second where one
+without wrote 84,685, before this change. Caching decisions would need
+to know when a token's own checks stop holding, which is biscuit's to
+say, so it is not done.
+This is a problem to solve, not a reason to leave biscuit:
 macaroons, the other well-known scheme that narrows offline, need every
 checker to hold the shared secret that mints tokens.
 

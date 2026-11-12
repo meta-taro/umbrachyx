@@ -15,9 +15,10 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
-use biscuit_auth::builder::Term;
+use biscuit_auth::builder::{Term, date, fact, string};
 use biscuit_auth::error::{FailedCheck, Logic, Token};
 use biscuit_auth::{
     AuthorizerBuilder, AuthorizerLimits, Biscuit, BiscuitBuilder, BlockBuilder, KeyPair, PublicKey,
@@ -270,14 +271,9 @@ pub fn from_text(text: &str) -> Result<Vec<u8>, TokenError> {
     Ok(UnverifiedBiscuit::from_base64(text.trim())?.to_vec()?)
 }
 
-/// What a request states, and what allows it.
+/// What allows a request. What a request states is given as facts
+/// beside it, see [`Verified::authorize`].
 const POLICY: &str = r#"
-            operation({operation});
-            branch({branch});
-            key({key});
-            column({column});
-            declared_purpose({purpose});
-            time({now});
             allow if operation("read"), operation_allowed("read"),
                      key($k), key_prefix($p), $k.starts_with($p),
                      column($c), column_allowed($c),
@@ -343,21 +339,19 @@ impl Verified {
     pub fn authorize(&self, request: &Request<'_>) -> Result<(), Denied> {
         // The policy is evaluated over the authorizer's facts and the first
         // block's only, so facts a holder appends cannot satisfy it.
-        let mut authorizer = AuthorizerBuilder::new()
-            .code_with_params(
-                POLICY,
-                params([
-                    ("operation", request.operation.name().into()),
-                    ("branch", request.branch.into()),
-                    ("key", request.key.into()),
-                    ("column", request.column.into()),
-                    ("purpose", request.purpose.into()),
-                    ("now", request.now.into()),
-                    ("main", MAIN_BRANCH.into()),
-                ]),
-                HashMap::new(),
-            )
-            .map(|builder| builder.set_limits(LIMITS))
+        let stated = [
+            ("operation", string(request.operation.name())),
+            ("branch", string(request.branch)),
+            ("key", string(request.key)),
+            ("column", string(request.column)),
+            ("declared_purpose", string(request.purpose)),
+            ("time", date(&request.now)),
+        ];
+        let mut authorizer = stated
+            .into_iter()
+            .try_fold(policy()?, |builder, (name, term)| {
+                builder.fact(fact(name, &[term]))
+            })
             .and_then(|builder| builder.build(&self.0))
             .map_err(|_| Denied::Invalid)?;
         match authorizer.authorize() {
@@ -371,6 +365,26 @@ impl Verified {
             Err(_) => Err(Denied::Invalid),
         }
     }
+}
+
+/// The policy, read from its text once: reading it for every request was
+/// most of what deciding one cost. Each request starts from a copy and
+/// adds what it states.
+fn policy() -> Result<AuthorizerBuilder, Denied> {
+    static POLICY_READ: OnceLock<Option<AuthorizerBuilder>> = OnceLock::new();
+    POLICY_READ
+        .get_or_init(|| {
+            AuthorizerBuilder::new()
+                .code_with_params(
+                    POLICY,
+                    params([("main", MAIN_BRANCH.into())]),
+                    HashMap::new(),
+                )
+                .map(|builder| builder.set_limits(LIMITS))
+                .ok()
+        })
+        .clone()
+        .ok_or(Denied::Invalid)
 }
 
 /// Reads who holds `token` and where its writes go, checking its
