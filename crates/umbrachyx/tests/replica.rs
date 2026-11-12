@@ -292,3 +292,42 @@ fn a_replica_catches_up_by_asking_for_what_comes_after_the_records_it_holds() {
         "nothing is left to send"
     );
 }
+
+#[test]
+fn a_replica_and_its_primary_agree_on_the_chain_of_the_records_both_hold() {
+    let dir = TempDir::new("chain");
+    let mut primary = dir.open("primary");
+    write_history(&mut primary);
+    dir.copy_keys("primary", "replica");
+    let mut replica = dir.open("replica");
+    let first = primary.log_after(0, 1).expect("reads its log");
+    replica.replicate(&first).expect("takes one record");
+    let held = replica.log_records();
+    assert!(held > 0 && held < primary.log_records());
+
+    let replicas = replica.log_chain(held).expect("reads its log");
+
+    assert!(replicas.is_some());
+    assert_eq!(primary.log_chain(held).expect("reads its log"), replicas);
+    // More than the replica holds: it has no chain to offer.
+    assert_eq!(replica.log_chain(held + 1).expect("reads its log"), None);
+}
+
+#[test]
+fn a_store_with_another_history_has_another_chain_after_as_many_records() {
+    let dir = TempDir::new("diverged");
+    let mut primary = dir.open("primary");
+    write_history(&mut primary);
+    let mut other = dir.open("other");
+    other.create_branch("agent", MAIN_BRANCH).expect("branches");
+    other
+        .commit("agent", vec![set("player/1/gems", "1")], by("x", "y"))
+        .expect("commits");
+    let held = other.log_records();
+    assert!(held <= primary.log_records());
+
+    let theirs = other.log_chain(held).expect("reads its log");
+
+    assert!(theirs.is_some());
+    assert_ne!(primary.log_chain(held).expect("reads its log"), theirs);
+}

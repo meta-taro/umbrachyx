@@ -62,6 +62,27 @@ impl From<io::Error> for LogError {
     }
 }
 
+/// A hash of every record up to some point in a log, in order. Two logs
+/// with the same chain after as many records hold the same records.
+pub type Chain = [u8; 32];
+
+/// The chain is kept for every this many records; the chain at any other
+/// record is worked out from the one kept before it.
+const CHAIN_EVERY: u64 = 1024;
+
+/// The chain of a log with no records.
+fn chain_start() -> Chain {
+    *blake3::hash(b"umbrachyx log").as_bytes()
+}
+
+/// The chain once `frame` follows the records `chain` covers.
+fn chained(chain: &Chain, frame: &[u8]) -> Chain {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(chain);
+    hasher.update(frame);
+    *hasher.finalize().as_bytes()
+}
+
 #[derive(Debug)]
 pub struct Log<S: Storage> {
     storage: S,
@@ -69,6 +90,10 @@ pub struct Log<S: Storage> {
     /// Where each acknowledged record's frame ends, in order: a record is
     /// named by its number, and this says where its bytes are.
     ends: Vec<u64>,
+    /// The chain after each `CHAIN_EVERY` records, from none on, as far
+    /// as anyone has asked: a log nobody replicates never works it out,
+    /// so writing pays nothing for it.
+    checkpoints: Vec<Chain>,
     is_poisoned: bool,
 }
 
@@ -90,6 +115,7 @@ impl<S: Storage> Log<S> {
             storage,
             len: scan.valid_len,
             ends: scan.ends,
+            checkpoints: vec![chain_start()],
             is_poisoned: false,
         };
         Ok((log, scan.records))
@@ -125,6 +151,47 @@ impl<S: Storage> Log<S> {
     /// out in files.
     pub fn records(&self) -> u64 {
         self.ends.len() as u64
+    }
+
+    /// The chain over the first `records` records, or `None` if the log
+    /// holds fewer. A replica that holds as many says what its own chain
+    /// is; if the two differ, it does not hold this log's records and
+    /// must not be sent what follows them.
+    pub fn chain_at(&mut self, records: u64) -> io::Result<Option<Chain>> {
+        if records > self.records() {
+            return Ok(None);
+        }
+        let kept = (records / CHAIN_EVERY) as usize;
+        while self.checkpoints.len() <= kept {
+            let from = (self.checkpoints.len() as u64 - 1) * CHAIN_EVERY;
+            let last = self.checkpoints[self.checkpoints.len() - 1];
+            let next = self.chain_over(last, from, from + CHAIN_EVERY)?;
+            self.checkpoints.push(next);
+        }
+        let from = kept as u64 * CHAIN_EVERY;
+        self.chain_over(self.checkpoints[kept], from, records)
+            .map(Some)
+    }
+
+    /// `chain`, which covers the first `from` records, carried on over
+    /// the records up to the first `until`.
+    fn chain_over(&mut self, mut chain: Chain, from: u64, until: u64) -> io::Result<Chain> {
+        let (from, until) = (from as usize, until as usize);
+        if until <= from {
+            return Ok(chain);
+        }
+        let first = from.checked_sub(1).map_or(0, |before| self.ends[before]);
+        let last = self.ends[until - 1];
+        let bytes = self.storage.read_at(first, (last - first) as usize)?;
+        let mut start = first;
+        for &end in &self.ends[from..until] {
+            chain = chained(
+                &chain,
+                &bytes[(start - first) as usize..(end - first) as usize],
+            );
+            start = end;
+        }
+        Ok(chain)
     }
 
     /// The frames of the records after the first `records`, as the log
@@ -260,6 +327,80 @@ mod tests {
             log.read_after(2, usize::MAX).expect("reads"),
             frames(&[record(3), record(4)])
         );
+    }
+
+    #[test]
+    fn two_logs_with_the_same_records_have_the_same_chain_at_every_record() {
+        let (mut one, _) = Log::open(SimStorage::default()).expect("opens");
+        let (mut other, _) = Log::open(SimStorage::default()).expect("opens");
+        for n in 1..=5 {
+            one.append(&record(n)).expect("appends");
+            other.append(&record(n)).expect("appends");
+        }
+
+        for records in 0..=5 {
+            let chain = one.chain_at(records).expect("reads");
+            assert!(chain.is_some());
+            assert_eq!(chain, other.chain_at(records).expect("reads"));
+        }
+        assert_eq!(one.chain_at(6).expect("reads"), None, "past its end");
+    }
+
+    #[test]
+    fn logs_that_differ_in_one_record_have_different_chains_from_there_on() {
+        let (mut one, _) = Log::open(SimStorage::default()).expect("opens");
+        let (mut other, _) = Log::open(SimStorage::default()).expect("opens");
+        for n in 1..=4 {
+            one.append(&record(n)).expect("appends");
+            // The second record differs; the ones after it are the same.
+            other
+                .append(&record(if n == 2 { 20 } else { n }))
+                .expect("appends");
+        }
+
+        assert_eq!(
+            one.chain_at(1).expect("reads"),
+            other.chain_at(1).expect("reads")
+        );
+        for records in 2..=4 {
+            assert_ne!(
+                one.chain_at(records).expect("reads"),
+                other.chain_at(records).expect("reads"),
+                "after {records} records"
+            );
+        }
+    }
+
+    #[test]
+    fn the_chain_is_the_same_after_the_log_is_opened_again_and_past_a_checkpoint() {
+        let records: Vec<Record> = (1..=(2 * CHAIN_EVERY as u32 + 3)).map(record).collect();
+        let (mut log, _) = Log::open(SimStorage::default()).expect("opens");
+        for r in &records {
+            log.append(r).expect("appends");
+        }
+        let probes = [
+            0,
+            1,
+            CHAIN_EVERY - 1,
+            CHAIN_EVERY,
+            CHAIN_EVERY + 1,
+            2 * CHAIN_EVERY + 3,
+        ];
+        let before: Vec<_> = probes
+            .iter()
+            .map(|&n| log.chain_at(n).expect("reads"))
+            .collect();
+
+        let (mut reopened, _) = Log::open(log.storage.crash(0)).expect("reopens");
+
+        let after: Vec<_> = probes
+            .iter()
+            .map(|&n| reopened.chain_at(n).expect("reads"))
+            .collect();
+        assert_eq!(after, before);
+        assert!(before.iter().all(Option::is_some));
+        let unique: std::collections::HashSet<_> = before.iter().collect();
+        assert_eq!(unique.len(), probes.len(), "every prefix has its own chain");
     }
 
     #[test]

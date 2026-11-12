@@ -14,13 +14,24 @@
 
 use super::{Clock, Store, StoreError, check_sealed};
 use crate::log::record::{self, Record};
-use crate::log::{LogError, Storage};
+use crate::log::{Chain, LogError, Storage};
 
 impl<S: Storage, C: Clock> Store<S, C> {
     /// How many records this store's log holds. A replica asks its
     /// primary for what comes after as many.
     pub fn log_records(&self) -> u64 {
         self.log.records()
+    }
+
+    /// A hash of the first `records` records of this store's log, in
+    /// order, or `None` if it holds fewer. Before a primary sends a
+    /// replica what follows the records it holds, the two compare this:
+    /// if it differs, the replica holds another log, and what follows
+    /// would be appended to the wrong history.
+    pub fn log_chain(&mut self, records: u64) -> Result<Option<Chain>, StoreError> {
+        self.log
+            .chain_at(records)
+            .map_err(|error| LogError::from(error).into())
     }
 
     /// The bytes of this store's log after its first `records` records:
