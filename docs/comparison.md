@@ -8,10 +8,16 @@ compared, it says that too.
 ## Setup
 
 Everything below was measured on 0.1.0 or before it, when each connection
-had its own thread, one thread wrote every commit, and the log file grew
-with each record. The server has changed in all three since
-([`decisions.md`](decisions.md)); these numbers are measured again on the
-release machine before the next release.
+had its own thread, one thread wrote every commit, the log file grew with
+each record, and one commit in 1,024 kept a whole tree. The server has
+changed in all four since ([`decisions.md`](decisions.md)). It was
+measured again on the release machine on 2026-11-12: those numbers are
+in the README and, raw, in
+[`bench/results/2026-11-12-aws-m6id.xlarge/`](../bench/results/2026-11-12-aws-m6id.xlarge/),
+with PostgreSQL beside Valkey and rows this page does not have (many
+writers at once, requests sent many at a time, writes with a capability
+token). This page still describes how each kind of number is taken and
+what it does not show; where it gives AWS figures, they are 0.1.0's.
 
 - Apple M4 MacBook Air (fanless, 32 GB), macOS 26.6.2, internal SSD with
   APFS, on AC power, 2026-11-03. One machine; nothing else heavy running.

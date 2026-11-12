@@ -1,0 +1,18 @@
+machine: aws-m6id.xlarge
+commit: c6dd1b7e4d959303b61c3754cc086e96898fd46d
+date: 2026-11-12T02:49:00Z
+scratch: /dev/nvme1n1    217G  415M  205G   1% /mnt/nvme
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+7.0.0-1014-aws
+CPU(s):                                  4
+Model name:                              Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       736Mi        13Gi       2.7Mi       1.8Gi        14Gi
+1.98.0-x86_64-unknown-linux-gnu (overridden by '/home/ubuntu/umbrachyx/rust-toolchain.toml')
+Valkey server v=9.1.3 sha=29173b67:0 malloc=jemalloc-5.3.0 bits=64 build=7b6fe734247510b6
+dolt version 2.6.2
+Warning: you are on an old version of Dolt. The newest version is 2.7.3.
+To disable this warning, run 'dolt config --global --add versioncheck.disabled true'
+postgres (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
