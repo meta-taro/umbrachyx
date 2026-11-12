@@ -1,0 +1,51 @@
+## threads=1: GET from 50 clients
+           4999.41 msec task-clock                                                            
+                83      context-switches                                                      
+                 0      cpu-migrations                                                        
+       5.001943729 seconds time elapsed
+    59.54%  resp loop 0  [kernel.kallsyms]
+    30.24%  resp loop 0  umbrachyx        
+    10.15%  resp loop 0  libc.so.6        
+     0.06%  resp loop 0  [unknown]        
+     7.89%  [.] <umbrachyx::tree::node::KeyIndex>::search                                                     
+     5.71%  [.] 0x00000000001986a5                                                                            
+     4.33%  [k] _raw_spin_unlock_irqrestore                                                                   
+     4.29%  [.] <umbrachyx::store::view::View>::cell                                                          
+     3.71%  [.] <umbrachyx::store::view::View>::get                                                           
+     3.20%  [.] <[core::core_arch::x86::__m128i; 15]>::map::<aes::backends::x86_vaes512::encdec::broadcast_key
+     2.70%  [k] do_syscall_64                                                                                 
+     2.22%  [k] tcp_rcv_established                                                                           
+     2.14%  [k] tcp_clean_rtx_queue                                                                           
+     2.00%  [k] skb_release_data                                                                              
+     1.32%  [.] <umbrachyx::server::event::Loop>::run                                                         
+     1.30%  [k] ep_send_events                                                                                
+     1.22%  [k] __tcp_transmit_skb                                                                            
+     1.20%  [k] __inet_lookup_established                                                                     
+## threads=4: GET from 50 clients
+           5277.61 msec task-clock                                                            
+            260374      context-switches                                                      
+             21563      cpu-migrations                                                        
+       5.000660006 seconds time elapsed
+    15.89%  resp loop 1  [kernel.kallsyms]
+    15.82%  resp loop 2  [kernel.kallsyms]
+    14.84%  resp loop 3  [kernel.kallsyms]
+    14.42%  resp loop 0  [kernel.kallsyms]
+     7.58%  resp loop 2  umbrachyx        
+     7.40%  resp loop 3  umbrachyx        
+     7.17%  resp loop 1  umbrachyx        
+     7.02%  resp loop 0  umbrachyx        
+    11.27%  [k] finish_task_switch.isra.0                                                                     
+     6.41%  [.] <umbrachyx::tree::node::KeyIndex>::search                                                     
+     4.81%  [.] 0x00000000001986a5                                                                            
+     4.19%  [.] <umbrachyx::store::view::View>::cell                                                          
+     2.77%  [.] <umbrachyx::store::view::View>::get                                                           
+     2.58%  [k] do_syscall_64                                                                                 
+     2.49%  [.] <[core::core_arch::x86::__m128i; 15]>::map::<aes::backends::x86_vaes512::encdec::broadcast_key
+     2.24%  [k] _raw_spin_unlock_irqrestore                                                                   
+     1.41%  [.] <umbrachyx::server::event::Loop>::run                                                         
+     1.33%  [k] __tcp_transmit_skb                                                                            
+     1.10%  [k] tcp_rcv_established                                                                           
+     1.08%  [k] tcp_clean_rtx_queue                                                                           
+     0.97%  [.] <umbrachyx::server::Server>::execute                                                          
+     0.90%  [.] _rjem_malloc                                                                                  
+GET-DONE

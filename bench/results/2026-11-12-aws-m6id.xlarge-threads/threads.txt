@@ -1,0 +1,95 @@
+CPU(s):                                  4
+Model name:                              Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+/usr/bin/perf
+Thu Nov 12 05:52:01 UTC 2026
+info: syncing channel updates for 1.98.0-x86_64-unknown-linux-gnu
+info: latest update on 2026-08-20 for version 1.98.0 (88d9e12ae 2026-08-18)
+info: downloading 6 components
+warn: the missing active toolchain `1.98.0-x86_64-unknown-linux-gnu` has been auto-installed
+warn: this might cause rustup commands to take longer time to finish than expected
+info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
+threads,clients,test,rps,p50_latency_ms,p99_latency_ms
+1,"1 client",SET,8743.93,0.111,0.151
+1,"1 client",GET,37355.25,0.031,0.047
+1,"50 clients",GET,157109.19,0.303,0.399
+1,"64 clients",SET,28756.29,2.063,2.431
+1,"256 clients",SET,30102.35,8.063,8.999
+1,"50 clients, 16 at a time",GET,399760.16,2.119,2.519
+1,"50 clients, 64 at a time",SET,42311.92,75.007,86.655
+2,"1 client",SET,8348.29,0.119,0.159
+2,"1 client",GET,36744.45,0.031,0.047
+2,"50 clients",GET,126422.25,0.183,0.335
+2,"64 clients",SET,30436.77,1.871,2.263
+2,"256 clients",SET,31284.22,7.119,8.751
+2,"50 clients, 16 at a time",GET,729394.56,0.983,1.383
+2,"50 clients, 64 at a time",SET,42589.44,74.047,87.487
+4,"1 client",SET,7917.66,0.127,0.167
+4,"1 client",GET,37453.18,0.023,0.047
+4,"50 clients",GET,100755.66,0.263,0.351
+4,"64 clients",SET,28026.90,1.959,2.503
+4,"256 clients",SET,30335.21,7.119,8.823
+4,"50 clients, 16 at a time",GET,811359.06,0.759,2.071
+4,"50 clients, 64 at a time",SET,41828.75,75.519,87.679
+
+# 2 serving threads, 50 clients sending writes 64 at a time: time by thread
+    95.96%  resp commits
+     2.13%  resp loop 0 
+     1.92%  resp loop 1 
+# the same: time by thread and by where the code is
+    84.32%  resp commits  umbrachyx        
+    10.15%  resp commits  libc.so.6        
+     1.60%  resp loop 0   umbrachyx        
+     1.49%  resp commits  [kernel.kallsyms]
+     1.39%  resp loop 1   umbrachyx        
+     0.43%  resp loop 1   [kernel.kallsyms]
+     0.39%  resp loop 0   [kernel.kallsyms]
+     0.14%  resp loop 0   libc.so.6        
+     0.10%  resp loop 1   libc.so.6        
+# the same: the thread that writes, by function, with what each calls
+    29.45%    29.39%  [.] <alloc::sync::Arc<umbrachyx::tree::node::Node>>::drop_slow                                                        
+    27.35%     0.00%  [.] 0xfa8348c1470ff239                                                                                                
+    23.24%    23.14%  [.] <alloc::vec::Vec<(alloc::sync::Arc<[u8]>, alloc::sync::Arc<[u8]>)> as core::clone::Clone>::clone                  
+     7.02%     6.98%  [.] umbrachyx::tree::insert_into                                                                                      
+     3.61%     0.00%  [.] 0x0000000000000001                                                                                                
+     3.56%     3.56%  [.] 0x00000000001986a5                                                                                                
+     3.56%     0.00%  [.] 0x00007752e9d986a5                                                                                                
+     3.27%     3.27%  [.] <umbrachyx::tree::node::KeyIndex>::search                                                                         
+     3.20%     0.00%  [.] 0x00007752e9d98caa                                                                                                
+     3.19%     3.19%  [.] 0x0000000000198caa                                                                                                
+     2.22%     0.19%  [.] <cmac::Cmac<aes::Aes256> as digest::FixedOutputReset>::finalize_fixed_reset                                       
+     2.21%     0.00%  [.] 0xfa8348c1470ff239                                                                                                
+     2.01%     0.58%  [.] <aes::backends::x86_vaes512::Aes<15>>::encrypt::<cipher::block::ctx::BlockCtx<typenum::uint::UInt<typenum::uint::U
+     1.53%     1.53%  [.] <[core::core_arch::x86::__m128i; 15]>::map::<aes::backends::x86_vaes512::encdec::broadcast_keys<15>::{closure#0}, 
+     1.53%     1.44%  [.] <umbrachyx::store::Store<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock>>::apply_commit      
+     1.51%     1.51%  [.] _blake3_compress_in_place_avx512                                                                                  
+     1.40%     0.00%  [.] 0000000000000000                                                                                                  
+     1.32%     1.32%  [.] <umbrachyx::tree::Tree>::get                                                                                      
+     1.31%     1.29%  [.] umbrachyx::tree::node::split_leaf                                                                                 
+     1.29%     1.29%  [.] umbrachyx::store::cells_of                                                                                        
+     1.23%     0.00%  [.] 0x0000000000000010                                                                                                
+     1.17%     1.17%  [.] <hashbrown::map::HashMap<[u8; 32], alloc::sync::Arc<umbrachyx::store::CommitInfo>, std::hash::random::RandomState>
+     1.07%     1.07%  [.] _rjem_je_edata_heap_remove_first                                                                                  
+     0.92%     0.27%  [k] do_user_addr_fault                                                                                                
+     0.92%     0.00%  [.] asm_exc_page_fault                                                                                                
+     0.92%     0.00%  [.] exc_page_fault                                                                                                    
+     0.80%     0.01%  [.] _rjem_je_tcache_bin_flush_small                                                                                   
+     0.66%     0.65%  [.] umbrachyx::tree::node::split_internal                                                                             
+     0.65%     0.63%  [.] _rjem_je_arena_ptr_array_flush                                                                                    
+     0.62%     0.04%  [.] handle_mm_fault                                                                                                   
+     0.58%     0.02%  [.] __handle_mm_fault                                                                                                 
+     0.55%     0.55%  [.] 0x000000000019869e                                                                                                
+     0.55%     0.00%  [.] handle_pte_fault                                                                                                  
+     0.55%     0.00%  [.] 0x00007752e9d9869e                                                                                                
+     0.52%     0.01%  [.] do_anonymous_page                                                                                                 
+     0.42%     0.01%  [.] do_syscall_64                                                                                                     
+     0.42%     0.00%  [.] entry_SYSCALL_64_after_hwframe                                                                                    
+     0.41%     0.00%  [.] x64_sys_call                                                                                                      
+     0.40%     0.03%  [.] <ctr::ctr_core::CtrCore<aes::Aes256, ctr::flavors::ctr128::Ctr128BE> as cipher::stream::core_api::StreamCipherCore
+     0.39%     0.39%  [.] do_rallocx                                                                                                        
+     0.39%     0.20%  [.] <aes::backends::x86_vaes512::Aes<15>>::encrypt::<<ctr::ctr_core::CtrCore<_, _> as cipher::stream::core_api::Stream
+     0.39%     0.00%  [.] alloc_anon_folio                                                                                                  
+     0.38%     0.00%  [.] 0x00000f68636e6562                                                                                                
+     0.37%     0.37%  [.] 0x00000000001986b7                                                                                                
+     0.37%     0.00%  [.] 0x00007752e9d986b7                                                                                                
