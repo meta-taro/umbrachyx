@@ -11,6 +11,15 @@
 //! - a change approved into `main` stays there, and a change rejected
 //!   stays rejected and off the list of changes waiting.
 //!
+//! A second store follows the first as a replica would: now and then it
+//! asks for what comes after the records it holds, a few bytes at a time,
+//! and it crashes and loses power on its own. Checked at every ask, also
+//! right after a sync failed on the first store and after its restarts:
+//! - the replica never holds a record the first store does not, so a
+//!   record is only ever handed out once it is synced;
+//! - once it has everything, it holds the same branches, heads, values
+//!   and decisions.
+//!
 //! Half the keys are in a table held by the latest-value engine, so every
 //! promise above holds for it too; undoing a commit must leave that table
 //! as it was.
@@ -56,6 +65,14 @@ const REVIEW_SALT: u64 = 0x5eed_a991_2026_1111;
 const GROUP_PERCENT: u64 = 25;
 const MAX_GROUP: u64 = 5;
 /// Out of 100, per reading of the clock.
+/// How often, after a step, the replica asks for more, and the most bytes
+/// it asks for: small, so records arrive a few at a time.
+const REPLICA_PULL_PERCENT: u64 = 60;
+const MAX_PULL_BYTES: u64 = 512;
+/// How often, after a step, the replica crashes or loses power.
+const REPLICA_RESTART_PERCENT: u64 = 10;
+/// The replica's choices are drawn apart, as reviews are.
+const REPLICA_SALT: u64 = 0x5eed_4e91_1ca0_2026;
 const CLOCK_BACK_PERCENT: u64 = 5;
 const START_MICROS: u64 = 1_800_000_000_000_000;
 
@@ -81,6 +98,11 @@ pub struct Outcome {
     pub approvals: usize,
     pub approvals_refused_for_conflicts: usize,
     pub rejections: usize,
+    /// Times the replica was sent records, how many it ended with over
+    /// all runs, and its own restarts.
+    pub replica_pulls: usize,
+    pub replica_records: usize,
+    pub replica_restarts: usize,
 }
 
 /// A clock a seed controls. It mostly moves forward a little, and sometimes
@@ -126,6 +148,9 @@ struct Run {
     review: Rng,
     /// Per branch, the head of the last change rejected on it.
     rejected: BTreeMap<String, CommitId>,
+    /// A store that follows `store` through its log.
+    replica: Store<SimStorage, SimClock>,
+    following: Rng,
 }
 
 pub fn run(seed: u64) -> Result<Outcome, String> {
@@ -136,6 +161,9 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
     store
         .declare_table(LATEST_TABLE.as_bytes(), Engine::Latest, provenance(0))
         .map_err(|e| format!("declaring the latest-value table fails: {e}"))?;
+    let mut following = Rng::new(seed ^ REPLICA_SALT);
+    let replica = Store::open(SimStorage::default(), SimClock::new(&mut following))
+        .map_err(|e| format!("empty replica fails to open: {e}"))?;
     let mut run = Run {
         rng,
         store,
@@ -145,10 +173,14 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
         outcome: Outcome::default(),
         review: Rng::new(seed ^ REVIEW_SALT),
         rejected: BTreeMap::new(),
+        replica,
+        following,
     };
     for step in 0..STEPS {
         run.step(step)?;
+        run.follow(step)?;
     }
+    run.check_replica()?;
     run.outcome.clock_went_back += run.store.clock_mut().went_back;
     Ok(run.outcome)
 }
@@ -215,6 +247,9 @@ impl Run {
                     self.in_flight = Some(commits);
                 }
                 self.trace(step, format!("sync fault {fault:?}"));
+                // A replica asking now must not be handed the record
+                // whose sync just failed.
+                self.pull(step, usize::MAX)?;
                 let power = fault == SyncFault::DropPending || self.rng.percent(50);
                 self.restart(step, power)
             }
@@ -392,6 +427,96 @@ impl Run {
         Ok(())
     }
 
+    /// What the replica does after a step: sometimes it restarts,
+    /// sometimes it asks for more.
+    fn follow(&mut self, step: usize) -> Result<(), String> {
+        if self.following.percent(REPLICA_RESTART_PERCENT) {
+            let disk = if self.following.percent(50) {
+                self.replica.storage_mut().power_cut(&mut self.following)
+            } else {
+                self.replica.storage_mut().process_crash()
+            };
+            let clock = SimClock::new(&mut self.following);
+            self.replica = Store::open(disk, clock)
+                .map_err(|e| format!("step {step}: replica fails to reopen: {e}"))?;
+            self.outcome.replica_restarts += 1;
+        }
+        if self.following.percent(REPLICA_PULL_PERCENT) {
+            let max_bytes = 1 + self.following.below(MAX_PULL_BYTES) as usize;
+            self.pull(step, max_bytes)?;
+        }
+        Ok(())
+    }
+
+    /// The replica asks for what comes after the records it holds. The
+    /// first store must hold those records too, with the same chain.
+    fn pull(&mut self, step: usize, max_bytes: usize) -> Result<(), String> {
+        let held = self.replica.log_records();
+        let theirs = self
+            .replica
+            .log_chain(held)
+            .map_err(|e| format!("step {step}: replica cannot read its log: {e}"))?;
+        let ours = self
+            .store
+            .log_chain(held)
+            .map_err(|e| format!("step {step}: store cannot read its log: {e}"))?;
+        if ours.is_none() || ours != theirs {
+            return Err(format!(
+                "step {step}: the replica holds {held} records and the store, with {}, does \
+                 not hold the same ones",
+                self.store.log_records()
+            ));
+        }
+        let frames = self
+            .store
+            .log_after(held, max_bytes)
+            .map_err(|e| format!("step {step}: store cannot read its log: {e}"))?;
+        if frames.is_empty() {
+            return Ok(());
+        }
+        let taken = self
+            .replica
+            .replicate(&frames)
+            .map_err(|e| format!("step {step}: replica refuses its primary's records: {e}"))?;
+        if taken != frames.len() {
+            return Err(format!(
+                "step {step}: the replica took {taken} of {} bytes handed out",
+                frames.len()
+            ));
+        }
+        self.outcome.replica_pulls += 1;
+        Ok(())
+    }
+
+    /// Once it has every record, the replica holds what the store holds.
+    fn check_replica(&mut self) -> Result<(), String> {
+        while self.replica.log_records() < self.store.log_records() {
+            self.pull(STEPS, usize::MAX)?;
+        }
+        self.pull(STEPS, usize::MAX)?;
+        let branches: Vec<String> = self.store.branches().map(str::to_owned).collect();
+        if !self
+            .replica
+            .branches()
+            .eq(branches.iter().map(String::as_str))
+        {
+            return Err("the replica has other branches".to_owned());
+        }
+        for branch in &branches {
+            if self.replica.head(branch) != self.store.head(branch) {
+                return Err(format!("the replica's {branch} is at another commit"));
+            }
+            if entries_of(&self.replica, branch) != entries_of(&self.store, branch) {
+                return Err(format!("the replica's {branch} holds other values"));
+            }
+        }
+        if self.replica.decisions(usize::MAX) != self.store.decisions(usize::MAX) {
+            return Err("the replica has other decisions".to_owned());
+        }
+        self.outcome.replica_records += self.replica.log_records() as usize;
+        Ok(())
+    }
+
     fn random_branch(&mut self) -> String {
         let index = self.rng.below(self.models.len() as u64) as usize;
         self.models.keys().nth(index).expect("in range").clone()
@@ -558,6 +683,9 @@ mod tests {
             total.approvals += outcome.approvals;
             total.approvals_refused_for_conflicts += outcome.approvals_refused_for_conflicts;
             total.rejections += outcome.rejections;
+            total.replica_pulls += outcome.replica_pulls;
+            total.replica_records += outcome.replica_records;
+            total.replica_restarts += outcome.replica_restarts;
         }
         total
     }
@@ -584,6 +712,9 @@ mod tests {
         assert!(total.approvals >= 50, "{total:?}");
         assert!(total.approvals_refused_for_conflicts >= 10, "{total:?}");
         assert!(total.rejections >= 50, "{total:?}");
+        assert!(total.replica_pulls >= 5_000, "{total:?}");
+        assert!(total.replica_restarts >= 1_000, "{total:?}");
+        assert!(total.replica_records >= 10_000, "{total:?}");
     }
 
     #[test]
@@ -598,7 +729,8 @@ mod tests {
             "store, {seeds} seeds: {} commits ({} groups), {} restarts, interrupted commits kept {} \
              and lost {}, clock went back {} times, {} branches made, {} merges, \
              {} merges refused for conflicts, {} reverts, {} approvals ({} refused for \
-             conflicts), {} rejections",
+             conflicts), {} rejections; a replica was sent records {} times, restarted {} \
+             times and ended with all {} records",
             total.commits,
             total.groups,
             total.restarts,
@@ -611,7 +743,10 @@ mod tests {
             total.reverts,
             total.approvals,
             total.approvals_refused_for_conflicts,
-            total.rejections
+            total.rejections,
+            total.replica_pulls,
+            total.replica_restarts,
+            total.replica_records
         );
     }
 

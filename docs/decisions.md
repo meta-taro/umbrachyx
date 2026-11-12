@@ -188,8 +188,14 @@ memory speed for writes will need group commit: one sync for many writes.
   all, and recorded times must not go back. Branches are made from any
   branch, commits go to any of them, branches are merged into each other,
   and a branch's latest commit is undone, which must give back what the
-  branch held before it. CI runs 10,000 seeds of each, in release mode; the
-  results are the same as in debug mode.
+  branch held before it. A second store follows the first as a replica
+  would, asking a few bytes at a time for what comes after the records it
+  holds, crashing and losing power on its own: at every ask, also right
+  after a sync failed on the first store, it must hold no record the
+  first does not, and once it has everything it must hold the same
+  branches, values and decisions. Giving a record its number before its
+  sync succeeded is caught at the second seed. CI runs 10,000 seeds of
+  each, in release mode; the results are the same as in debug mode.
 - **The encrypted store has a run of its own**, with a simulated key file
   next to the simulated log: commits to the keys of a few subjects,
   erasures, appends to the key file torn part way, rewrites of it that
@@ -899,6 +905,56 @@ for it is the gate for the first public release, with the speed work.
   returned; a person need not see it.
 - **Not in this version:** reopening a rejected change (an agent offers
   it again on a new branch) and approvals that need two people.
+
+## Replication (being built)
+
+One store that writes, and others that follow it and answer reads. So
+far the parts that need no network exist; nothing sends bytes between
+machines yet, and nothing here changes what a single server does.
+
+- **A replica is fed the primary's log and nothing else.** A commit's id
+  is a hash of what the log holds of it, so a store that applies the same
+  records in the same order holds the same commits under the same ids,
+  the same decisions and erasures, and a log of the same bytes
+  (`Store::replicate`). Trees and cells are rebuilt on the replica, as
+  they are when a store opens its own log.
+- **A place in the log is a record's number**, how many records come
+  before it, not a byte offset. The log will be split into files and
+  given a header before the first public version; numbers stay true
+  through that, offsets would not. Backup and reading old history from
+  disk will name places the same way. The log keeps where each record
+  ends, eight bytes a record.
+- **Only synced records are handed out.** A record gets its number when
+  its sync returns, and a replica asks for what comes after the records
+  it holds (`Store::log_after`). A replica holding a record its primary
+  then lost in a crash would have another history; the simulation checks
+  at every ask that it never does.
+- **Before sending, the two compare a chain.** Each record's frame is
+  hashed onto the chain of the records before it (BLAKE3), so equal
+  chains after as many records mean the same records. A replica that
+  holds another log's records is refused rather than appended to. The
+  chain is worked out when asked for, from checkpoints every 1,024
+  records, so a store nobody follows pays nothing: hashing on every
+  append cost a one-key commit about 0.3 µs of its 3.7.
+- **Records are read through the store's own file handle.** The log file
+  is locked, and on Windows no other handle can read it.
+- **An erasure reaches the replica as a record and destroys its copy of
+  the key.** A replica that is not connected still holds the key until
+  it is: an erasure is finished on the primary at once and on each
+  replica when the record arrives. Which replicas have not had it yet is
+  to be shown, not waited for.
+- **Keys do not travel yet.** Values stay sealed on the way, and a
+  replica refuses records sealed under keys it lacks, rather than take
+  them in unreadable, which would look erased. For now a replica is
+  given the key file by hand, which only covers subjects that existed
+  then. Sending new keys with the log needs the connection encrypted;
+  until it is, replication is for measurements and trials, not for data
+  that must stay secret on the network.
+- **To come:** the connection, a replica's server that refuses writes
+  and decisions with `READONLY`, an option to listen on an address other
+  than 127.0.0.1 (off unless asked for), and measurements with one
+  writer and several readers next to Valkey and PostgreSQL set up the
+  same way.
 
 ## Engines per table (being built)
 
