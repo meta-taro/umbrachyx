@@ -66,6 +66,9 @@ impl From<io::Error> for LogError {
 pub struct Log<S: Storage> {
     storage: S,
     len: u64,
+    /// Where each acknowledged record's frame ends, in order: a record is
+    /// named by its number, and this says where its bytes are.
+    ends: Vec<u64>,
     is_poisoned: bool,
 }
 
@@ -86,6 +89,7 @@ impl<S: Storage> Log<S> {
         let log = Self {
             storage,
             len: scan.valid_len,
+            ends: scan.ends,
             is_poisoned: false,
         };
         Ok((log, scan.records))
@@ -102,6 +106,7 @@ impl<S: Storage> Log<S> {
             return Err(error.into());
         }
         self.len += frame.len() as u64;
+        self.ends.push(self.len);
         Ok(())
     }
 
@@ -113,6 +118,32 @@ impl<S: Storage> Log<S> {
     /// Bytes of acknowledged records in the log.
     pub fn len(&self) -> u64 {
         self.len
+    }
+
+    /// How many records are acknowledged. A record is named by how many
+    /// come before it, which stays true however the log is later laid
+    /// out in files.
+    pub fn records(&self) -> u64 {
+        self.ends.len() as u64
+    }
+
+    /// The frames of the records after the first `records`, as the log
+    /// holds them: whole frames only, as many as fit in `max_bytes` and
+    /// at least one if there is one. Only acknowledged records are ever
+    /// here: a record still being written, or one whose sync failed, has
+    /// no number yet.
+    pub fn read_after(&mut self, records: u64, max_bytes: usize) -> io::Result<Vec<u8>> {
+        let Ok(first) = usize::try_from(records) else {
+            return Ok(Vec::new());
+        };
+        if first >= self.ends.len() {
+            return Ok(Vec::new());
+        }
+        let start = first.checked_sub(1).map_or(0, |before| self.ends[before]);
+        let limit = start.saturating_add(max_bytes as u64);
+        let whole = self.ends[first..].partition_point(|&end| end <= limit);
+        let end = self.ends[first + whole.max(1) - 1];
+        self.storage.read_at(start, (end - start) as usize)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -152,6 +183,83 @@ mod tests {
             log.append(r).expect("appends");
         }
         log.storage
+    }
+
+    fn frames(records: &[Record]) -> Vec<u8> {
+        records
+            .iter()
+            .flat_map(|r| record::encode(r).expect("encodes"))
+            .collect()
+    }
+
+    #[test]
+    fn records_are_read_back_by_number_as_the_bytes_the_log_holds() {
+        let (mut log, _) = Log::open(SimStorage::default()).expect("opens");
+        for n in 1..=3 {
+            log.append(&record(n)).expect("appends");
+        }
+
+        assert_eq!(log.records(), 3);
+        assert_eq!(
+            log.read_after(0, usize::MAX).expect("reads"),
+            frames(&[record(1), record(2), record(3)])
+        );
+        assert_eq!(
+            log.read_after(1, usize::MAX).expect("reads"),
+            frames(&[record(2), record(3)])
+        );
+        assert!(log.read_after(3, usize::MAX).expect("reads").is_empty());
+        assert!(log.read_after(9, usize::MAX).expect("reads").is_empty());
+    }
+
+    #[test]
+    fn a_read_stops_at_a_whole_record_and_gives_at_least_one() {
+        let (mut log, _) = Log::open(SimStorage::default()).expect("opens");
+        for n in 1..=3 {
+            log.append(&record(n)).expect("appends");
+        }
+        let one = frames(&[record(1)]).len();
+
+        // Less than a record is asked for: it comes whole all the same.
+        assert_eq!(log.read_after(0, 1).expect("reads"), frames(&[record(1)]));
+        // Room for one and a half: only the whole one.
+        assert_eq!(
+            log.read_after(1, one + one / 2).expect("reads"),
+            frames(&[record(2)])
+        );
+        assert_eq!(
+            log.read_after(1, 2 * one).expect("reads"),
+            frames(&[record(2), record(3)])
+        );
+    }
+
+    #[test]
+    fn a_record_whose_sync_failed_is_never_read_back() {
+        let (mut log, _) = Log::open(SimStorage::default()).expect("opens");
+        log.append(&record(1)).expect("appends");
+        log.storage_mut().fail_next_sync();
+
+        log.append(&record(2)).expect_err("the sync fails");
+
+        assert_eq!(log.records(), 1);
+        assert_eq!(
+            log.read_after(0, usize::MAX).expect("reads"),
+            frames(&[record(1)])
+        );
+    }
+
+    #[test]
+    fn records_keep_their_numbers_when_the_log_is_opened_again() {
+        let storage = written(&[record(1), record(2), record(3)]);
+
+        let (mut log, _) = Log::open(storage.crash(0)).expect("reopens");
+        log.append(&record(4)).expect("appends");
+
+        assert_eq!(log.records(), 4);
+        assert_eq!(
+            log.read_after(2, usize::MAX).expect("reads"),
+            frames(&[record(3), record(4)])
+        );
     }
 
     #[test]

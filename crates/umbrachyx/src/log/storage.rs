@@ -17,6 +17,17 @@ pub trait Storage {
     fn sync(&mut self) -> io::Result<()>;
     /// Cut the storage down to `len` bytes.
     fn truncate(&mut self, len: u64) -> io::Result<()>;
+    /// The `len` bytes from `offset` on, which must all have been written.
+    /// Storage that can read part of itself should; the rest read
+    /// everything and keep the part.
+    fn read_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        let bytes = self.read_all()?;
+        usize::try_from(offset)
+            .ok()
+            .and_then(|start| bytes.get(start..start.checked_add(len)?))
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
+    }
 }
 
 /// A log kept in one file.
@@ -170,6 +181,15 @@ impl Storage for FileStorage {
 
     fn sync(&mut self) -> io::Result<()> {
         self.file.sync_data()
+    }
+
+    /// Read through this handle: the file is locked, and on Windows no
+    /// other handle could read it. The next append seeks for itself.
+    fn read_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        let mut bytes = vec![0; len];
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.read_exact(&mut bytes)?;
+        Ok(bytes)
     }
 
     /// Without a reserve the file is cut. With one it keeps its length,

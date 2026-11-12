@@ -147,6 +147,8 @@ pub const MAX_PAYLOAD_LEN: usize = 64 * 1024 * 1024;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Scan {
     pub records: Vec<Record>,
+    /// Where each record's frame ends, in the order of `records`.
+    pub ends: Vec<u64>,
     /// Length of the prefix made of whole, checked records. Anything after it
     /// is a torn tail from an interrupted write and is safe to cut off.
     pub valid_len: u64,
@@ -323,18 +325,21 @@ fn push_field(payload: &mut Vec<u8>, field: &[u8]) {
 /// looks exactly like a torn write of it.
 pub fn scan(bytes: &[u8]) -> Result<Scan, LogError> {
     let mut records = Vec::new();
+    let mut ends = Vec::new();
     let mut offset = 0;
     while offset < bytes.len() {
         match read_frame(&bytes[offset..], offset as u64)? {
             Frame::Whole { record, len } => {
                 records.push(record);
                 offset += len;
+                ends.push(offset as u64);
             }
             Frame::TornTail => break,
         }
     }
     Ok(Scan {
         records,
+        ends,
         valid_len: offset as u64,
     })
 }

@@ -248,3 +248,47 @@ fn damaged_records_are_refused() {
 
     assert!(refused.is_err(), "{refused:?}");
 }
+
+#[test]
+fn a_replica_catches_up_by_asking_for_what_comes_after_the_records_it_holds() {
+    let dir = TempDir::new("catch-up");
+    let mut primary = dir.open("primary");
+    write_history(&mut primary);
+    dir.copy_keys("primary", "replica");
+    let mut replica = dir.open("replica");
+
+    // A little at a time, as over a connection; then more is written.
+    let mut rounds = 0;
+    while replica.log_records() < primary.log_records() {
+        let frames = primary
+            .log_after(replica.log_records(), 64)
+            .expect("reads its log");
+        let taken = replica.replicate(&frames).expect("takes them");
+        assert_eq!(taken, frames.len(), "only whole records are handed out");
+        rounds += 1;
+    }
+    assert!(rounds > 1, "the history did not fit in one piece");
+    assert_same(&replica, &primary);
+    // To a subject whose key the replica already has: a new subject's key
+    // would have to reach it first.
+    primary
+        .commit(
+            MAIN_BRANCH,
+            vec![set("player/2/gems", "8")],
+            by("seed", "more"),
+        )
+        .expect("commits");
+    let frames = primary
+        .log_after(replica.log_records(), usize::MAX)
+        .expect("reads its log");
+    replica.replicate(&frames).expect("takes them");
+
+    assert_same(&replica, &primary);
+    assert!(
+        primary
+            .log_after(replica.log_records(), usize::MAX)
+            .expect("reads its log")
+            .is_empty(),
+        "nothing is left to send"
+    );
+}

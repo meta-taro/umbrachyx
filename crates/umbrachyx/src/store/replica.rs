@@ -13,10 +13,26 @@
 //! refused rather than taken in unreadable, which would look erased.
 
 use super::{Clock, Store, StoreError, check_sealed};
-use crate::log::Storage;
 use crate::log::record::{self, Record};
+use crate::log::{LogError, Storage};
 
 impl<S: Storage, C: Clock> Store<S, C> {
+    /// How many records this store's log holds. A replica asks its
+    /// primary for what comes after as many.
+    pub fn log_records(&self) -> u64 {
+        self.log.records()
+    }
+
+    /// The bytes of this store's log after its first `records` records:
+    /// whole records, as many as fit in `max_bytes` and at least one if
+    /// there is one. Only records already synced are handed out, so a
+    /// replica never holds what its primary could still lose.
+    pub fn log_after(&mut self, records: u64, max_bytes: usize) -> Result<Vec<u8>, StoreError> {
+        self.log
+            .read_after(records, max_bytes)
+            .map_err(|error| LogError::from(error).into())
+    }
+
     /// Applies the whole records at the start of `frames`, bytes of a
     /// primary's log from where this store's log ends, and returns how
     /// many bytes they were. A record cut short at the end is left for
