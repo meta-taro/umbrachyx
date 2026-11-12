@@ -1,0 +1,90 @@
+# For this experiment only, never for an integration branch: builds
+# `develop` and this branch on one runner and measures them in turn, so
+# the two are compared on the same machine. A run of the benchmark job on
+# another runner can differ by a third from machine to machine alone.
+#
+# Security posture: least privilege (`contents: read`), no secrets read,
+# only first-party actions.
+name: ab
+
+on:
+  pull_request:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ab:
+    name: develop against this branch, one runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VALKEY_VERSION: 9.1.3
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          path: new
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: develop
+          path: old
+
+      - name: Build Valkey
+        run: |
+          git clone --quiet --depth 1 --branch "$VALKEY_VERSION" https://github.com/valkey-io/valkey.git "$RUNNER_TEMP/valkey"
+          make -C "$RUNNER_TEMP/valkey" -j"$(nproc)" BUILD_TLS=no >/dev/null
+          echo "$RUNNER_TEMP/valkey/src" >> "$GITHUB_PATH"
+
+      - name: Build both
+        run: |
+          for side in old new; do
+            (cd "$side" && (rustup show active-toolchain || rustup toolchain install) && cargo build --quiet --release --locked -p umbrachyx)
+          done
+          lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Core'
+
+      - name: Measure in turn
+        run: |
+          set -euo pipefail
+          port=6390
+          keys=1000000
+          row() {
+            local side="$1" label="$2"
+            shift 2
+            valkey-benchmark -p "$port" -r "$keys" -d 32 --csv "$@" 2>/dev/null | grep -v '"test"' |
+              python3 -c 'import csv, sys
+          for r in csv.reader(sys.stdin):
+              print(",".join([sys.argv[1], "\"" + sys.argv[2] + "\"", r[0], r[1], r[4], r[6]]))' "$side" "$label"
+          }
+          echo 'side,clients,test,rps,p50_latency_ms,p99_latency_ms'
+          for round in 1 2 3; do
+            for side in old new; do
+              dir="$(mktemp -d)"
+              export UMBRACHYX_DB="$dir/log"
+              bin="$side/target/release/umbrachyx"
+              "$bin" branch bench --from main >/dev/null
+              "$bin" serve bench --port "$port" 2>/dev/null &
+              server=$!
+              until valkey-cli -p "$port" ping >/dev/null 2>&1; do sleep 0.1; done
+              valkey-benchmark -p "$port" -t set -n "$keys" -r "$keys" -d 32 -c 50 -P 64 -q >/dev/null 2>&1
+              row "$side" "50 clients, 64 at a time" -t set -n 2000000 -c 50 -P 64
+              row "$side" "64 clients" -t set -n 200000 -c 64
+              row "$side" "256 clients" -t set -n 200000 -c 256
+              row "$side" "1 client" -t set,get -n 100000 -c 1
+              row "$side" "50 clients" -t get -n 200000 -c 50
+              row "$side" "50 clients, 16 at a time" -t get -n 2000000 -c 50 -P 16
+              echo "$side,\"resident KiB after 3.5 million SETs\",,$(ps -o rss= -p "$server" | tr -d ' '),,"
+              kill "$server"
+              wait "$server" 2>/dev/null || true
+              rm -rf "$dir"
+            done
+          done
