@@ -68,6 +68,34 @@ $ umbrachyx history agent/support player/42/gems
 - **No format is stable yet.** A later version may not open a log this
   one wrote; keep the commands that load your data, not the log.
 
+### In a container
+
+The server alone, with its log on a volume. An image is published with
+the first released version; until then, build it from a checkout:
+
+```console
+$ docker build -t umbrachyx .
+$ docker run -d --name umbrachyx -p 127.0.0.1:6380:6380 -v umbrachyx-data:/data umbrachyx
+$ valkey-cli -p 6380 set player/42/gems 100
+OK
+$ valkey-cli -p 6380 umbra.history app player/42/gems
+{"branch":"app","changes":[{"approved_by":[],"commit":"0bc77a4dff61","erased":false,"time_us":1794570631599977,"value":"100","who":"unauthenticated","why":"SET"}],"key":"player/42/gems","more":false}
+```
+
+- **Publish the port to `127.0.0.1` only, as above.** Whoever reaches the
+  port reads every value and its history without a token, and nothing on
+  the connection is encrypted. `-p 6380:6380` would open it to the
+  network the machine is on.
+- **The volume holds the log and, next to it, the keys.** Keep both
+  together: without its keys a log cannot be read. A container killed
+  mid-write loses nothing it acknowledged; the next one on the same
+  volume starts from the log.
+- **Clients write to a branch**, `app` unless `-e UMBRACHYX_BRANCH=<name>`
+  says otherwise, made from `main` on the first start.
+- **Options for `serve` go after the image**, for instance
+  `umbrachyx serve --public-key ed25519/… --require-auth` to take writes
+  only from connections that `AUTH` with a token.
+
 Umbrachyx is meant to read and write at memory speed. Behind every value sits
 its full history: when it changed, from what, to what, who changed it, why,
 and who approved the change. That history is kept per record and per cell,

@@ -692,6 +692,22 @@ checker to hold the shared secret that mints tokens.
   encrypted, the port belongs behind something that decides who reaches
   it: a container's port published to the host's 127.0.0.1, or a
   firewall rule between named machines.
+- **The container image listens on all of the container's addresses**,
+  the one place `--bind` is on without being asked for. A container's
+  127.0.0.1 is its own, so a server bound there could not be reached
+  through a published port at all. Who reaches it is decided where the
+  port is published, and every example publishes it to the host's
+  127.0.0.1. The image runs the server as an ordinary user, keeps the log
+  and the keys on one volume, and makes the branch clients write to on
+  the first start. A small init process is process 1, because the server
+  handles no signals and the kernel gives process 1 no default action for
+  them: without it `docker stop` would wait ten seconds and then kill.
+  Stopping by signal loses nothing, as every acknowledged write is
+  already synced. Each change builds the image for x86-64 and for ARM
+  and tries it (write, kill the container, read the write back from a
+  new one on the same volume, [`docker/smoke.sh`](../docker/smoke.sh));
+  only a version's tag publishes it, after every other check on that
+  commit has passed.
 - **A few threads serve all the connections, each waiting on many sockets
   at once; no async runtime.** A thread asks the operating system which of
   its sockets have something to read, reads each and carries out the

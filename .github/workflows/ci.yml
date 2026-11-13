@@ -4,14 +4,19 @@
 # per OS (macOS `fsync` does not reach the disk without `F_FULLFSYNC`), and
 # Linux is the platform the project's guarantees are stated against.
 #
-# Security posture: least privilege (`contents: read`), no secrets read, and
-# only first-party actions. The toolchain comes from `rust-toolchain.toml`
-# through the rustup already on the runner, not from a third-party action.
+# Security posture: least privilege (`contents: read`; the one job that
+# publishes the image may also write packages, with the run's own token),
+# no stored secrets read, and only first-party actions. The toolchain
+# comes from `rust-toolchain.toml` through the rustup already on the
+# runner, not from a third-party action.
 name: ci
 
 on:
   push:
     branches: [develop, main]
+    # A version's tag runs everything once more and then publishes the
+    # container image (the `publish` job); nothing else publishes.
+    tags: ['v*']
   pull_request:
     branches: [develop, main, 'feature/**']
   workflow_dispatch: {}
@@ -151,3 +156,76 @@ jobs:
         with:
           name: bench-${{ github.sha }}
           path: bench-*.csv
+
+  image:
+    # The container image is built and tried on every change, on both
+    # processor families it is published for, each on a runner of its own
+    # kind rather than under emulation.
+    name: image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build the image
+        run: docker build -t umbrachyx:ci .
+
+      # Serve on a volume, write, kill the container, start another on the
+      # same volume and read the write back; `docker stop` ends it at once.
+      - name: Try the image
+        run: docker/smoke.sh umbrachyx:ci
+
+      - name: Keep the image for publishing
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: docker save umbrachyx:ci | gzip > image-${{ matrix.arch }}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: image-${{ matrix.arch }}
+          path: image-${{ matrix.arch }}.tar.gz
+          retention-days: 1
+
+  publish:
+    # Only for a version's tag, and only after the tests, the robustness
+    # runs and the image's own check passed on that commit. It pushes the
+    # very images the `image` job tried, under the version and `latest`.
+    name: publish image
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rust, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-*
+          merge-multiple: true
+
+      - name: Push both images and one name for the two
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="${GITHUB_REF_NAME#v}"
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for arch in amd64 arm64; do
+            docker load < "image-$arch.tar.gz"
+            docker tag umbrachyx:ci "$repository:$version-$arch"
+            docker push "$repository:$version-$arch"
+          done
+          for tag in "$version" latest; do
+            docker manifest create "$repository:$tag" "$repository:$version-amd64" "$repository:$version-arm64"
+            docker manifest push "$repository:$tag"
+          done
