@@ -7,7 +7,9 @@
 //! - at most one more record comes back, and only the one whose sync was
 //!   interrupted;
 //! - damage to an acknowledged record before the last one stops the log from
-//!   opening instead of dropping records.
+//!   opening instead of dropping records;
+//! - so does damage to the header in front of acknowledged records, instead
+//!   of the file being started over as a new log.
 //!
 //! Damage inside the very last acknowledged record cannot be told apart from
 //! a torn write, so it may be cut off; the run counts those.
@@ -19,6 +21,8 @@ use super::rng::Rng;
 use crate::log::{Branch, Commit, Edit, Engine, Log, LogError, Record, Storage, Table, record};
 
 const STEPS: usize = 64;
+/// What every log file starts with, in front of its records.
+const HEADER_LEN: usize = crate::log::HEADER_LEN;
 /// Bytes a reserving disk reads back in multiples of.
 const RESERVE: usize = 1_024;
 
@@ -45,6 +49,17 @@ pub struct Outcome {
     pub lost_to_last_record_damage: usize,
     /// Damage before the last record, refused at open as it must be.
     pub detected_corruption: bool,
+    /// Damage to the header in front of records, refused at open.
+    pub detected_header_damage: bool,
+}
+
+/// Where a flipped bit landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Damage {
+    /// In the header the file starts with.
+    Header,
+    /// In the acknowledged record of this index.
+    Record(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,10 +211,20 @@ impl Run {
                 }
                 Ok(true)
             }
-            (Err(LogError::Corrupt { offset, .. }), Some(index)) => {
+            (Err(LogError::Corrupt { offset, .. }), Some(Damage::Record(index))) => {
                 self.check_refusal(step, index, offset)?;
                 self.trace(step, format!("refused to open: corrupt at {offset}"));
                 self.outcome.detected_corruption = true;
+                Ok(false)
+            }
+            // A flipped bit in the header's version reads as a later
+            // format; any other, as records with no header in front.
+            (
+                Err(LogError::Corrupt { offset: 0, .. } | LogError::NewerFormat { .. }),
+                Some(Damage::Header),
+            ) => {
+                self.trace(step, "refused to open: header damaged".to_owned());
+                self.outcome.detected_header_damage = true;
                 Ok(false)
             }
             (Err(error), _) => Err(format!(
@@ -211,30 +236,40 @@ impl Run {
     /// Flip one bit in the bytes of an acknowledged record and return its
     /// index. Bits past the acknowledged records are left alone: those bytes
     /// were never promised.
-    fn flip_a_bit(&mut self, disk: &mut SimStorage) -> Option<usize> {
+    fn flip_a_bit(&mut self, disk: &mut SimStorage) -> Option<Damage> {
         let ends = frame_ends(&self.acknowledged);
         let acknowledged_len = *ends.last()?;
-        let bit = self.rng.below(acknowledged_len as u64 * 8) as usize;
+        let bit = self.rng.below((HEADER_LEN + acknowledged_len) as u64 * 8) as usize;
         disk.flip_bit(bit);
-        ends.iter().position(|&end| bit / 8 < end)
+        let Some(byte) = (bit / 8).checked_sub(HEADER_LEN) else {
+            return Some(Damage::Header);
+        };
+        ends.iter().position(|&end| byte < end).map(Damage::Record)
     }
 
     fn check_recovered(
         &mut self,
         step: usize,
         recovered: &[Record],
-        damaged: Option<usize>,
+        damaged: Option<Damage>,
     ) -> Result<(), String> {
         let last = self.acknowledged.len().checked_sub(1);
         let kept = match damaged {
             None => self.acknowledged.len(),
-            Some(index) if Some(index) == last => {
+            Some(Damage::Record(index)) if Some(index) == last => {
                 self.outcome.lost_to_last_record_damage += 1;
                 index
             }
-            Some(index) => {
+            Some(Damage::Record(index)) => {
                 return Err(format!(
                     "step {step}: record {index} of {} was damaged and the log still opened",
+                    self.acknowledged.len()
+                ));
+            }
+            Some(Damage::Header) => {
+                return Err(format!(
+                    "step {step}: the header in front of {} records was damaged \
+                     and the log still opened",
                     self.acknowledged.len()
                 ));
             }
@@ -277,10 +312,11 @@ impl Run {
                  which should have been cut as a torn write"
             ));
         }
-        let start = match index {
-            0 => 0,
-            _ => frame_ends(&self.acknowledged)[index - 1],
-        };
+        let start = HEADER_LEN
+            + match index {
+                0 => 0,
+                _ => frame_ends(&self.acknowledged)[index - 1],
+            };
         if offset != start as u64 {
             return Err(format!(
                 "step {step}: corruption reported at byte {offset}, \
@@ -429,11 +465,13 @@ mod tests {
         let total = |f: fn(&Outcome) -> usize| outcomes.iter().map(f).sum::<usize>();
         format!(
             "{} seeds: {} restarts, {} records acknowledged at the end, \
-             {} corruptions refused, {} last-record damages cut off",
+             {} corruptions refused, {} damaged headers refused, \
+             {} last-record damages cut off",
             outcomes.len(),
             total(|o| o.restarts),
             total(|o| o.acknowledged),
             total(|o| usize::from(o.detected_corruption)),
+            total(|o| usize::from(o.detected_header_damage)),
             total(|o| o.lost_to_last_record_damage),
         )
     }
@@ -459,6 +497,7 @@ mod tests {
                 .count()
         };
         let corruptions = outcomes.iter().filter(|o| o.detected_corruption).count();
+        let damaged_headers = outcomes.iter().filter(|o| o.detected_header_damage).count();
         let last_record_cuts: usize = outcomes.iter().map(|o| o.lost_to_last_record_damage).sum();
         let report = format!(
             "{}; process crashes {}, survived {}, refused writes {}",
@@ -476,6 +515,7 @@ mod tests {
         assert!(count("interrupted record survived") >= 30, "{report}");
         assert!(count("write after failure refused") >= 50, "{report}");
         assert!(corruptions >= 30, "{report}");
+        assert!(damaged_headers >= 3, "{report}");
         assert!(last_record_cuts >= 5, "{report}");
     }
 

@@ -73,6 +73,41 @@ without an entry here is not adopted.
     blocks after a crash, a file that grew could already end in bytes of
     an older file. Zeroing and syncing before use narrows that to a crash
     during the reserving itself.
+- **A log file starts with 80 bytes that say what it is.** That it is a
+  log, in which layout, a name the log was given when it was made
+  (sixteen random bytes), when that was, and where in the log the file
+  begins: how many records come before it and the chain over them, both
+  with a checksum. Records follow as before. Without it, another file or
+  a log from a later version could only be reported as damage.
+  - **A log is one file today, and it begins at record 0.** The header
+    already says where a file begins so that a log can later be laid out
+    in several files (to back up by copying the closed ones, to read old
+    history from disk instead of holding it in memory, to rewrite a part
+    without the whole) and a log written now is simply the first of
+    them. **From the first released version on, a later version opens
+    what an earlier one wrote.** The layout may still change; a log must
+    not become unreadable.
+  - **Only a file that holds no record is started as a new log**:
+    nothing, zeros reserved ahead, or a header a crash cut short. The
+    header is synced before `open` returns, so no record is ever written
+    behind one that is not durable. A file with a whole record anywhere
+    in it and no header that checks out is refused: either the header in
+    front of acknowledged records was damaged, or the file is from before
+    logs had one. Starting it over would drop those records. The log's
+    simulation flips bits in the header too and fails if the log then
+    opens.
+  - **A header of a later layout is refused as that**, not as damage, so
+    the message says to use a later version. The layout's number is
+    believed without the checksum, since a later layout may keep its
+    checksum elsewhere; a flipped bit there reads as "later" as well, and
+    the file is not opened either way.
+  - **The name is not used for anything yet.** It is there so that a
+    copy of a log (a backup, a replica) can be told from another log
+    that happens to hold as many records. A replica makes its own name
+    for now; taking its primary's comes with the connection between
+    them.
+  - **Logs written before this are not opened**, and nothing converts
+    them: no version had been released.
 - **A record is a commit, a new branch, or a group of commits.** A commit
   holds the branch, the keys it sets or removes, who made it, why, who
   approved it and when. It is one frame, so a commit that touches many keys
@@ -1081,7 +1116,8 @@ machines yet, and nothing here changes what a single server does.
 - **A replica is fed the primary's log and nothing else.** A commit's id
   is a hash of what the log holds of it, so a store that applies the same
   records in the same order holds the same commits under the same ids,
-  the same decisions and erasures, and a log of the same bytes
+  the same decisions and erasures, and a log whose records are the same
+  bytes
   (`Store::replicate`). Trees and cells are rebuilt on the replica, as
   they are when a store opens its own log.
 - **A place in the log is a record's number**, how many records come

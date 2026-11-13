@@ -4,12 +4,17 @@
 //! tree and the history are rebuilt from this log, so if the log is wrong,
 //! everything above it is wrong too.
 
+mod header;
 pub(crate) mod record;
 mod storage;
 
 use std::fmt;
 use std::io;
 
+use header::{Header, Start};
+
+pub(crate) use header::HEADER_LEN;
+pub use header::LogId;
 pub use record::{Branch, Commit, Edit, Engine, Erase, MAX_PAYLOAD_LEN, Record, Reject, Table};
 pub(crate) use storage::sync_parent_dir;
 pub use storage::{FileStorage, Storage};
@@ -26,6 +31,11 @@ pub enum LogError {
     RecordTooLarge {
         len: usize,
     },
+    /// The file says it is a log in a layout this version does not know:
+    /// one written by a later version.
+    NewerFormat {
+        version: u32,
+    },
     /// An earlier append or sync failed. After a failed sync the state of the
     /// unsynced bytes is unknown, so retrying could acknowledge lost data.
     Poisoned,
@@ -41,6 +51,10 @@ impl fmt::Display for LogError {
             Self::RecordTooLarge { len } => write!(
                 f,
                 "record payload is {len} bytes, more than the {MAX_PAYLOAD_LEN} allowed"
+            ),
+            Self::NewerFormat { version } => write!(
+                f,
+                "log is in format {version}, written by a later version than this one"
             ),
             Self::Poisoned => write!(f, "log stopped accepting writes after a failed write"),
         }
@@ -83,9 +97,24 @@ fn chained(chain: &Chain, frame: &[u8]) -> Chain {
     *hasher.finalize().as_bytes()
 }
 
+/// The records after the header, with damage reported where it is in the
+/// file.
+fn scan_after_header(bytes: &[u8]) -> Result<record::Scan, LogError> {
+    record::scan(&bytes[HEADER_LEN..]).map_err(|error| match error {
+        LogError::Corrupt { offset, reason } => LogError::Corrupt {
+            offset: HEADER_LEN as u64 + offset,
+            reason,
+        },
+        other => other,
+    })
+}
+
 #[derive(Debug)]
 pub struct Log<S: Storage> {
     storage: S,
+    /// What the file starts with: which log this is.
+    header: Header,
+    /// Where the acknowledged records end in the file, the header counted.
     len: u64,
     /// Where each acknowledged record's frame ends, in order: a record is
     /// named by its number, and this says where its bytes are.
@@ -103,9 +132,20 @@ impl<S: Storage> Log<S> {
     /// appended.
     pub fn open(mut storage: S) -> Result<(Self, Vec<Record>), LogError> {
         let bytes = storage.read_all()?;
-        let scan = record::scan(&bytes)?;
-        if scan.valid_len < bytes.len() as u64 {
-            storage.truncate(scan.valid_len)?;
+        let (header, scan) = match header::read(&bytes) {
+            Start::Header(header) => (header, scan_after_header(&bytes)?),
+            Start::Newer(version) => return Err(LogError::NewerFormat { version }),
+            Start::None => (Self::start(&mut storage, &bytes)?, record::Scan::default()),
+        };
+        if header.first_record != 0 {
+            return Err(LogError::Corrupt {
+                offset: 0,
+                reason: "the file is not the first of its log",
+            });
+        }
+        let valid_len = HEADER_LEN as u64 + scan.valid_len;
+        if valid_len < bytes.len() as u64 {
+            storage.truncate(valid_len)?;
         }
         // Always sync: a process that died between write and sync leaves
         // records the kernel still serves but the disk may not hold. Handing
@@ -113,12 +153,53 @@ impl<S: Storage> Log<S> {
         storage.sync()?;
         let log = Self {
             storage,
-            len: scan.valid_len,
-            ends: scan.ends,
-            checkpoints: vec![chain_start()],
+            header,
+            len: valid_len,
+            ends: scan
+                .ends
+                .iter()
+                .map(|end| HEADER_LEN as u64 + end)
+                .collect(),
+            checkpoints: vec![header.chain_before],
             is_poisoned: false,
         };
         Ok((log, scan.records))
+    }
+
+    /// Makes a file with no header the start of a new log. Only a file
+    /// that holds no record may be: nothing, zeros reserved ahead, or a
+    /// header a crash cut short. With a whole record anywhere in it, the
+    /// header in front of acknowledged records was damaged, or the file is
+    /// from before logs had one, and it is refused rather than started
+    /// over.
+    fn start(storage: &mut S, bytes: &[u8]) -> Result<Header, LogError> {
+        if record::holds_a_whole_frame(bytes) {
+            return Err(LogError::Corrupt {
+                offset: 0,
+                reason: "records without a log header in front of them",
+            });
+        }
+        let (id, created) = storage.origin()?;
+        let header = Header {
+            first_record: 0,
+            chain_before: chain_start(),
+            id,
+            created,
+        };
+        storage.truncate(0)?;
+        storage.append(&header.encode())?;
+        Ok(header)
+    }
+
+    /// The name this log was given when it was made. Every copy of the
+    /// log keeps it.
+    pub fn id(&self) -> LogId {
+        self.header.id
+    }
+
+    /// When the log was made, in microseconds since the Unix epoch.
+    pub fn created(&self) -> u64 {
+        self.header.created
     }
 
     /// Append one record and return only once it is durable.
@@ -141,9 +222,9 @@ impl<S: Storage> Log<S> {
         self.storage.sync()
     }
 
-    /// Bytes of acknowledged records in the log.
+    /// Bytes of acknowledged records in the log, its header not counted.
     pub fn len(&self) -> u64 {
-        self.len
+        self.len - HEADER_LEN as u64
     }
 
     /// How many records are acknowledged. A record is named by how many
@@ -180,7 +261,9 @@ impl<S: Storage> Log<S> {
         if until <= from {
             return Ok(chain);
         }
-        let first = from.checked_sub(1).map_or(0, |before| self.ends[before]);
+        let first = from
+            .checked_sub(1)
+            .map_or(HEADER_LEN as u64, |before| self.ends[before]);
         let last = self.ends[until - 1];
         let bytes = self.storage.read_at(first, (last - first) as usize)?;
         let mut start = first;
@@ -206,7 +289,9 @@ impl<S: Storage> Log<S> {
         if first >= self.ends.len() {
             return Ok(Vec::new());
         }
-        let start = first.checked_sub(1).map_or(0, |before| self.ends[before]);
+        let start = first
+            .checked_sub(1)
+            .map_or(HEADER_LEN as u64, |before| self.ends[before]);
         let limit = start.saturating_add(max_bytes as u64);
         let whole = self.ends[first..].partition_point(|&end| end <= limit);
         let end = self.ends[first + whole.max(1) - 1];
@@ -214,7 +299,7 @@ impl<S: Storage> Log<S> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.ends.is_empty()
     }
 
     /// The storage underneath, for the simulation to inject faults into.
@@ -456,7 +541,7 @@ mod tests {
     #[test]
     fn damaged_acknowledged_record_refuses_to_open() {
         let mut bytes = written(&[record(1), record(2)]).read_all().expect("reads");
-        bytes[record::HEADER_LEN + 1] ^= 0x80;
+        bytes[HEADER_LEN + record::HEADER_LEN + 1] ^= 0x80;
 
         let error = Log::open(SimStorage::with_bytes(bytes)).expect_err("corrupt");
 
@@ -488,5 +573,147 @@ mod tests {
 
         assert!(matches!(refused, Err(LogError::RecordTooLarge { .. })));
         assert!(next.is_ok(), "{next:?}");
+    }
+    /// A header as `open` writes one on a simulated disk.
+    fn header_bytes() -> Vec<u8> {
+        let (_, created) = SimStorage::default().origin().expect("has an origin");
+        Header {
+            first_record: 0,
+            chain_before: chain_start(),
+            id: *b"a simulated log.",
+            created,
+        }
+        .encode()
+        .to_vec()
+    }
+
+    #[test]
+    fn a_new_log_starts_with_a_header_and_keeps_its_name_when_opened_again() {
+        let (log, records) = Log::open(SimStorage::default()).expect("opens");
+        let id = log.id();
+        let mut storage = log.storage;
+
+        assert!(records.is_empty());
+        assert_eq!(storage.read_all().expect("reads"), header_bytes());
+        let (reopened, _) = Log::open(storage.crash(0)).expect("reopens");
+        assert_eq!(reopened.id(), id);
+        assert!(reopened.is_empty());
+        assert_eq!(reopened.len(), 0);
+    }
+
+    #[test]
+    fn the_header_is_durable_before_open_returns() {
+        let (log, _) = Log::open(SimStorage::default()).expect("opens");
+
+        assert_eq!(log.storage.durable_len(), HEADER_LEN);
+    }
+
+    #[test]
+    fn records_follow_the_header_as_the_frames_they_are() {
+        let records = [record(1), record(2)];
+
+        let mut storage = written(&records);
+
+        let expected = [header_bytes(), frames(&records)].concat();
+        assert_eq!(storage.read_all().expect("reads"), expected);
+    }
+
+    #[test]
+    fn records_with_no_header_in_front_are_refused_not_started_over() {
+        let bytes = frames(&[record(1), record(2)]);
+
+        let error = Log::open(SimStorage::with_bytes(bytes)).expect_err("has no header");
+
+        assert!(
+            matches!(error, LogError::Corrupt { offset: 0, reason } if reason.contains("header")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_header_cut_short_with_nothing_after_it_is_written_again() {
+        for cut in 0..HEADER_LEN {
+            let torn = header_bytes()[..cut].to_vec();
+
+            let (log, records) = Log::open(SimStorage::with_bytes(torn)).expect("opens");
+
+            assert!(records.is_empty(), "cut at {cut}");
+            let mut storage = log.storage;
+            assert_eq!(storage.read_all().expect("reads"), header_bytes());
+        }
+    }
+
+    #[test]
+    fn zeros_reserved_ahead_with_no_header_are_a_new_log() {
+        let (mut log, records) = Log::open(SimStorage::reserving(1_024)).expect("opens");
+        log.append(&record(1)).expect("appends");
+
+        assert!(records.is_empty());
+        let (_, recovered) = Log::open(log.storage.crash(0)).expect("reopens");
+        assert_eq!(recovered, vec![record(1)]);
+    }
+
+    #[test]
+    fn a_damaged_header_in_front_of_records_refuses_to_open() {
+        let whole = written(&[record(1), record(2)]).read_all().expect("reads");
+
+        for bit in 0..HEADER_LEN * 8 {
+            let mut bytes = whole.clone();
+            bytes[bit / 8] ^= 1 << (bit % 8);
+
+            let error = Log::open(SimStorage::with_bytes(bytes)).expect_err("header is damaged");
+
+            assert!(
+                matches!(
+                    error,
+                    LogError::Corrupt { offset: 0, .. } | LogError::NewerFormat { .. }
+                ),
+                "bit {bit}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_log_of_a_later_format_is_refused_as_such() {
+        let mut bytes = header_bytes();
+        bytes[8..12].copy_from_slice(&2_u32.to_le_bytes());
+
+        let error = Log::open(SimStorage::with_bytes(bytes)).expect_err("is newer");
+
+        assert!(
+            matches!(error, LogError::NewerFormat { version: 2 }),
+            "{error}"
+        );
+        assert!(error.to_string().contains("later version"));
+    }
+
+    #[test]
+    fn a_file_that_is_not_the_first_of_its_log_is_refused() {
+        let later = Header {
+            first_record: 5,
+            chain_before: chain_start(),
+            id: [1; 16],
+            created: 0,
+        };
+
+        let error =
+            Log::open(SimStorage::with_bytes(later.encode().to_vec())).expect_err("not first");
+
+        assert!(matches!(error, LogError::Corrupt { offset: 0, .. }));
+    }
+
+    #[test]
+    fn damage_in_a_record_is_reported_where_it_is_in_the_file() {
+        let records = [record(1), record(2), record(3)];
+        let mut bytes = written(&records).read_all().expect("reads");
+        let second = HEADER_LEN + frames(&records[..1]).len();
+        bytes[second + 10] ^= 1;
+
+        let error = Log::open(SimStorage::with_bytes(bytes)).expect_err("is damaged");
+
+        assert!(
+            matches!(error, LogError::Corrupt { offset, .. } if offset == second as u64),
+            "{error}"
+        );
     }
 }

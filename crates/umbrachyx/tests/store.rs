@@ -379,12 +379,18 @@ fn an_empty_group_writes_nothing() {
     let dir = TempDir::new("empty-group");
     let mut store = open(&dir.log());
 
+    // A log with nothing written is only the header its file starts with.
+    let before = std::fs::metadata(dir.log()).expect("log exists").len();
+
     let results = store
         .commit_all(vec![request("missing", vec![set("a", "1")], "agent:1")])
         .expect("nothing to write");
 
     assert!(matches!(&results[..], [Err(StoreError::UnknownBranch(_))]));
-    assert_eq!(std::fs::metadata(dir.log()).expect("log exists").len(), 0);
+    assert_eq!(
+        std::fs::metadata(dir.log()).expect("log exists").len(),
+        before
+    );
     assert!(store.commit_all(Vec::new()).expect("nothing").is_empty());
 }
 

@@ -203,6 +203,12 @@ impl Storage for SimStorage {
         self.current.truncate(len);
         Ok(())
     }
+
+    /// The same for every simulated log, so a seed gives the same bytes
+    /// on every run.
+    fn origin(&mut self) -> io::Result<([u8; 16], u64)> {
+        Ok((*b"a simulated log.", 0))
+    }
 }
 
 #[cfg(test)]

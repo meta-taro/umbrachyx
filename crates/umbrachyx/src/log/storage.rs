@@ -7,6 +7,7 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub trait Storage {
     /// Everything written so far, synced or not.
@@ -27,6 +28,20 @@ pub trait Storage {
             .and_then(|start| bytes.get(start..start.checked_add(len)?))
             .map(<[u8]>::to_vec)
             .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
+    }
+    /// What a new log is named by: sixteen bytes no other log has, and the
+    /// time in microseconds since the Unix epoch. Asked once, when a log
+    /// is made. They come from here, with the bytes, because they are
+    /// what the machine gives and a simulated one gives its own.
+    fn origin(&mut self) -> io::Result<([u8; 16], u64)> {
+        let mut id = [0; 16];
+        getrandom::getrandom(&mut id).map_err(io::Error::other)?;
+        let created = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_micros()).unwrap_or(u64::MAX)
+            });
+        Ok((id, created))
     }
 }
 

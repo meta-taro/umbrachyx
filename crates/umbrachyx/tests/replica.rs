@@ -1,7 +1,7 @@
 //! A second store fed the bytes of the first one's log ends up holding the
 //! same thing: the same commits under the same ids, the same branches,
-//! tables, decisions and erasures, and a log of the same bytes. The data
-//! is synthetic.
+//! tables, decisions and erasures, and a log whose records are the same
+//! bytes. The data is synthetic.
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +10,11 @@ use umbrachyx::log::{Edit, Engine, FileStorage};
 use umbrachyx::store::{CommitRequest, MAIN_BRANCH, Provenance, Store, StoreError, SystemClock};
 
 type SealedStore = Store<FileStorage, SystemClock>;
+
+/// What a log file starts with, in front of its records: 80 bytes that
+/// begin by saying they are a log.
+const LOG_HEADER_LEN: usize = 80;
+const LOG_MAGIC: &[u8] = b"UMBRALOG";
 
 /// A fresh directory per test, removed when the test ends.
 struct TempDir(PathBuf);
@@ -39,18 +44,21 @@ impl TempDir {
         std::fs::copy(self.keys(from), self.keys(to)).expect("copies the key file");
     }
 
-    /// The log's bytes. Its store must be closed: while one is open the
-    /// file is locked, and on Windows nothing else can read it.
-    fn log_bytes(&self, name: &str) -> Vec<u8> {
-        std::fs::read(self.log(name)).expect("reads the log")
+    /// The bytes of the log's records, which follow the header its file
+    /// starts with. Its store must be closed: while one is open the file
+    /// is locked, and on Windows nothing else can read it.
+    fn record_bytes(&self, name: &str) -> Vec<u8> {
+        let file = std::fs::read(self.log(name)).expect("reads the log");
+        assert_eq!(&file[..LOG_MAGIC.len()], LOG_MAGIC);
+        file[LOG_HEADER_LEN..].to_vec()
     }
 
-    /// The log of a store that wrote `write` and was closed.
+    /// The records of a store that wrote `write` and was closed.
     fn written(&self, name: &str, write: impl FnOnce(&mut SealedStore)) -> Vec<u8> {
         let mut store = self.open(name);
         write(&mut store);
         drop(store);
-        self.log_bytes(name)
+        self.record_bytes(name)
     }
 }
 
@@ -172,9 +180,9 @@ fn a_store_fed_another_ones_log_holds_the_same() {
     assert_same(&replica, &primary);
     drop(replica);
     assert_eq!(
-        dir.log_bytes("replica"),
+        dir.record_bytes("replica"),
         frames,
-        "the same log, byte for byte"
+        "the same records, byte for byte"
     );
     assert_same(&dir.open("replica"), &primary);
 }
@@ -232,7 +240,10 @@ fn records_sealed_under_keys_the_replica_lacks_are_refused_whole() {
     );
     assert_eq!(replica.head(MAIN_BRANCH), None, "nothing was applied");
     drop(replica);
-    assert!(dir.log_bytes("replica").is_empty(), "nothing was written");
+    assert!(
+        dir.record_bytes("replica").is_empty(),
+        "nothing was written"
+    );
 }
 
 #[test]

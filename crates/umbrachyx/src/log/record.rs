@@ -144,7 +144,7 @@ pub const HEADER_LEN: usize = 8;
 pub const MAX_PAYLOAD_LEN: usize = 64 * 1024 * 1024;
 
 /// What survives a scan of the log bytes.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Scan {
     pub records: Vec<Record>,
     /// Where each record's frame ends, in the order of `records`.
@@ -399,6 +399,11 @@ fn has_whole_frame_after_start(rest: &[u8]) -> bool {
         return false;
     };
     (1..=last).any(|start| check_frame(&rest[start..]).is_ok())
+}
+
+/// Whether a whole, checked frame starts anywhere in `bytes`.
+pub fn holds_a_whole_frame(bytes: &[u8]) -> bool {
+    check_frame(bytes).is_ok() || has_whole_frame_after_start(bytes)
 }
 
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
