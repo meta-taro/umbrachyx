@@ -201,13 +201,44 @@ impl Loop {
         // Connections with more to read than their turn allowed, or with
         // commands held back; they are taken again without waiting.
         let mut again: Vec<usize> = Vec::new();
+        // Experiment: how long to keep asking without sleeping once there
+        // is nothing to do, and whether to give the processor away between
+        // asks.
+        let spin = std::env::var("UMBRACHYX_SPIN_US")
+            .ok()
+            .and_then(|us| us.parse().ok())
+            .map(Duration::from_micros)
+            .unwrap_or(Duration::ZERO);
+        let yields = std::env::var_os("UMBRACHYX_SPIN_YIELD").is_some();
         loop {
-            let timeout = (!again.is_empty()).then_some(Duration::ZERO);
-            if let Err(error) = self.poll.poll(&mut events, timeout) {
-                if error.kind() != io::ErrorKind::Interrupted {
-                    eprintln!("umbrachyx: waiting for connections: {error}");
+            let mut timeout = (!again.is_empty()).then_some(Duration::ZERO);
+            let idle_since = std::time::Instant::now();
+            loop {
+                let asked = if timeout.is_none() && !spin.is_zero() && idle_since.elapsed() < spin {
+                    Some(Duration::ZERO)
+                } else {
+                    timeout
+                };
+                match self.poll.poll(&mut events, asked) {
+                    Err(error) if error.kind() != io::ErrorKind::Interrupted => {
+                        eprintln!("umbrachyx: waiting for connections: {error}");
+                    }
+                    Err(_) => {}
+                    Ok(())
+                        if events.is_empty()
+                            && asked == Some(Duration::ZERO)
+                            && timeout.is_none() =>
+                    {
+                        if yields {
+                            thread::yield_now();
+                        } else {
+                            std::hint::spin_loop();
+                        }
+                        continue;
+                    }
+                    Ok(()) => break,
                 }
-                continue;
+                timeout = timeout.take();
             }
             let mut ready = std::mem::take(&mut again);
             for event in &events {
