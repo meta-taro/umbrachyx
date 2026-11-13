@@ -1,0 +1,25 @@
+cand proc1 get50: 156433.33 159172.30 162337.66 158730.16 161030.59 158730.16 
+cand proc1 get50 after 256-client set: 161290.33 159489.64 161485.67 
+cand proc1 get P16: 804505.19 801603.25 805477.25 
+cand proc1 threads on cpus:   2 umbrachyx;  0 resp loop 0;  3 resp loop 1;  3 resp commits;
+spin proc1 get50: 144560.89 155763.23 163867.27 161485.67 163398.70 162337.66 
+spin proc1 get50 after 256-client set: 161812.31 163065.62 161030.59 
+spin proc1 get P16: 767165.31 790513.81 788022.06 
+spin proc1 threads on cpus:   2 umbrachyx;  0 resp loop 0;  3 resp loop 1;  1 resp commits;
+cand proc2 get50: 112233.45 112834.98 159172.30 139762.41 163132.14 159045.72 
+cand proc2 get50 after 256-client set: 164271.05 112139.05 113571.83 
+cand proc2 get P16: 773395.19 761035.00 781250.00 
+cand proc2 threads on cpus:   0 umbrachyx;  1 resp loop 0;  2 resp loop 1;  2 resp commits;
+spin proc2 get50: 162800.16 163331.98 161290.33 161812.31 162008.91 157853.20 
+spin proc2 get50 after 256-client set: 129115.55 160771.70 160836.34 
+spin proc2 get P16: 785854.56 788022.06 762776.50 
+spin proc2 threads on cpus:   0 umbrachyx;  3 resp loop 0;  0 resp loop 1;  2 resp commits;
+cand proc3 get50: 133555.94 163265.30 164406.08 161420.50 164203.61 160836.34 
+cand proc3 get50 after 256-client set: 161355.38 133734.55 164609.05 
+cand proc3 get P16: 780640.12 776699.00 761904.75 
+cand proc3 threads on cpus:   1 umbrachyx;  2 resp loop 0;  1 resp loop 1;  1 resp commits;
+spin proc3 get50: 112391.12 163465.47 154261.48 112707.80 164203.61 145666.42 
+spin proc3 get50 after 256-client set: 110466.72 161943.31 162271.81 
+spin proc3 get P16: 771010.00 777907.38 780031.25 
+spin proc3 threads on cpus:   3 umbrachyx;  1 resp loop 0;  0 resp loop 1;  2 resp commits;
+VARY-DONE

@@ -144,6 +144,28 @@ capability token costs each write a further check. With 50 readers, each
 table. These are the next things to change, and the table is measured
 again when they have.
 
+Two of them have changed since the table, and it has not been measured
+again as a whole yet. A leaf of the tree now shares its keys with the
+leaf it replaces, and half the processors serve connections, each
+staying awake a moment before it sleeps. One run of each on the same
+machine on 2026-11-13, beside Valkey that day
+([`bench/results/2026-11-13-aws-m6id.xlarge-ab/`](bench/results/2026-11-13-aws-m6id.xlarge-ab/)):
+
+| A second | Umbrachyx | Valkey |
+|---|---|---|
+| `GET`s, one client | **54,466** | 35,186 |
+| Durable writes, one client | **8,813** | 6,737 |
+| `GET`s, 50 clients | 156,740 | 161,290 |
+| Durable writes, 64 clients | 35,689 | **95,329** |
+| Durable writes, 256 clients | 38,292 | **117,855** |
+| Durable writes, 50 clients sending 64 at a time | 72,908 | **611,434** |
+| `GET`s, 50 clients sending 16 at a time | 677,048 | **1,247,661** |
+
+The 50-client `GET` row is not steady: about one run in five gives
+110,000 to 145,000. With 5,000 and 10,000 connections the slowest percent
+of `GET`s is now 52 and 120 ms, not the 31 and 74 ms of the table, and
+memory is about 4% more.
+
 In memory, per key written once and per later overwrite
 (`bench/memory.sh`, 200,000 keys):
 

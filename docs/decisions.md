@@ -517,6 +517,36 @@ checker to hold the shared secret that mints tokens.
   machine with processors to spare, and look first at the work itself:
   a leaf is copied whole, 32 keys and 32 values each counted up and
   later down, for one changed value.
+- **A leaf shares its keys with the leaf it replaces and holds its
+  values in one buffer** (measured; taken for the release machine,
+  against what it costs elsewhere). A leaf was a list of keys and
+  values, each counted separately: writing one value copied the list,
+  counting 64 things up, and dropping the old leaf counted them down. On
+  the release machine that counting was half of the writing thread's
+  time (29% dropping nodes, 23% cloning entries;
+  [`bench/results/2026-11-12-aws-m6id.xlarge-threads/`](../bench/results/2026-11-12-aws-m6id.xlarge-threads/)).
+  Now the keys of a leaf are one shared list, with the index built for
+  lookups, and the values one run of bytes: a write that changes values
+  and no key copies the bytes and counts one thing. Measured in turn
+  with the code before it on that machine, three rounds
+  ([`bench/results/2026-11-13-aws-m6id.xlarge-ab/`](../bench/results/2026-11-13-aws-m6id.xlarge-ab/)):
+  durable writes from 50 clients sending 64 at a time went from 42,762 a
+  second to 68,736, from 64 clients from 26,015 to 33,944, from 256 from
+  27,009 to 38,948, from one client from 7,468 to 7,949; reads did not
+  change. **What it cost:** the tree holds its own copy of each current
+  value, where it shared the bytes with the commit that wrote them.
+  Counted by the allocator on a laptop
+  (`cargo run --release --example memory_cost`), a commit leaves 683
+  bytes where it left 619 and a key written once 313 where it took 242;
+  the server's resident memory after 3.5 million writes was 4% more on
+  the release machine. **It is not faster everywhere.** On a laptop a
+  commit in the process went from 3.65 µs to 4.5 µs with 200,000 keys,
+  and on a CI runner with AMD processors, measured in turn the same way,
+  nothing changed. It was taken because the release machine is the one
+  the published table is measured on, and the gain there is large.
+  **Look again if** memory per key matters more than writes from many
+  clients, or if another common machine shows the laptop's loss over
+  the Redis protocol.
 - **No hash index of current values beside the tree** (measured, not
   taken). A table that keeps its history answers a `GET` by walking the
   prolly tree; an index of current values would answer it with one
@@ -604,11 +634,35 @@ checker to hold the shared secret that mints tokens.
   at once; no async runtime.** A thread asks the operating system which of
   its sockets have something to read, reads each and carries out the
   commands, queueing the `SET`s, and sends the replies that are ready.
-  There are as many threads as
-  processors, up to four (`Server::threads`), and a new connection goes to
-  the next in turn. At most 1,024 connections unless `serve
+  There is a thread for every two processors, one at least and four at
+  most (`Server::threads`, `serve --threads`), and a new connection goes
+  to the next in turn. At most 1,024 connections unless `serve
   --max-connections` says otherwise; one past the limit is told so and
   closed. Idle connections are not timed out yet.
+  - **Half the processors, and a thread stays awake 50 µs before it
+    sleeps** (measured on the release machine, 4 virtual CPUs that are 2
+    cores,
+    [`bench/results/2026-11-13-aws-m6id.xlarge-ab/`](../bench/results/2026-11-13-aws-m6id.xlarge-ab/)).
+    It used to be a thread a processor, up to four, each asleep the
+    moment it had nothing to do. With four, 50 clients got about 101,000
+    `GET`s a second and the server made 260,000 context switches in five
+    seconds; with two, about 145,000; Valkey, on one thread, about
+    160,000. The thread that writes and the clients need processors too.
+    Staying awake is about the wake-up: a client that waits for each
+    reply sends its next request tens of microseconds after getting one,
+    and waking a sleeping thread costs about as much again. Looking for
+    50 µs before sleeping took one client from about 37,000 `GET`s a
+    second to about 55,000, and 50 clients on two threads from 145,000
+    to 163,000. 20 µs gave the same; 200 µs gave no more and took a
+    third of one client's durable writes, the writing thread's processor
+    being spent on looking. **What it cost:** `GET`s sent 16 at a time
+    fell about a tenth, the slowest percent with 5,000 and 10,000
+    connections rose from 31 and 74 ms to 52 and 120 ms (Valkey: 76 and
+    142), and about one run in five of the 50-client row gives 110,000
+    to 145,000 instead of 160,000, which is not explained yet. A machine
+    with two processors now has one serving thread. **Look again** at
+    where the threads run when the unsteady row is looked into, and at
+    the count on machines whose processors are whole cores.
   - **It replaced a thread per connection**, which was the simplest
     design and added no dependency, and which was woken for every request
     and put back to sleep after it. In a two-processor Linux virtual
