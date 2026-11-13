@@ -996,6 +996,14 @@ erases the subject while the history keeps its shape (see
   than read as a torn end: otherwise one flipped bit in a length would
   make every key after it look torn and be cut, which would erase those
   subjects.
+- **The key file starts with 16 bytes that say what it is**, as the log
+  does: that it is a key file, in which layout, with a checksum. A key
+  file of a later version is refused as that. Keys with no header that
+  checks out in front of them are refused like damage before the last
+  key, since they may be in use; a file with no key in it, with or
+  without part of a header, gets its header with the first key, in one
+  write that replaces the file. Key files written before this are not
+  opened.
 - **A key file write that fails leaves the file to be replaced whole.**
   A failed append may have left part of its entry; appending the next key
   after it would bury the torn bytes where they read as damage, and the

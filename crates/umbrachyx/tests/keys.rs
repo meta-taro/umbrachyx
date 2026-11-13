@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 use umbrachyx::keys::{FileKeyStorage, KeyError, KeyStorage, Keys};
 
+/// What a key file starts with, in front of its keys.
+const HEADER_LEN: usize = 16;
+
 /// A fresh directory per test, removed when the test ends.
 struct TempDir(PathBuf);
 
@@ -167,12 +170,102 @@ fn damage_before_the_last_key_is_an_error() {
     keys.key_for(b"player/7").expect("makes a key");
     drop(keys);
     let mut bytes = std::fs::read(dir.keys()).expect("reads");
-    bytes[4] ^= 1;
+    bytes[HEADER_LEN + 4] ^= 1;
     std::fs::write(dir.keys(), &bytes).expect("writes");
 
     let opened = dir.open();
 
     assert!(matches!(opened, Err(KeyError::Damaged)), "{opened:?}");
+}
+
+/// The file says what it is before any key, so another file, or a key file
+/// of a later version, is not read as damage.
+#[test]
+fn a_key_file_starts_by_saying_what_it_is() {
+    let dir = TempDir::new("header");
+    let mut keys = dir.open().expect("opens");
+    keys.key_for(b"player/42").expect("makes a key");
+    drop(keys);
+
+    let bytes = std::fs::read(dir.keys()).expect("reads");
+
+    assert_eq!(&bytes[..8], b"UMBRAKEY");
+    assert_eq!(&bytes[8..12], &1_u32.to_le_bytes());
+    assert!(bytes.len() > HEADER_LEN);
+}
+
+/// Keys with no header in front of them may be in use, whether the header
+/// was damaged or the file is from before key files had one: opening
+/// refuses, and the next write must not replace them with a fresh file.
+#[test]
+fn keys_with_no_header_that_checks_out_are_refused() {
+    let dir = TempDir::new("no-header");
+    let mut keys = dir.open().expect("opens");
+    keys.key_for(b"player/42").expect("makes a key");
+    drop(keys);
+    let whole = std::fs::read(dir.keys()).expect("reads");
+
+    std::fs::write(dir.keys(), &whole[HEADER_LEN..]).expect("writes");
+    let headerless = dir.open();
+    assert!(
+        matches!(headerless, Err(KeyError::Damaged)),
+        "{headerless:?}"
+    );
+
+    for bit in 0..HEADER_LEN * 8 {
+        let mut bytes = whole.clone();
+        bytes[bit / 8] ^= 1 << (bit % 8);
+        std::fs::write(dir.keys(), &bytes).expect("writes");
+
+        let opened = dir.open();
+
+        assert!(
+            matches!(
+                opened,
+                Err(KeyError::Damaged | KeyError::NewerFormat { .. })
+            ),
+            "bit {bit}: {opened:?}"
+        );
+    }
+}
+
+#[test]
+fn a_key_file_of_a_later_format_is_refused_as_such() {
+    let dir = TempDir::new("newer");
+    let mut bytes = b"UMBRAKEY".to_vec();
+    bytes.extend(2_u32.to_le_bytes());
+    bytes.extend([0; 4]);
+    std::fs::write(dir.keys(), &bytes).expect("writes");
+
+    let opened = dir.open();
+
+    assert!(
+        matches!(opened, Err(KeyError::NewerFormat { version: 2 })),
+        "{opened:?}"
+    );
+}
+
+/// A crash during the very first write can leave part of the header and
+/// nothing else. No key was in use yet, so the file is started again.
+#[test]
+fn a_header_cut_short_with_no_key_after_it_is_written_again() {
+    let dir = TempDir::new("torn-header");
+    let mut keys = dir.open().expect("opens");
+    keys.key_for(b"player/42").expect("makes a key");
+    drop(keys);
+    let whole = std::fs::read(dir.keys()).expect("reads");
+
+    for cut in 0..HEADER_LEN {
+        std::fs::write(dir.keys(), &whole[..cut]).expect("writes");
+
+        let mut keys = dir.open().expect("opens a file with no key in it");
+        let made = keys.key_for(b"player/7").expect("makes a key");
+        drop(keys);
+
+        let reopened = dir.open().expect("reopens");
+        assert_eq!(reopened.get(b"player/7"), Some(&made), "cut at {cut}");
+        assert_eq!(reopened.get(b"player/42"), None, "cut at {cut}");
+    }
 }
 
 /// Opening only reads. A torn end is cut when the next key is written, so

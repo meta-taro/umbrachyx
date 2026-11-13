@@ -4,7 +4,9 @@
 //! key from the file, after which every value written under it stays in
 //! the log as ciphertext nobody can read.
 //!
-//! The file is a run of entries, each the subject's length (two bytes,
+//! The file starts with 16 bytes that say what it is: `UMBRAKEY`, the
+//! layout's number (four bytes, little-endian) and a CRC-32 of the two.
+//! After them it is a run of entries, each the subject's length (two bytes,
 //! little-endian), the subject, the key, and a CRC-32 of the three. A new
 //! key is appended and synced before anything is encrypted under it, so a
 //! crash never leaves ciphertext whose key was lost. Erasing writes the
@@ -15,7 +17,11 @@
 //! checked that every key its log uses is here, so damage that only looks
 //! like a torn end is refused before anything is lost. Bytes that do not
 //! make a whole entry are a torn end, garbage included, as long as no whole
-//! entry follows them; with one after them they are damage, and refused. A write that fails
+//! entry follows them; with one after them they are damage, and refused.
+//! The same goes for the start of the file: keys with no header that checks
+//! out in front of them are refused, and a header of a later layout is
+//! refused as that. A file with no header and no key gets its header with
+//! the first key, in one write that replaces the file. A write that fails
 //! leaves the same kind of leftover, a torn append or a key whose erasure
 //! did not reach the file, and the next write replaces the whole file too.
 //!
@@ -43,6 +49,20 @@ pub type Fingerprint = [u8; FINGERPRINT_LEN];
 
 const LEN_BYTES: usize = 2;
 const CRC_BYTES: usize = 4;
+const MAGIC: [u8; 8] = *b"UMBRAKEY";
+/// Bumped when the file's layout changes.
+const VERSION: u32 = 1;
+const HEADER_LEN: usize = MAGIC.len() + 4 + CRC_BYTES;
+
+/// What every key file starts with.
+fn header() -> [u8; HEADER_LEN] {
+    let mut bytes = [0; HEADER_LEN];
+    bytes[..8].copy_from_slice(&MAGIC);
+    bytes[8..12].copy_from_slice(&VERSION.to_le_bytes());
+    let crc = crc32fast::hash(&bytes[..12]);
+    bytes[12..].copy_from_slice(&crc.to_le_bytes());
+    bytes
+}
 
 /// Where the key file lives, so the simulation can replace the disk.
 pub trait KeyStorage {
@@ -137,6 +157,11 @@ pub enum KeyError {
     Damaged,
     /// Subjects are at most [`MAX_SUBJECT_LEN`] bytes.
     SubjectTooLong,
+    /// The file says it is a key file in a layout this version does not
+    /// know: one written by a later version.
+    NewerFormat {
+        version: u32,
+    },
 }
 
 impl fmt::Display for KeyError {
@@ -144,6 +169,10 @@ impl fmt::Display for KeyError {
         match self {
             Self::Io(error) => write!(f, "key file: {error}"),
             Self::Damaged => write!(f, "key file: damaged before its last key"),
+            Self::NewerFormat { version } => write!(
+                f,
+                "key file: in format {version}, written by a later version than this one"
+            ),
             Self::SubjectTooLong => write!(
                 f,
                 "key file: a subject is longer than {MAX_SUBJECT_LEN} bytes"
@@ -182,7 +211,7 @@ impl<S: KeyStorage> Keys<S> {
     /// Reads every key, past a torn entry at the end. Changes nothing.
     pub fn open(mut storage: S) -> Result<Self, KeyError> {
         let bytes = storage.read_all()?;
-        let (keys, valid) = parse(&bytes)?;
+        let (keys, is_whole) = read_file(&bytes)?;
         let by_fingerprint = keys
             .iter()
             .map(|(subject, key)| (fingerprint(key), subject.clone()))
@@ -191,7 +220,7 @@ impl<S: KeyStorage> Keys<S> {
             storage,
             keys,
             by_fingerprint,
-            stale: valid < bytes.len(),
+            stale: !is_whole,
         })
     }
 
@@ -290,11 +319,12 @@ impl<S: KeyStorage> Keys<S> {
         Ok(true)
     }
 
-    /// Every key in memory as the file's bytes, in subject order.
+    /// Every key in memory as the file's bytes: the header, then the keys
+    /// in subject order.
     fn entries(&self) -> Result<Vec<u8>, KeyError> {
         let mut subjects: Vec<&Vec<u8>> = self.keys.keys().collect();
         subjects.sort();
-        let mut bytes = Vec::new();
+        let mut bytes = header().to_vec();
         for subject in subjects {
             bytes.extend(entry(subject, &self.keys[subject])?);
         }
@@ -320,6 +350,33 @@ fn entry(subject: &[u8], key: &Key) -> Result<Vec<u8>, KeyError> {
     bytes.extend(key);
     bytes.extend(crc32fast::hash(&bytes).to_le_bytes());
     Ok(bytes)
+}
+
+/// The keys of a file, and whether the file is whole: a header and whole
+/// entries, nothing else. A file that is not gets replaced by the next
+/// write, so one with no header yet (none was ever written, or a crash cut
+/// its first write short) gets its header then.
+fn read_file(bytes: &[u8]) -> Result<(HashMap<Vec<u8>, Key>, bool), KeyError> {
+    let Some(entries) = bytes.strip_prefix(&header()[..]) else {
+        if let Some(version) = later_version(bytes) {
+            return Err(KeyError::NewerFormat { version });
+        }
+        // Keys behind a header that does not check out, or behind none
+        // (a file from before key files had one), may be in use.
+        if (0..bytes.len()).any(|from| whole_entry(bytes, from).is_some()) {
+            return Err(KeyError::Damaged);
+        }
+        return Ok((HashMap::new(), false));
+    };
+    let (keys, valid) = parse(entries)?;
+    Ok((keys, valid == entries.len()))
+}
+
+/// The layout's number, if the file says it is a key file of a later one.
+fn later_version(bytes: &[u8]) -> Option<u32> {
+    let rest = bytes.strip_prefix(&MAGIC[..])?;
+    let version = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?);
+    (version > VERSION).then_some(version)
 }
 
 /// The keys, and how many bytes from the start are whole entries.
