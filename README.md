@@ -3,6 +3,12 @@
 **An in-memory database that keeps every change as history, where an AI
 agent's writes wait on a branch until a person approves them.**
 
+- **Every change is kept**, with who made it, why, and who approved it,
+  to branch, diff, merge and undo: per key and per cell, the way git
+  keeps files.
+- **Reads never wait for writes.** While 50 clients write durably, a `GET`
+  answers in tens of microseconds, about 19 times sooner than Valkey with
+  every write synced, on the machine releases are measured on.
 - **Agents write only to their own branch.** An agent's capability token
   names its branch; nothing it holds can write to `main` or approve a
   change. [`docs/agents.md`](docs/agents.md) lists what a hijacked agent
@@ -10,12 +16,6 @@ agent's writes wait on a branch until a person approves them.**
 - **A person sees a list of changes waiting, reads the diff, and approves
   or rejects.** What is approved is the diff that person saw: anything
   the agent wrote after it is refused, not merged unseen.
-- **Every change is kept**, with who made it, why, and who approved it,
-  to branch, diff, merge and undo: per key and per cell, the way git
-  keeps files.
-- **Reads never wait for writes.** While 50 clients write durably, a `GET`
-  answers in tens of microseconds, about 19 times sooner than Valkey with
-  every write synced, on the machine releases are measured on.
 - **Nothing acknowledged is lost.** Killed mid-write 1,100 times with
   2,202,833 writes acknowledged on the release machine, and put through
   more than 400,000 simulated restarts after power cuts and disk faults:

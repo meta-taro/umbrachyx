@@ -10,10 +10,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Umbrachyx — a database where an AI agent's writes wait for a person's approval</title>
+    <title>Umbrachyx — an in-memory database that keeps every change, with who made it and why</title>
     <meta
       name="description"
-      content="An in-memory database that keeps every change as history. Agents write only to their own branch; production does not change until a person reads the diff and approves it."
+      content="Every change is kept with who made it, why, and who approved it, at memory speed. An AI agent's writes wait on a branch until a person reads the diff and approves."
     />
 
     <link rel="icon" type="image/png" href="icon.png" />
@@ -25,25 +25,25 @@
     <meta property="og:url" content="https://meta-taro.github.io/umbrachyx/" />
     <meta
       property="og:title"
-      content="Umbrachyx — a database where an AI agent's writes wait for a person's approval"
+      content="Umbrachyx — an in-memory database that keeps every change, with who made it and why"
     />
     <meta
       property="og:description"
-      content="An in-memory database that keeps every change as history. Agents write only to their own branch; production does not change until a person reads the diff and approves it."
+      content="Every change is kept with who made it, why, and who approved it, at memory speed. An AI agent's writes wait on a branch until a person reads the diff and approves."
     />
     <meta property="og:image" content="https://meta-taro.github.io/umbrachyx/og.png" />
     <meta
       property="og:image:alt"
-      content="An AI agent changed your data. Nobody looked at what it wrote. — Umbrachyx"
+      content="Your data was changed. Nobody can say when, by whom, or why. — Umbrachyx"
     />
     <meta name="twitter:card" content="summary_large_image" />
     <meta
       name="twitter:title"
-      content="Umbrachyx — a database where an AI agent's writes wait for a person's approval"
+      content="Umbrachyx — an in-memory database that keeps every change, with who made it and why"
     />
     <meta
       name="twitter:description"
-      content="An in-memory database that keeps every change as history. Agents write only to their own branch; production does not change until a person reads the diff and approves it."
+      content="Every change is kept with who made it, why, and who approved it, at memory speed. An AI agent's writes wait on a branch until a person reads the diff and approves."
     />
     <meta name="twitter:image" content="https://meta-taro.github.io/umbrachyx/og.png" />
 
@@ -68,14 +68,14 @@
         </div>
 
         <h1>
-          An AI agent changed your data.<br /><span class="quiet"
-            >Nobody looked at what it wrote.</span
+          Your data was changed.<br /><span class="quiet"
+            >Nobody can say when, by whom, or why.</span
           >
         </h1>
 
         <p class="lede">
-          An agent's writes go to a branch of its own first.<br />
-          <b>Production does not change until a person approves the diff.</b>
+          Every change is kept, with who made it, why, and who approved it.<br />
+          <b>Reads answer in tens of microseconds, even while writes keep coming.</b>
         </p>
 
         <div class="cta">
@@ -90,11 +90,13 @@
           src="hero.svg"
           width="1200"
           height="516"
-          alt="A terminal. The diff of an agent's change shows three players' potions; one line would give a player 50. Production still holds 0. The corrected change is then merged with the name of the person who approved it."
+          alt="A terminal. The diff of an AI agent's change shows one player would get 50 potions. The corrected change is merged with the name of the person who approved it. The history of that value then shows each change with who made it, why, and who approved."
         />
         <figcaption>
-          <b>The fifty never reached a player.</b> A person saw it in the diff, while production
-          still held the old value. The commands and their output are shortened from
+          <b>Afterwards, the value itself says who gave player 9 what, why, and who signed it
+          off.</b> The fifty an AI agent first wrote never reached production: its writes wait
+          on a branch until a person approves the diff. The commands and their output are
+          shortened from
           <a
             href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/game-inventory.md"
             >the game inventory example</a
@@ -106,13 +108,15 @@
         <h2>WHY IT HAPPENS</h2>
         <p class="problem">
           A database holds <b>only the current value</b>, and a write is
-          <b>production the moment it lands</b>. Let an agent write → it is fast, there are many
-          of it, and it is sometimes wrong → <b>by the time someone notices, the old value and
-          the reason are gone.</b>
+          <b>production the moment it lands</b>. Keeping the past was slow, so it was left to
+          logs and backups → now AI agents write too: fast, many, sometimes wrong →
+          <b>by the time someone notices, the old value and the reason are gone.</b>
         </p>
         <p>
-          Narrowing an agent's permissions by configuration fails with one wrong setting.
-          <b>Here an agent has no way to write to production to begin with.</b> The token an
+          <b>Here the history is not a log beside the data; it is how the data is held</b>, in
+          memory, so asking a value where it came from costs about what reading it does.
+          And narrowing an agent's permissions by configuration fails with one wrong setting,
+          so an agent has no way to write to production to begin with. The token an
           agent is given names its branch; it cannot write anywhere else, and it cannot
           approve. What a hijacked agent was tested not to be able to do is
           <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/agents.md"
@@ -143,54 +147,6 @@
             <b>Deleting means destroying a key.</b> Values are encrypted under a key per subject
             (a player, say). Destroy the key and the values can never be read again, while the
             shape of the history stays.
-          </li>
-        </ul>
-      </section>
-
-      <section id="flow">
-        <h2>HOW A CHANGE REACHES PRODUCTION</h2>
-        <ul class="cards">
-          <li>
-            <h3>1. Hand over</h3>
-            <p>
-              A person gives the agent a token for one branch, some keys, a purpose and an
-              expiry.
-            </p>
-          </li>
-          <li>
-            <h3>2. Write</h3>
-            <p>The agent writes to its branch, with a reason. Production does not change.</p>
-          </li>
-          <li>
-            <h3>3. Look</h3>
-            <p>A person picks one from the list of changes waiting and reads its diff.</p>
-          </li>
-          <li>
-            <h3>4. Decide</h3>
-            <p>
-              Approved, it enters production with the approver's name. Rejected, it is kept
-              with the reason.
-            </p>
-          </li>
-        </ul>
-        <ul>
-          <li>
-            <b>What is approved is the diff the person saw.</b> If the agent wrote more after
-            that, the approval is refused. Nothing is merged unseen.
-          </li>
-          <li>
-            <b>If production moved first, it stops.</b> When both sides changed the same key,
-            nothing is written and the key is named. A conflict is never settled by guessing.
-          </li>
-          <li>
-            <b>A token that can approve cannot write</b>, and one that can write cannot approve.
-          </li>
-          <li>
-            The list, the diff and the approval can be a screen in a database viewer (<a
-              href="https://github.com/meta-taro/dbboard"
-              >dbboard</a
-            >
-            has a tab for it) or commands in a terminal.
           </li>
         </ul>
       </section>
@@ -326,6 +282,54 @@
             than 400,000 restarts in all; no acknowledged write went missing.
           </li>
           <li>All of these run in CI on Linux and Windows for every change.</li>
+        </ul>
+      </section>
+
+      <section id="flow">
+        <h2>HOW A CHANGE REACHES PRODUCTION</h2>
+        <ul class="cards">
+          <li>
+            <h3>1. Hand over</h3>
+            <p>
+              A person gives the agent a token for one branch, some keys, a purpose and an
+              expiry.
+            </p>
+          </li>
+          <li>
+            <h3>2. Write</h3>
+            <p>The agent writes to its branch, with a reason. Production does not change.</p>
+          </li>
+          <li>
+            <h3>3. Look</h3>
+            <p>A person picks one from the list of changes waiting and reads its diff.</p>
+          </li>
+          <li>
+            <h3>4. Decide</h3>
+            <p>
+              Approved, it enters production with the approver's name. Rejected, it is kept
+              with the reason.
+            </p>
+          </li>
+        </ul>
+        <ul>
+          <li>
+            <b>What is approved is the diff the person saw.</b> If the agent wrote more after
+            that, the approval is refused. Nothing is merged unseen.
+          </li>
+          <li>
+            <b>If production moved first, it stops.</b> When both sides changed the same key,
+            nothing is written and the key is named. A conflict is never settled by guessing.
+          </li>
+          <li>
+            <b>A token that can approve cannot write</b>, and one that can write cannot approve.
+          </li>
+          <li>
+            The list, the diff and the approval can be a screen in a database viewer (<a
+              href="https://github.com/meta-taro/dbboard"
+              >dbboard</a
+            >
+            has a tab for it) or commands in a terminal.
+          </li>
         </ul>
       </section>
 
