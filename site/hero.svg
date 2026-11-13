@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 516" role="img" aria-label="A terminal: the diff of an agent&#x27;s change shows one player would get 50 potions; production still holds 0; the corrected change is approved by name">
+<style>
+.bg{fill:#fbfbfd}.bar{fill:#eeeef2}.t{font:20px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#1c1c22;white-space:pre}
+.c{fill:#9b9ba5}.p{fill:#63636e}.bad{fill:#c2410c;font-weight:700}.ok{fill:#5b5bd6;font-weight:700}.dot{fill:#d4d4dc}
+@media (prefers-color-scheme: dark){.bg{fill:#141418}.bar{fill:#1c1c22}.t{fill:#f4f4f6}.c{fill:#6b6b76}.p{fill:#a0a0ab}.bad{fill:#fb923c}.ok{fill:#7c7cf0}.dot{fill:#34343d}}
+</style>
+<rect class="bg" width="1200" height="516" rx="12"/>
+<path class="bar" d="M0 12a12 12 0 0 1 12-12h1176a12 12 0 0 1 12 12v26H0z"/>
+<circle class="dot" cx="26" cy="19" r="6"/><circle class="dot" cx="48" cy="19" r="6"/><circle class="dot" cx="70" cy="19" r="6"/>
+<text class="t c" x="34" y="82" xml:space="preserve"># An agent wrote a grant of five potions each to its own branch</text>
+<text class="t p" x="34" y="112" xml:space="preserve">$ umbrachyx diff main agent/liveops</text>
+<text class="t " x="34" y="142" xml:space="preserve">~ player/7/item/potion: 3 -&gt; 8</text>
+<text class="t " x="34" y="172" xml:space="preserve">~ player/8/item/potion: 1 -&gt; 6</text>
+<text class="t bad" x="34" y="202" xml:space="preserve">~ player/9/item/potion: 0 -&gt; 50</text>
+<text class="t c" x="34" y="262" xml:space="preserve"># A person reads the diff; production (main) still says 0</text>
+<text class="t p" x="34" y="292" xml:space="preserve">$ umbrachyx get main player/9/item/potion</text>
+<text class="t " x="34" y="322" xml:space="preserve">0</text>
+<text class="t c" x="34" y="382" xml:space="preserve"># The agent corrects it, and a person approves the corrected change by name</text>
+<text class="t p" x="34" y="412" xml:space="preserve">$ umbrachyx merge main agent/liveops-2 --who lead:liveops \</text>
+<text class="t p" x="34" y="442" xml:space="preserve">    --why &quot;outage compensation checked&quot; --approved-by lead:liveops</text>
+<text class="t ok" x="34" y="472" xml:space="preserve">merged 4f0c2a91d3b7</text>
+</svg>

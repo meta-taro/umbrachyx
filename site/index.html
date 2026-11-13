@@ -1,0 +1,414 @@
+<!doctype html>
+<!--
+  The order is the page: who this is, the trouble, how it goes away, where
+  to get it, one picture of the real thing; then the text, starting with
+  why the trouble happens. No version number anywhere: the releases page
+  has it.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Umbrachyx — a database where an AI agent's writes wait for a person's approval</title>
+    <meta
+      name="description"
+      content="An in-memory database that keeps every change as history. Agents write only to their own branch; production does not change until a person reads the diff and approves it."
+    />
+
+    <link rel="icon" type="image/png" href="icon.png" />
+    <meta name="theme-color" content="#0f0f13" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Umbrachyx" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:url" content="https://meta-taro.github.io/umbrachyx/" />
+    <meta
+      property="og:title"
+      content="Umbrachyx — a database where an AI agent's writes wait for a person's approval"
+    />
+    <meta
+      property="og:description"
+      content="An in-memory database that keeps every change as history. Agents write only to their own branch; production does not change until a person reads the diff and approves it."
+    />
+    <meta property="og:image" content="https://meta-taro.github.io/umbrachyx/og.png" />
+    <meta
+      property="og:image:alt"
+      content="An AI agent changed your data. Nobody looked at what it wrote. — Umbrachyx"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="Umbrachyx — a database where an AI agent's writes wait for a person's approval"
+    />
+    <meta
+      name="twitter:description"
+      content="An in-memory database that keeps every change as history. Agents write only to their own branch; production does not change until a person reads the diff and approves it."
+    />
+    <meta name="twitter:image" content="https://meta-taro.github.io/umbrachyx/og.png" />
+
+    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="extra.css" />
+    <link rel="canonical" href="https://meta-taro.github.io/umbrachyx/" />
+    <link rel="alternate" hreflang="en" href="https://meta-taro.github.io/umbrachyx/" />
+    <link rel="alternate" hreflang="ja" href="https://meta-taro.github.io/umbrachyx/ja/" />
+    <link rel="alternate" hreflang="x-default" href="https://meta-taro.github.io/umbrachyx/" />
+    <meta name="robots" content="index,follow,max-image-preview:large" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="mark">
+          <img src="icon.png" alt="" />
+          <b>Umbrachyx</b>
+          <nav class="lang" aria-label="Language">
+            <span aria-current="true">English</span
+            ><a href="ja/" hreflang="ja" lang="ja">日本語</a>
+          </nav>
+        </div>
+
+        <h1>
+          An AI agent changed your data.<br /><span class="quiet"
+            >Nobody looked at what it wrote.</span
+          >
+        </h1>
+
+        <p class="lede">
+          An agent's writes go to a branch of its own first.<br />
+          <b>Production does not change until a person approves the diff.</b>
+        </p>
+
+        <div class="cta">
+          <a class="btn primary" href="#start">Start with Docker</a>
+          <a class="btn" href="https://github.com/meta-taro/umbrachyx">GitHub</a>
+          <span class="note">Linux / macOS / Windows・MIT</span>
+        </div>
+      </header>
+
+      <figure class="hero">
+        <img
+          src="hero.svg"
+          width="1200"
+          height="516"
+          alt="A terminal. The diff of an agent's change shows three players' potions; one line would give a player 50. Production still holds 0. The corrected change is then merged with the name of the person who approved it."
+        />
+        <figcaption>
+          <b>The fifty never reached a player.</b> A person saw it in the diff, while production
+          still held the old value. The commands and their output are shortened from
+          <a
+            href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/game-inventory.md"
+            >the game inventory example</a
+          >, which the tests run as written on every change; a commit's id differs on every run.
+        </figcaption>
+      </figure>
+
+      <section id="why">
+        <h2>WHY IT HAPPENS</h2>
+        <p class="problem">
+          A database holds <b>only the current value</b>, and a write is
+          <b>production the moment it lands</b>. Let an agent write → it is fast, there are many
+          of it, and it is sometimes wrong → <b>by the time someone notices, the old value and
+          the reason are gone.</b>
+        </p>
+        <p>
+          Narrowing an agent's permissions by configuration fails with one wrong setting.
+          <b>Here an agent has no way to write to production to begin with.</b> The token an
+          agent is given names its branch; it cannot write anywhere else, and it cannot
+          approve. What a hijacked agent was tested not to be able to do is
+          <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/agents.md"
+            >listed with the tests</a
+          >.
+        </p>
+      </section>
+
+      <section id="what">
+        <h2>WHAT IT IS</h2>
+        <p>
+          <b>Umbrachyx is an in-memory database that keeps every change as history.</b> Each
+          value knows when it changed, from what to what, who changed it, why, and who
+          approved the change; and the history can be branched, diffed, merged and undone, the
+          way git handles files. It speaks the Redis protocol, so existing clients work, and
+          agents connect through MCP.
+        </p>
+        <ul>
+          <li>
+            <b>A write is acknowledged only once it is synced to the log.</b> The tree and the
+            history are rebuilt from the log.
+          </li>
+          <li>
+            <b>Reads never wait for writes.</b> While writes keep coming, a read answers in tens
+            of microseconds.
+          </li>
+          <li>
+            <b>Deleting means destroying a key.</b> Values are encrypted under a key per subject
+            (a player, say). Destroy the key and the values can never be read again, while the
+            shape of the history stays.
+          </li>
+        </ul>
+      </section>
+
+      <section id="flow">
+        <h2>HOW A CHANGE REACHES PRODUCTION</h2>
+        <ul class="cards">
+          <li>
+            <h3>1. Hand over</h3>
+            <p>
+              A person gives the agent a token for one branch, some keys, a purpose and an
+              expiry.
+            </p>
+          </li>
+          <li>
+            <h3>2. Write</h3>
+            <p>The agent writes to its branch, with a reason. Production does not change.</p>
+          </li>
+          <li>
+            <h3>3. Look</h3>
+            <p>A person picks one from the list of changes waiting and reads its diff.</p>
+          </li>
+          <li>
+            <h3>4. Decide</h3>
+            <p>
+              Approved, it enters production with the approver's name. Rejected, it is kept
+              with the reason.
+            </p>
+          </li>
+        </ul>
+        <ul>
+          <li>
+            <b>What is approved is the diff the person saw.</b> If the agent wrote more after
+            that, the approval is refused. Nothing is merged unseen.
+          </li>
+          <li>
+            <b>If production moved first, it stops.</b> When both sides changed the same key,
+            nothing is written and the key is named. A conflict is never settled by guessing.
+          </li>
+          <li>
+            <b>A token that can approve cannot write</b>, and one that can write cannot approve.
+          </li>
+          <li>
+            The list, the diff and the approval can be a screen in a database viewer (<a
+              href="https://github.com/meta-taro/dbboard"
+              >dbboard</a
+            >
+            has a tab for it) or commands in a terminal.
+          </li>
+        </ul>
+      </section>
+
+      <section id="questions">
+        <h2>QUESTIONS IT CAN ANSWER</h2>
+        <ul>
+          <li><b>"An item disappeared."</b> When, and in which change?</li>
+          <li>
+            <b>"This account has more than it should."</b> Where did it come from, and who
+            approved it?
+          </li>
+          <li>
+            <b>"We gave everyone the wrong reward."</b> Take back that one change and keep what
+            came after.
+          </li>
+          <li>
+            <b>"Try the new event on real data."</b> On a branch, without touching production.
+          </li>
+          <li><b>"Delete my data."</b> Make that person's values unreadable for good.</li>
+        </ul>
+        <p>
+          Four walkthroughs, each run by the tests as written:
+          <a
+            href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/game-inventory.md"
+            >a game's inventory</a
+          >,
+          <a
+            href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/support-desk.md"
+            >a support desk</a
+          >,
+          <a
+            href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/staged-settings.md"
+            >settings rolled out in stages</a
+          >
+          and
+          <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/demo.md"
+            >five questions about a game's data</a
+          >.
+        </p>
+      </section>
+
+      <section id="numbers">
+        <h2>SPEED, WITH THE ROWS WHERE IT LOSES</h2>
+        <p>
+          Measured next to Valkey on the same AWS machine (EC2 <code>m6id.xlarge</code>, Tokyo,
+          its local NVMe disk). On both sides a write is synced to disk before it is
+          acknowledged (Valkey with <code>appendfsync always</code>). 32-byte values, a million
+          keys, synthetic data.
+        </p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>A second</th>
+                <th class="n">Umbrachyx</th>
+                <th class="n">Valkey</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Reads while 50 clients keep writing</td>
+                <td class="n"><b>23,941</b></td>
+                <td class="n">1,878</td>
+                <td>about 12.7× more</td>
+              </tr>
+              <tr>
+                <td>Reads, one client</td>
+                <td class="n"><b>54,466</b></td>
+                <td class="n">35,186</td>
+                <td>about 1.5× more</td>
+              </tr>
+              <tr>
+                <td>Synced writes, one client</td>
+                <td class="n"><b>8,813</b></td>
+                <td class="n">6,737</td>
+                <td>about 1.3× more</td>
+              </tr>
+              <tr>
+                <td>Reads, 50 clients</td>
+                <td class="n">156,740</td>
+                <td class="n">161,290</td>
+                <td>about the same</td>
+              </tr>
+              <tr class="behind">
+                <td>Synced writes, 64 clients</td>
+                <td class="n">35,689</td>
+                <td class="n"><b>95,329</b></td>
+                <td>about 2.7× fewer</td>
+              </tr>
+              <tr class="behind">
+                <td>Synced writes, 256 clients</td>
+                <td class="n">38,292</td>
+                <td class="n"><b>117,855</b></td>
+                <td>about 3.1× fewer</td>
+              </tr>
+              <tr class="behind">
+                <td>Synced writes, 50 clients sending 64 at a time</td>
+                <td class="n">72,908</td>
+                <td class="n"><b>611,434</b></td>
+                <td>about 8× fewer</td>
+              </tr>
+              <tr class="behind">
+                <td>Memory for each overwrite</td>
+                <td class="n">about 620 bytes</td>
+                <td class="n"><b>about 16 bytes</b></td>
+                <td>about 37× more</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small">
+          The speed rows are one run each, on 2026-11-13; the memory row is from three runs on
+          2026-11-12. <b>It is not a faster Valkey.</b> With many clients writing at once, and
+          in memory, it is clearly behind: that is what keeping all of the history costs. The
+          raw output, the machine and the steps are in
+          <a href="https://github.com/meta-taro/umbrachyx/tree/develop/bench/results"
+            >bench/results</a
+          >, and every table, with PostgreSQL and Dolt, is in the
+          <a href="https://github.com/meta-taro/umbrachyx#numbers-so-far">README</a>.
+        </p>
+
+        <h3>Robustness</h3>
+        <ul>
+          <li>
+            <b>The server killed in the middle of writes:</b> 1,100 times, with 2,202,833 writes
+            acknowledged; none lost.
+          </li>
+          <li>
+            <b>Simulated disks and power cuts:</b> three simulations of 10,000 seeds each
+            (writes torn part way, failed syncs, flipped bits, a clock that goes back), more
+            than 400,000 restarts in all; no acknowledged write went missing.
+          </li>
+          <li>All of these run in CI on Linux and Windows for every change.</li>
+        </ul>
+      </section>
+
+      <section id="start">
+        <h2>START</h2>
+        <p>
+          The server alone, in Docker, with its log on a volume. An image is published with
+          the first released version; until then, build it from a checkout.
+        </p>
+        <pre>
+$ git clone https://github.com/meta-taro/umbrachyx &amp;&amp; cd umbrachyx
+$ docker build -t umbrachyx .
+$ docker run -d --name umbrachyx -p 127.0.0.1:6380:6380 -v umbrachyx-data:/data umbrachyx
+$ valkey-cli -p 6380 set player/42/gems 100
+OK
+$ valkey-cli -p 6380 umbra.history app player/42/gems
+<span class="c"># the value, the commit's id, when, who, why and who approved, as JSON</span></pre
+        >
+        <ul>
+          <li>
+            <b>Publish the port to <code>127.0.0.1</code> only</b>, as above. Reads need no
+            token yet, and nothing on the connection is encrypted.
+          </li>
+          <li>
+            To try branches, diffs and approval from the command line, see
+            <a href="https://github.com/meta-taro/umbrachyx#quick-start"
+              >the five-minute quick start</a
+            >.
+          </li>
+          <li>
+            To give an agent a token and connect it, see
+            <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/agents.md"
+              >docs/agents.md</a
+            >.
+          </li>
+        </ul>
+      </section>
+
+      <section id="not-yet">
+        <h2>WHAT IT CANNOT DO YET</h2>
+        <ul>
+          <li>
+            <b>It runs on one machine.</b> Replication (read-only followers) is being built;
+            machines cannot be connected yet.
+          </li>
+          <li>
+            <b>Everything is held in memory.</b> History grows with every write, and nothing
+            moves old history to disk or limits how long it is kept. Out of memory, the server
+            stops and says why; what it acknowledged is kept.
+          </li>
+          <li>
+            <b>It is not ready to be used over a network.</b> Reads need no token and there is
+            no TLS. Use it on one machine, or inside a network you trust.
+          </li>
+          <li>
+            <b>There is no backup tool.</b> For now, stop the server and copy the log and the
+            key file together.
+          </li>
+          <li>
+            <b>Keys and values only.</b> No range reads, secondary indexes, aggregates or SQL.
+          </li>
+          <li>
+            <b>Many clients writing at once</b> get a fraction of what Valkey gives them, as
+            the table shows.
+          </li>
+          <li>
+            <b>Power cuts have only been simulated.</b> Cutting the power of real hardware, and
+            runs that last for days, are still to come.
+          </li>
+          <li>
+            <b>Approvals that need two people</b>, and rules checked at approval (types,
+            ranges), do not exist yet.
+          </li>
+        </ul>
+      </section>
+
+      <footer>
+        MIT ·
+        <a href="https://github.com/meta-taro/umbrachyx">meta-taro/umbrachyx</a> · The name is
+        from <i>umbra</i> (shadow) and <i>tachyon</i> (the particle supposed to outrun light):
+        the current value is the light, and its history is the shadow already there before the
+        light arrives.
+      </footer>
+    </div>
+  </body>
+</html>

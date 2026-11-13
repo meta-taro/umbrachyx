@@ -1,13 +1,18 @@
 # Umbrachyx
 
-**An in-memory database that keeps every change as history.**
+**An in-memory database that keeps every change as history, where an AI
+agent's writes wait on a branch until a person approves them.**
 
-- **Every change is kept**, with who made it and why, to branch, diff,
-  merge and undo: per key and per cell, the way git keeps files.
 - **Agents write only to their own branch.** An agent's capability token
-  names its branch; nothing it holds can write to `main`. A person reads
-  the diff and merges it. [`docs/agents.md`](docs/agents.md) lists what a
-  hijacked agent was tested not to be able to do.
+  names its branch; nothing it holds can write to `main` or approve a
+  change. [`docs/agents.md`](docs/agents.md) lists what a hijacked agent
+  was tested not to be able to do.
+- **A person sees a list of changes waiting, reads the diff, and approves
+  or rejects.** What is approved is the diff that person saw: anything
+  the agent wrote after it is refused, not merged unseen.
+- **Every change is kept**, with who made it, why, and who approved it,
+  to branch, diff, merge and undo: per key and per cell, the way git
+  keeps files.
 - **Reads never wait for writes.** While 50 clients write durably, a `GET`
   answers in tens of microseconds, about 19 times sooner than Valkey with
   every write synced, on the machine releases are measured on.
@@ -16,14 +21,47 @@
   more than 400,000 simulated restarts after power cuts and disk faults:
   not one acknowledged write went missing.
 
-It is not a faster Valkey. One client reads and writes about as fast as
-with Valkey, but 50 readers get about 1.5 times fewer answers, many
-writers at once 3.6 to 4.2 times fewer, writes sent 64 at a time 15 times
-fewer, and keeping history costs far more memory (about 620 bytes a
-write against 16). All of these are in
-[the same table](#numbers-so-far) as the rows where Umbrachyx is ahead,
-measured on AWS against Valkey, PostgreSQL and Dolt, with the raw output
-published.
+It is not a faster Valkey. In the latest runs on the release machine, one
+client reads about 1.5 times as many values a second as with Valkey and
+writes durably about 1.3 times as many, and 50 readers get about the
+same. Many writers at once get 2.7 to 3.1 times fewer writes through,
+writes sent 64 at a time about 8 times fewer, and keeping history costs
+far more memory (about 620 bytes a write against 16). All of these are
+in [the same tables](#numbers-so-far) as the rows where Umbrachyx is
+ahead, measured on AWS against Valkey, PostgreSQL and Dolt, with the raw
+output published. The latest runs are one run each; the table of three
+runs is from before two changes and is measured again with the release.
+
+The same in one page, in English and Japanese:
+<https://meta-taro.github.io/umbrachyx/>.
+
+## How a change gets in
+
+```
+agent ──writes──▶ its own branch ──waits──▶ a person: list ▶ diff ▶ approve ──▶ main
+                                                              └──▶ reject (kept, with why)
+```
+
+1. **A person issues the agent a token** for one branch, some keys and
+   columns, a purpose and an expiry (`umbrachyx token issue`). The agent
+   reaches the database through MCP (`umbrachyx mcp`) or the Redis
+   protocol with `AUTH <token>`.
+2. **The agent commits to its branch**, each commit with a reason.
+   Production (`main`) does not change.
+3. **The person asks what is waiting.** `UMBRA.PENDING` lists each
+   change: who wrote it and why, how many keys it touches in which
+   table, and whether it would conflict with what `main` did meanwhile.
+   `UMBRA.DIFF` shows it key by key.
+4. **The person approves or rejects**, with a token that may approve and
+   cannot write (`UMBRA.APPROVE`, `UMBRA.REJECT`). An approval is a
+   merge into `main` that names the approver; a rejection is kept with
+   its reason. A conflict merges nothing and names the keys.
+
+A database viewer can do steps 3 and 4 as a screen:
+[dbboard](https://github.com/meta-taro/dbboard) has a tab for it. From
+the command line they are `umbrachyx diff` and `umbrachyx merge
+--approved-by`, as in the quick start below and in
+[`docs/examples/`](docs/examples/).
 
 ## Quick start
 
@@ -299,11 +337,12 @@ cache cannot answer:
 
 [dbboard](https://github.com/meta-taro/dbboard) is a desktop SQL editor and
 viewer from the same author. The two are separate products in separate
-repositories. dbboard will reach Umbrachyx through an adapter, and its history
-views (a row's history, a cell-level diff, who last changed a row) are being
-designed so that they work against Umbrachyx as well. The adapter reads them
-from the server, with the `UMBRA.` commands described in
-[`docs/decisions.md`](docs/decisions.md).
+repositories. dbboard connects to `umbrachyx serve` as it would to a Redis
+server and reads the history with the `UMBRA.` commands described in
+[`docs/decisions.md`](docs/decisions.md): a key's history, a diff between
+branches or commits, and the list of changes waiting, with approve and
+reject. Nothing in those commands is specific to dbboard; any client that
+speaks the Redis protocol can send them.
 
 ## Working on it
 

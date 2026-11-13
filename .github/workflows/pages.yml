@@ -1,0 +1,59 @@
+# Publishes the landing page in site/ to GitHub Pages.
+#
+# The page is plain files: nothing is built. It goes out when site/ changes
+# on the integration branch, or when asked for by hand. Only first-party
+# actions, and only the permissions Pages needs.
+name: pages
+
+on:
+  push:
+    branches: [develop]
+    paths: ['site/**', '.github/workflows/pages.yml']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Every local link and picture a page names has to be in the folder:
+      # a page that points at a missing file still deploys, and is broken
+      # only for whoever opens it.
+      - name: Check that what the pages name is there
+        run: |
+          missing=0
+          for page in site/index.html site/ja/index.html; do
+            dir="$(dirname "$page")"
+            for ref in $(grep -oE '(href|src)="[^"#]+"' "$page" | sed -E 's/^(href|src)="//; s/"$//' | grep -vE '^(https?:|mailto:)'); do
+              target="$dir/$ref"
+              [ -d "$target" ] && target="$target/index.html"
+              if [ ! -e "$target" ]; then
+                echo "$page names $ref, which is not there"
+                missing=1
+              fi
+            done
+          done
+          exit "$missing"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

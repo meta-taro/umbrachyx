@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Umbrachyx">
+  <rect width="64" height="64" rx="14" fill="#1c1c22"/>
+  <circle cx="27" cy="34" r="15" fill="#5b5bd6" opacity=".55"/>
+  <circle cx="37" cy="30" r="15" fill="#f4f4f6"/>
+</svg>

@@ -1,0 +1,42 @@
+/* What is particular to this product's page; the shared look is style.css. */
+
+/* Numbers: the rows where it is behind sit in the same table as the rest. */
+.table-scroll {
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 16px;
+  font-size: 15px;
+}
+th,
+td {
+  text-align: left;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+th {
+  color: var(--fg-3);
+  font-weight: 600;
+  font-size: 13px;
+}
+td.n,
+th.n {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+tr.behind td:first-child {
+  color: var(--fg-2);
+}
+.small {
+  color: var(--fg-3);
+  font-size: 14px;
+}
+
+/* The notes under the four steps keep their distance from the cards. */
+.cards + ul {
+  margin-top: 24px;
+}

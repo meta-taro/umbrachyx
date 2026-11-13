@@ -1,0 +1,392 @@
+<!doctype html>
+<!--
+  順番がこのページの中身：名乗り、困りごと、どう消すか、入手口、実物 1 枚。
+  そのあとに本文で、最初の節は「なぜそれが起きるのか」。版数はどこにも書かない
+  （リリースのページが持つ）。
+-->
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Umbrachyx — AI エージェントの書き込みが、人の承認まで本番に入らないデータベース</title>
+    <meta
+      name="description"
+      content="すべての変更を履歴として持つインメモリのデータベース。エージェントは自分の枝にだけ書き、人が差分を読んで承認するまで本番は変わりません。"
+    />
+
+    <link rel="icon" type="image/png" href="../icon.png" />
+    <meta name="theme-color" content="#0f0f13" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Umbrachyx" />
+    <meta property="og:locale" content="ja_JP" />
+    <meta property="og:url" content="https://meta-taro.github.io/umbrachyx/ja/" />
+    <meta
+      property="og:title"
+      content="Umbrachyx — AI エージェントの書き込みが、人の承認まで本番に入らないデータベース"
+    />
+    <meta
+      property="og:description"
+      content="すべての変更を履歴として持つインメモリのデータベース。エージェントは自分の枝にだけ書き、人が差分を読んで承認するまで本番は変わりません。"
+    />
+    <meta property="og:image" content="https://meta-taro.github.io/umbrachyx/ja/og.png" />
+    <meta
+      property="og:image:alt"
+      content="AI がデータを書き換えた。誰も、その中身を見ていない。 — Umbrachyx"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="Umbrachyx — AI エージェントの書き込みが、人の承認まで本番に入らないデータベース"
+    />
+    <meta
+      name="twitter:description"
+      content="すべての変更を履歴として持つインメモリのデータベース。エージェントは自分の枝にだけ書き、人が差分を読んで承認するまで本番は変わりません。"
+    />
+    <meta name="twitter:image" content="https://meta-taro.github.io/umbrachyx/ja/og.png" />
+
+    <link rel="stylesheet" href="../style.css" />
+    <link rel="stylesheet" href="../extra.css" />
+    <link rel="canonical" href="https://meta-taro.github.io/umbrachyx/ja/" />
+    <link rel="alternate" hreflang="ja" href="https://meta-taro.github.io/umbrachyx/ja/" />
+    <link rel="alternate" hreflang="en" href="https://meta-taro.github.io/umbrachyx/" />
+    <link rel="alternate" hreflang="x-default" href="https://meta-taro.github.io/umbrachyx/" />
+    <meta name="robots" content="index,follow,max-image-preview:large" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="mark">
+          <img src="../icon.png" alt="" />
+          <b>Umbrachyx</b>
+          <nav class="lang" aria-label="言語">
+            <span aria-current="true">日本語</span
+            ><a href="../" hreflang="en" lang="en">English</a>
+          </nav>
+        </div>
+
+        <h1>
+          AI がデータを書き換えた。<br /><span class="quiet">誰も、その中身を見ていない。</span>
+        </h1>
+
+        <p class="lede">
+          エージェントの書き込みは、まず自分の枝に入ります。<br />
+          <b>人が差分を読んで承認するまで、本番は変わりません。</b>
+        </p>
+
+        <div class="cta">
+          <a class="btn primary" href="#start">Docker で始める</a>
+          <a class="btn" href="https://github.com/meta-taro/umbrachyx">GitHub</a>
+          <span class="note">Linux / macOS / Windows・MIT</span>
+        </div>
+      </header>
+
+      <figure class="hero">
+        <img
+          src="hero.svg"
+          width="1200"
+          height="516"
+          alt="端末の画面。エージェントの変更の差分に 3 人ぶんのポーションの行があり、1 人だけ 50 個になっている。本番はまだ 0 のまま。直した変更が、承認した人の名前つきで統合される。"
+        />
+        <figcaption>
+          <b>50 個は、プレイヤーに届く前に止まりました。</b
+          >人が差分で気づいたとき、本番はまだ元の値のままでした。コマンドと出力は<a
+            href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/game-inventory.md"
+            >事例「ゲームの所持品」</a
+          >を縮めたものです。事例は、変更のたびに試験が書いてあるとおりに実行しています（確定の
+          id は実行ごとに変わります）。
+        </figcaption>
+      </figure>
+
+      <section id="why">
+        <h2>なぜそれが起きるのか</h2>
+        <p class="problem">
+          データベースは<b>「いまの値」だけ</b>を持ち、書き込みは<b>その場で本番</b>になる。
+          エージェントに書かせる → 速くて、数が多くて、ときどき間違える →
+          <b>気づいたときには、元の値も理由も残っていない。</b>
+        </p>
+        <p>
+          権限を設定で狭める方法は、設定を 1 つ誤れば抜けます。
+          <b>ここでは、エージェントは本番に書く口をそもそも持ちません。</b>
+          エージェントに渡すトークンには枝の名前が入っていて、その枝のほかには書けず、承認もできません。
+          乗っ取られたエージェントに何ができないかは、<a
+            href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/agents.md"
+            >試験つきの一覧</a
+          >にしてあります。
+        </p>
+      </section>
+
+      <section id="what">
+        <h2>Umbrachyx とは</h2>
+        <p>
+          <b>Umbrachyx は、すべての変更を履歴として持つインメモリのデータベースです。</b>
+          値の 1 つ 1
+          つが、いつ・何から何へ・誰が・なぜ・誰が承認したかを持ちます。その履歴は、git
+          がファイルを扱うように、枝を分け、差分を見て、統合し、取り消せます。Redis
+          のプロトコルで話すので、いまあるクライアントがそのまま使えます。エージェントは MCP
+          でつながります。
+        </p>
+        <ul>
+          <li>
+            <b>書き込みは、ログに同期できてから確定を返します。</b
+            >木も履歴も、ログから作り直せます。
+          </li>
+          <li>
+            <b>読み取りは、書き込みを待ちません。</b
+            >書き込みが続いている間も、読み取りは数十マイクロ秒で返ります。
+          </li>
+          <li>
+            <b>消すときは、鍵を壊します。</b
+            >値は主体（たとえばプレイヤー）ごとの鍵で暗号化してあります。鍵を壊すと、履歴の形は残ったまま、中身は二度と読めません。
+          </li>
+        </ul>
+      </section>
+
+      <section id="flow">
+        <h2>変更が本番に入るまで</h2>
+        <ul class="cards">
+          <li>
+            <h3>1. 渡す</h3>
+            <p>人が、枝・キーの範囲・目的・期限を決めたトークンを、エージェントに渡す。</p>
+          </li>
+          <li>
+            <h3>2. 書く</h3>
+            <p>エージェントは自分の枝に、理由を付けて書く。本番は変わらない。</p>
+          </li>
+          <li>
+            <h3>3. 見る</h3>
+            <p>人が「待っている変更」の一覧から 1 つ選び、差分を読む。</p>
+          </li>
+          <li>
+            <h3>4. 決める</h3>
+            <p>承認すれば本番に入り、承認した人の名前が残る。却下も、理由つきで残る。</p>
+          </li>
+        </ul>
+        <ul>
+          <li>
+            <b>承認されるのは、人が見た差分です。</b
+            >見たあとにエージェントが書き足していたら、承認は断られます。見ていない変更が入ることはありません。
+          </li>
+          <li>
+            <b>本番が先に動いていたら、止まります。</b
+            >同じキーを両方が変えていれば、何も書かずに、そのキーを知らせます。どちらを採るかを機械が決めることはしません。
+          </li>
+          <li><b>承認できるトークンは、書けません。</b>書けるトークンは、承認できません。</li>
+          <li>
+            一覧・差分・承認は、データベースの閲覧ツールの画面でできます（<a
+              href="https://github.com/meta-taro/dbboard"
+              >dbboard</a
+            >
+            に承認のタブがあります）。端末のコマンドでも同じことができます。
+          </li>
+        </ul>
+      </section>
+
+      <section id="questions">
+        <h2>答えられるようになる問い</h2>
+        <ul>
+          <li><b>「アイテムが消えた」</b> —— いつ、どの変更で。</li>
+          <li><b>「この口座の残高は多すぎる」</b> —— どこから来たのか、誰が承認したのか。</li>
+          <li>
+            <b>「全員に間違った報酬を配った」</b> ——
+            その変更だけを取り消す。あとの変更は残す。
+          </li>
+          <li>
+            <b>「本番のデータで新しい施策を試したい」</b> —— 枝の上で。本番には触れない。
+          </li>
+          <li><b>「私のデータを消してください」</b> —— その人の値を、二度と読めなくする。</li>
+        </ul>
+        <p>
+          手順つきの見本が 4 つあります（英語）：<a
+            href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/game-inventory.md"
+            >ゲームの所持品</a
+          >、<a
+            href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/support-desk.md"
+            >サポート窓口</a
+          >、<a
+            href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/staged-settings.md"
+            >設定の段階的な反映</a
+          >、<a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/demo.md"
+            >ゲームのデータへの 5 つの問い</a
+          >。どれも、書いてあるコマンドを試験がそのまま実行しています。
+        </p>
+      </section>
+
+      <section id="numbers">
+        <h2>速さ —— 負けた行も同じ表に</h2>
+        <p>
+          AWS の同じ機械（EC2 <code>m6id.xlarge</code>・東京・ローカル NVMe）で、Valkey
+          と並べて測りました。どちらも、書き込みをディスクに同期してから確定を返す設定です（Valkey
+          は <code>appendfsync always</code>）。値は 32 バイト、キーは 100
+          万個、データは合成です。
+        </p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>1 秒あたり</th>
+                <th class="n">Umbrachyx</th>
+                <th class="n">Valkey</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>50 クライアントが書き続けている間の読み取り</td>
+                <td class="n"><b>23,941</b></td>
+                <td class="n">1,878</td>
+                <td>約 12.7 倍</td>
+              </tr>
+              <tr>
+                <td>読み取り・1 クライアント</td>
+                <td class="n"><b>54,466</b></td>
+                <td class="n">35,186</td>
+                <td>約 1.5 倍</td>
+              </tr>
+              <tr>
+                <td>同期つきの書き込み・1 クライアント</td>
+                <td class="n"><b>8,813</b></td>
+                <td class="n">6,737</td>
+                <td>約 1.3 倍</td>
+              </tr>
+              <tr>
+                <td>読み取り・50 クライアント</td>
+                <td class="n">156,740</td>
+                <td class="n">161,290</td>
+                <td>ほぼ同じ</td>
+              </tr>
+              <tr class="behind">
+                <td>同期つきの書き込み・64 クライアント</td>
+                <td class="n">35,689</td>
+                <td class="n"><b>95,329</b></td>
+                <td>約 2.7 分の 1</td>
+              </tr>
+              <tr class="behind">
+                <td>同期つきの書き込み・256 クライアント</td>
+                <td class="n">38,292</td>
+                <td class="n"><b>117,855</b></td>
+                <td>約 3.1 分の 1</td>
+              </tr>
+              <tr class="behind">
+                <td>同期つきの書き込み・50 クライアントが 64 個ずつ送る</td>
+                <td class="n">72,908</td>
+                <td class="n"><b>611,434</b></td>
+                <td>約 8 分の 1</td>
+              </tr>
+              <tr class="behind">
+                <td>上書き 1 回あたりのメモリ</td>
+                <td class="n">約 620 バイト</td>
+                <td class="n"><b>約 16 バイト</b></td>
+                <td>約 37 倍使う</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small">
+          速さの行は 2026-11-13 の測定で、1 回ずつです。メモリの行は 2026-11-12 の 3
+          回の測定からです。<b>速い Valkey ではありません。</b
+          >多くのクライアントが同時に書く使い方と、メモリの量では、はっきり負けています。履歴を全部持つための費用です。生の出力・機械・手順は
+          <a href="https://github.com/meta-taro/umbrachyx/tree/develop/bench/results"
+            >bench/results</a
+          >
+          に、PostgreSQL・Dolt との比較を含む全部の表は
+          <a href="https://github.com/meta-taro/umbrachyx#numbers-so-far">README</a>
+          にあります。
+        </p>
+
+        <h3>壊れにくさ</h3>
+        <ul>
+          <li>
+            <b>書き込みの最中にサーバーを強制終了：</b>1,100 回。確定を返した 2,202,833
+            件の書き込みのうち、失われたものは 0。
+          </li>
+          <li>
+            <b>ディスクと停電のシミュレーション：</b>3 種類を 1
+            万通りずつ（書きかけで切れる、同期に失敗する、ビットが化ける、時計が戻る）。再起動は合わせて
+            40 万回以上で、確定済みの書き込みが消えた例は 0。
+          </li>
+          <li>これらは変更のたびに、Linux と Windows の CI で全部流しています。</li>
+        </ul>
+      </section>
+
+      <section id="start">
+        <h2>始め方</h2>
+        <p>
+          サーバーだけを Docker
+          で立てます。ログはボリュームに置かれます。配布のイメージは、最初の版と一緒に出します。それまでは、取ってきたソースから組み立てます。
+        </p>
+        <pre>
+$ git clone https://github.com/meta-taro/umbrachyx &amp;&amp; cd umbrachyx
+$ docker build -t umbrachyx .
+$ docker run -d --name umbrachyx -p 127.0.0.1:6380:6380 -v umbrachyx-data:/data umbrachyx
+$ valkey-cli -p 6380 set player/42/gems 100
+OK
+$ valkey-cli -p 6380 umbra.history app player/42/gems
+<span class="c"># 値・確定の id・時刻・誰が・なぜ・誰が承認したか が JSON で返る</span></pre
+        >
+        <ul>
+          <li>
+            <b>ポートは <code>127.0.0.1</code> にだけ公開してください</b
+            >（上のとおり）。読み取りにはまだトークンが要らず、通信も暗号化されていません。
+          </li>
+          <li>
+            枝・差分・承認をコマンドで試すなら、<a
+              href="https://github.com/meta-taro/umbrachyx#quick-start"
+              >README の 5 分の手順</a
+            >へ（英語）。
+          </li>
+          <li>
+            エージェントにトークンを渡してつなぐ手順は
+            <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/agents.md"
+              >docs/agents.md</a
+            >
+            へ（英語）。
+          </li>
+        </ul>
+      </section>
+
+      <section id="not-yet">
+        <h2>まだ出来ていないこと</h2>
+        <ul>
+          <li>
+            <b>1 台で動きます。</b
+            >複製（読み取り専用の台）は作っている途中で、まだ台どうしをつなげません。
+          </li>
+          <li>
+            <b>全部をメモリに持ちます。</b
+            >履歴は書くほど増えます。古い履歴をディスクへ降ろす仕組みも、持つ期間を決める仕組みも、まだありません。メモリが足りなくなると、理由を言って止まります（確定済みの書き込みは残ります）。
+          </li>
+          <li>
+            <b>ネットワーク越しに使う準備ができていません。</b
+            >読み取りにトークンが要らず、TLS
+            もありません。同じ機械の中か、信頼できるネットワークの中だけで使ってください。
+          </li>
+          <li>
+            <b>バックアップの道具がありません。</b
+            >いまは、サーバーを止めてから、ログと鍵のファイルを一緒に写します。
+          </li>
+          <li><b>キーと値だけです。</b>範囲での読み取り、二次索引、集計、SQL はありません。</li>
+          <li>
+            <b>多くのクライアントが同時に書く速さ</b>は、上の表のとおり Valkey の数分の 1 です。
+          </li>
+          <li>
+            <b>停電は、まだシミュレーションでしか試していません。</b
+            >実機の電源を切る試験と、何日も動かし続ける試験はこれからです。
+          </li>
+          <li>
+            <b>承認に 2 人が要る決まり</b
+            >や、承認のときに型・範囲を確かめる決まりは、まだありません。
+          </li>
+        </ul>
+      </section>
+
+      <footer>
+        MIT ·
+        <a href="https://github.com/meta-taro/umbrachyx">meta-taro/umbrachyx</a> · 名前は
+        umbra（影）と
+        tachyon（光より速いとされる粒子）から。いまの値が光で、履歴は、光が届く前からそこにある影です。
+      </footer>
+    </div>
+  </body>
+</html>
