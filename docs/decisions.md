@@ -547,6 +547,22 @@ checker to hold the shared secret that mints tokens.
   **Look again if** memory per key matters more than writes from many
   clients, or if another common machine shows the laptop's loss over
   the Redis protocol.
+- **The `aes` crate is held at 0.9.2** (measured, taken). From 0.9.3 it
+  uses 256- and 512-bit registers wherever the processor has them, and
+  copies its fifteen round keys into them at the start of every call.
+  That pays for itself over many blocks; a value here is a few bytes,
+  one or two blocks, and sealing or opening it makes several calls. On
+  the release machine, whose processor has AVX-512, a profile had about
+  a sixth of the serving threads' time there while reading. With the
+  crate at 0.9.2, measured in turn with 0.9.4 on that machine
+  ([`bench/results/2026-11-13-aws-m6id.xlarge-aes/`](../bench/results/2026-11-13-aws-m6id.xlarge-aes/)),
+  `GET`s from 50 clients sending 16 at a time went from 647,668 a second
+  to 825,423, and writes went up 2 to 6%. 0.9.3 and 0.9.4 change speed
+  and size only, by their changelog, and fix nothing about safety; the
+  exact version is in `Cargo.toml` so that an update does not bring the
+  cost back unseen. **Look again** at every release of the crate: if the
+  wide registers become something a caller can decline, or stop costing
+  short messages, the hold goes.
 - **A lookup in a node compares numbers before it compares keys**
   (measured, taken). The keys of one node are neighbours and start
   alike: with keys like `key:000000123456`, every comparison of a binary

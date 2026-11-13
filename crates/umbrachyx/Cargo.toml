@@ -16,7 +16,8 @@ aes-siv = { version = "0.8.0", default-features = false, features = ["alloc"] }
 # Held at 0.9.2, which aes-siv would otherwise take newer. From 0.9.3 the
 # cipher uses 512-bit registers wherever the processor has them, and sets
 # them up again for every call: for values of a few bytes that costs more
-# than the encryption. See docs/decisions.md, "The store".
+# than the encryption. Measured: bench/results/2026-11-13-aws-m6id.xlarge-aes/.
+# See docs/decisions.md, "The store".
 aes = { version = "=0.9.2", default-features = false }
 biscuit-auth = { version = "6.0.0", default-features = false, features = ["datalog-macro"] }
 blake3 = "1.8.7"

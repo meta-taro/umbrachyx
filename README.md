@@ -162,6 +162,10 @@ machine on 2026-11-13, beside Valkey that day
 | Durable writes, 50 clients sending 64 at a time | 72,908 | **611,434** |
 | `GET`s, 50 clients sending 16 at a time | 677,048 | **1,247,661** |
 
+Since that run, holding the `aes` crate at 0.9.2 took `GET`s sent 16 at
+a time from about 650,000 to about 825,000 a second on the same machine
+([`bench/results/2026-11-13-aws-m6id.xlarge-aes/`](bench/results/2026-11-13-aws-m6id.xlarge-aes/)).
+
 The 50-client `GET` row is not steady: about one run in five gives
 110,000 to 145,000, when the benchmark's client lands on the core a
 serving thread is on

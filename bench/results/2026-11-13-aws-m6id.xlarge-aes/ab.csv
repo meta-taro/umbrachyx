@@ -1,0 +1,49 @@
+side,clients,test,rps,p50_latency_ms,p99_latency_ms
+old,"50 clients, 64 at a time",SET,69969.21,44.639,57.215
+old,"64 clients",SET,39161.94,1.431,1.831
+old,"256 clients",SET,47326.08,4.495,5.727
+old,"1 client",SET,8975.86,0.111,0.151
+old,"1 client",GET,54141.85,0.023,0.031
+old,"50 clients",GET,130208.34,0.175,0.343
+old,"50 clients, 16 at a time",GET,662032.44,1.087,1.503
+old,"resident KiB after 3.5 million SETs",,2225360,,
+new,"50 clients, 64 at a time",SET,72714.05,43.007,54.303
+new,"64 clients",SET,39729.84,1.415,1.751
+new,"256 clients",SET,46685.34,4.551,5.815
+new,"1 client",SET,9084.30,0.111,0.151
+new,"1 client",GET,55648.30,0.015,0.031
+new,"50 clients",GET,161550.89,0.159,0.279
+new,"50 clients, 16 at a time",GET,825423.00,0.863,1.223
+new,"resident KiB after 3.5 million SETs",,2225196,,
+old,"50 clients, 64 at a time",SET,69671.84,45.151,57.119
+old,"64 clients",SET,38543.07,1.471,1.815
+old,"256 clients",SET,43187.21,5.047,6.391
+old,"1 client",SET,8911.07,0.111,0.151
+old,"1 client",GET,53705.69,0.023,0.031
+old,"50 clients",GET,166666.66,0.151,0.247
+old,"50 clients, 16 at a time",GET,647668.38,1.111,1.543
+old,"resident KiB after 3.5 million SETs",,2224908,,
+new,"50 clients, 64 at a time",SET,71347.03,43.647,55.615
+new,"64 clients",SET,40387.72,1.391,1.711
+new,"256 clients",SET,46425.25,4.647,5.855
+new,"1 client",SET,9189.49,0.103,0.143
+new,"1 client",GET,55005.50,0.015,0.031
+new,"50 clients",GET,113895.21,0.231,0.311
+new,"50 clients, 16 at a time",GET,805801.75,0.879,1.263
+new,"resident KiB after 3.5 million SETs",,2224760,,
+old,"50 clients, 64 at a time",SET,69244.88,45.183,57.727
+old,"64 clients",SET,38402.46,1.471,1.823
+old,"256 clients",SET,43956.04,4.919,6.231
+old,"1 client",SET,8949.35,0.111,0.151
+old,"1 client",GET,53908.36,0.023,0.031
+old,"50 clients",GET,152439.02,0.159,0.311
+old,"50 clients, 16 at a time",GET,640615.00,1.135,1.567
+old,"resident KiB after 3.5 million SETs",,2224656,,
+new,"50 clients, 64 at a time",SET,71426.02,44.063,55.679
+new,"64 clients",SET,39888.31,1.415,1.743
+new,"256 clients",SET,46630.91,4.599,5.815
+new,"1 client",SET,9062.90,0.111,0.151
+new,"1 client",GET,55803.57,0.015,0.031
+new,"50 clients",GET,114090.13,0.231,0.327
+new,"50 clients, 16 at a time",GET,830220.06,0.855,1.231
+new,"resident KiB after 3.5 million SETs",,2224736,,
