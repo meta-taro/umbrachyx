@@ -56,6 +56,19 @@ const READ_BUDGET: usize = 1024 * 1024;
 /// more and took processor time from the thread that writes.
 const STAY_AWAKE: Duration = Duration::from_micros(50);
 
+/// How long a serving thread stays awake on a machine with this many
+/// processors. With one, the thread that looks holds the only processor
+/// the client could use to send its next request: pinned to one
+/// processor, one client got about 90,000 `GET`s a second from a thread
+/// that looked first and 130,000 or more from one that slept at once.
+fn stay_awake_with(processors: usize) -> Duration {
+    if processors > 1 {
+        STAY_AWAKE
+    } else {
+        Duration::ZERO
+    }
+}
+
 /// Whether a socket that gave less than was asked for can be left without
 /// reading it again until it says it would block. On Unix every arrival is
 /// a new event, so the second read, one system call a request, is saved.
@@ -142,6 +155,7 @@ pub(super) fn spawn(server: Server, number: usize) -> io::Result<Handle> {
         awaiting: HashSet::new(),
         next_token: 0,
         chunk: vec![0; READ_CHUNK],
+        stay_awake: stay_awake_with(thread::available_parallelism().map_or(1, usize::from)),
     };
     thread::Builder::new()
         .name(format!("resp loop {number}"))
@@ -202,6 +216,8 @@ struct Loop {
     next_token: usize,
     /// What a read fills, shared by every connection.
     chunk: Vec<u8>,
+    /// How long to keep looking for more before sleeping.
+    stay_awake: Duration,
 }
 
 impl Loop {
@@ -236,14 +252,14 @@ impl Loop {
     }
 
     /// Fills `events` with what the sockets have to say. With work left
-    /// over it only looks; otherwise it keeps looking for `STAY_AWAKE`
+    /// over it only looks; otherwise it keeps looking for `stay_awake`
     /// and then sleeps until something arrives.
     fn wait(&mut self, events: &mut Events, has_work: bool) -> io::Result<()> {
         if has_work {
             return self.poll.poll(events, Some(Duration::ZERO));
         }
         let idle_since = Instant::now();
-        while idle_since.elapsed() < STAY_AWAKE {
+        while idle_since.elapsed() < self.stay_awake {
             self.poll.poll(events, Some(Duration::ZERO))?;
             if !events.is_empty() {
                 return Ok(());
@@ -481,5 +497,17 @@ impl Connection {
         self.out.clear();
         self.sent = 0;
         Sent::All
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_thread_stays_awake_only_where_another_processor_can_run_the_client() {
+        assert_eq!(stay_awake_with(1), Duration::ZERO);
+        assert_eq!(stay_awake_with(2), STAY_AWAKE);
+        assert_eq!(stay_awake_with(64), STAY_AWAKE);
     }
 }

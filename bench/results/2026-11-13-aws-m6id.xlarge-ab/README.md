@@ -20,7 +20,7 @@ before each set of rows. `machine.txt` is from the machine.
 |---|---|---|
 | `leaf.csv` | `bench/ab.sh old new 3`: the code before (`old`) and the leaf that shares its keys (`new`), in turn, three rounds | `7343187` and `94801b0` |
 | `threads.csv` | The code before with 4, 2 and 1 serving threads, each staying awake 0, 20, 50 or 200 µs before it sleeps, spinning (`n`) or giving the processor away between looks (`y`); two rounds. The wait was set by an environment variable in a build made only for this | `32c9ca1`, on the branch `feature/spin-before-sleep` |
-| `candidate.csv` | `bench/ab.sh old new 3`: the code before and both changes together | `7343187` and `ad00761` |
+| `candidate.csv` | `bench/ab.sh old new 3`: the code before and both changes together | `7343187` and `ad00761` (the same change as `f5eaf3c` on `develop`) |
 | `candidate-umbrachyx.csv`, `candidate-valkey.csv`, `candidate-connections.csv` | `bench/umbrachyx.sh`, `bench/valkey.sh` and `bench/connections.sh` once each, with both changes | `ad00761` |
 | `get-variation.txt` | `GET`s from 50 clients run again and again against one server, three servers of each of two builds (`cand`: both changes; `spin`: the old leaf, 2 threads, 50 µs), with the processor each thread was last on | `ad00761`, `32c9ca1` |
 
@@ -85,8 +85,13 @@ What got worse, or is not settled:
 - **The slowest percent with many connections is slower than with four
   threads**: 52 ms at 5,000 connections and 120 ms at 10,000, where the
   release run of the day before had 31 ms and 74 ms.
-- **`GET`s sent 16 at a time fell about a tenth**, from about 735,000 to
-  between 625,000 and 800,000 depending on the run.
+- **`GET`s sent 16 at a time are slower after many writes.** About
+  625,000 a second in all three rounds of `candidate.csv`, which reads
+  after 3.5 million writes, against about 735,000 before the changes;
+  760,000 to 805,000 in `get-variation.txt`, which reads after about
+  1.1 million. With two serving threads this row is held back by the
+  server, so it shows what a read costs; why more writes make a read
+  cost more has not been looked into.
 
 ## How the run went
 

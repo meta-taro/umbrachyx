@@ -156,6 +156,7 @@ machine on 2026-11-13, beside Valkey that day
 | `GET`s, one client | **54,466** | 35,186 |
 | Durable writes, one client | **8,813** | 6,737 |
 | `GET`s, 50 clients | 156,740 | 161,290 |
+| Durable writes, 8 clients | 23,480 | **25,602** |
 | Durable writes, 64 clients | 35,689 | **95,329** |
 | Durable writes, 256 clients | 38,292 | **117,855** |
 | Durable writes, 50 clients sending 64 at a time | 72,908 | **611,434** |

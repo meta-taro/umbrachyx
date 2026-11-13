@@ -559,8 +559,11 @@ checker to hold the shared secret that mints tokens.
   (`cargo run --release --example read_cost`) and a commit from about
   6.2 µs to about 5.7 (`--example commit_cost -- 1000000 400000`).
   **What it costs:** eight bytes a key in every node that has been
-  looked up. Not measured over the Redis protocol or on the release
-  machine yet.
+  looked up, once: `memory_cost` counts the indexes built during its
+  run among what a commit leaves, 723 bytes a commit over 200,000
+  commits, 637 over 400,000 and 593 over 800,000. **Not confirmed** over
+  the Redis protocol or on the release machine, where a laptop's gain
+  has been absent before; it is measured there with the next run.
 - **Reading the replaced cell once instead of twice changed nothing**
   (measured, not taken). A write looked its key up to ask whether it was
   live, which only a removal needs to know, and again for the cell it
@@ -689,7 +692,13 @@ checker to hold the shared secret that mints tokens.
     connections rose from 31 and 74 ms to 52 and 120 ms (Valkey: 76 and
     142), and about one run in five of the 50-client row gives 110,000
     to 145,000 instead of 160,000, which is not explained yet. A machine
-    with two processors now has one serving thread. **Look again** at
+    with two processors now has one serving thread. **With one processor
+    a thread does not stay awake:** looking holds the only processor the
+    client could send its next request on. Pinned to one processor in a
+    Linux virtual machine, one client got about 90,000 `GET`s a second
+    from a thread that looked first and 130,000 or more from one that
+    slept at once; with two processors, about 85,000 against 53,000 the
+    other way. **Look again** at
     where the threads run when the unsteady row is looked into, and at
     the count on machines whose processors are whole cores.
   - **It replaced a thread per connection**, which was the simplest
