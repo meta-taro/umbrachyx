@@ -353,3 +353,86 @@ fn serve_takes_a_number_of_serving_threads_and_refuses_what_is_not_one() {
         assert_eq!(&reply, b"+PONG\r\n");
     }
 }
+
+/// Starts `serve` with `extra` options and returns it with what it says
+/// on starting, read up to the line that names where it listens.
+fn serve_and_its_first_words(dir: &TempDir, extra: &[&str]) -> (Server, String) {
+    use std::io::{BufRead, BufReader};
+
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+    let port = free_port().to_string();
+    let mut args = vec!["serve", BRANCH, "--port", &port];
+    args.extend_from_slice(extra);
+    let mut child = dir
+        .umbrachyx(&args)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("starts");
+    let stderr = BufReader::new(child.stderr.take().expect("stderr is piped"));
+    let server = Server(child);
+    let mut said = String::new();
+    for line in stderr.lines() {
+        let line = line.expect("reads stderr");
+        said.push_str(&line);
+        said.push('\n');
+        if line.starts_with("serving ") {
+            break;
+        }
+    }
+    (server, said.replace(&format!(":{port}"), ":PORT"))
+}
+
+#[test]
+fn serve_listens_only_on_this_machine_unless_told_otherwise() {
+    let dir = TempDir::new("bind-default");
+
+    let (_server, said) = serve_and_its_first_words(&dir, &[]);
+
+    assert_eq!(said, "serving bench on 127.0.0.1:PORT\n");
+}
+
+#[test]
+fn serve_with_bind_listens_there_and_says_what_that_opens() {
+    let dir = TempDir::new("bind-all");
+
+    let (_server, said) = serve_and_its_first_words(&dir, &["--bind", "0.0.0.0"]);
+
+    assert_eq!(
+        said,
+        "umbrachyx: listening beyond this machine: anyone who can reach the port \
+         reads every value and its history without a token, and nothing is encrypted\n\
+         serving bench on 0.0.0.0:PORT\n"
+    );
+}
+
+#[test]
+fn serve_with_bind_on_this_machine_gives_no_warning() {
+    let dir = TempDir::new("bind-loopback");
+
+    let (_server, said) = serve_and_its_first_words(&dir, &["--bind", "127.0.0.1"]);
+
+    assert_eq!(said, "serving bench on 127.0.0.1:PORT\n");
+}
+
+#[test]
+fn serve_refuses_a_bind_that_is_not_an_address() {
+    let dir = TempDir::new("bind-bad");
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+
+    let output = dir.run(&["serve", BRANCH, "--bind", "everywhere"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--bind \"everywhere\" is not an address"),
+        "stderr: {stderr}"
+    );
+}

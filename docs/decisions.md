@@ -679,8 +679,19 @@ checker to hold the shared secret that mints tokens.
   connection as it was. A connection without `AUTH` writes as
   `unauthenticated`; `serve --require-auth` refuses its writes
   (`NOAUTH`), and reads stay open either way.
-- **It listens only on 127.0.0.1**, because reads need no token and writes
-  need one only with `--require-auth`.
+- **It listens only on 127.0.0.1 unless told otherwise**, because reads
+  need no token and writes need one only with `--require-auth`. `serve
+  --bind <address>` listens on another of the machine's addresses, for a
+  container (whose own 127.0.0.1 the host cannot reach) and for machines
+  on a private network. It is off unless asked for, and the server says
+  on starting what it opens: anyone who can reach the port reads every
+  value and its history, and nothing on the connection is encrypted.
+  Requiring `--require-auth` with it was considered and left out, since
+  it would guard the writes and leave the reads as open as before, and
+  look safer than it is. Until reads take a token and the connection is
+  encrypted, the port belongs behind something that decides who reaches
+  it: a container's port published to the host's 127.0.0.1, or a
+  firewall rule between named machines.
 - **A few threads serve all the connections, each waiting on many sockets
   at once; no async runtime.** A thread asks the operating system which of
   its sockets have something to read, reads each and carries out the
@@ -1076,8 +1087,7 @@ machines yet, and nothing here changes what a single server does.
   until it is, replication is for measurements and trials, not for data
   that must stay secret on the network.
 - **To come:** the connection, a replica's server that refuses writes
-  and decisions with `READONLY`, an option to listen on an address other
-  than 127.0.0.1 (off unless asked for), and measurements with one
+  and decisions with `READONLY`, and measurements with one
   writer and several readers next to Valkey and PostgreSQL set up the
   same way.
 

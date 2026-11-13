@@ -14,7 +14,8 @@
 //! branch and the tables declared (see `history`).
 //!
 //! Reads need no token, and writes without one are taken unless the server
-//! requires authentication, so a server should listen only on this machine.
+//! requires authentication, so a server should listen only on this machine,
+//! or where the network itself decides who reaches the port.
 //!
 //! A few threads serve all the connections, each waiting on many sockets
 //! at once (see `event`). Commands sent together (pipelined) are answered

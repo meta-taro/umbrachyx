@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufWriter, ErrorKind, Write};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::process::ExitCode;
 
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
@@ -59,10 +59,14 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   export                      every record of the log as a line of JSON, for
                               jq and grep: commits with their changes,
                               branches, tables, rejections and erasures
-  serve <branch> [--port P] [--max-connections N] [--threads T]
+  serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
         [--public-key K [--require-auth]]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history.
+                              --bind listens on another address of this
+                              machine, such as 0.0.0.0 inside a container;
+                              reads need no token and nothing is encrypted,
+                              so only where the network itself is trusted.
                               With a public key, AUTH <token> names who
                               writes; --require-auth refuses writes without it.
                               --threads is how many threads serve connections
@@ -136,10 +140,10 @@ impl Args {
                 .clone();
             match name {
                 "remove" => parsed.removes.push(value),
-                "who" | "why" | "approved-by" | "from" | "limit" | "port" | "max-connections"
-                | "threads" | "key" | "subject" | "branch" | "prefix" | "columns" | "column"
-                | "operations" | "operation" | "purpose" | "expires-in" | "public-key"
-                | "token-file" => {
+                "who" | "why" | "approved-by" | "from" | "limit" | "port" | "bind"
+                | "max-connections" | "threads" | "key" | "subject" | "branch" | "prefix"
+                | "columns" | "column" | "operations" | "operation" | "purpose" | "expires-in"
+                | "public-key" | "token-file" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -445,7 +449,24 @@ fn revert(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Serves one branch until stopped, only on this machine. With a public
+/// What `serve` says when told to listen on an address other machines
+/// can reach.
+const BEYOND_THIS_MACHINE: &str = "listening beyond this machine: anyone who can reach the port \
+    reads every value and its history without a token, and nothing is encrypted";
+
+/// Where `serve` listens: this machine only, unless `--bind` names another
+/// of its addresses.
+fn listen_address(args: &Args) -> Result<IpAddr, String> {
+    match args.options.get("bind") {
+        Some(address) => address
+            .parse()
+            .map_err(|_| format!("--bind {address:?} is not an address")),
+        None => Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+    }
+}
+
+/// Serves one branch until stopped, only on this machine unless `--bind`
+/// says otherwise. With a public
 /// key, connections may `AUTH` with a capability token; with
 /// `--require-auth`, only those may write.
 fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
@@ -456,6 +477,7 @@ fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
             .map_err(|_| format!("--port {port:?} is not a port"))?,
         None => DEFAULT_PORT,
     };
+    let address = listen_address(args)?;
     let max_connections = match args.options.get("max-connections") {
         Some(max) => max
             .parse()
@@ -493,8 +515,11 @@ fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
     if let Some(threads) = threads {
         server = server.threads(threads);
     }
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
-    eprintln!("serving {branch} on 127.0.0.1:{port}");
+    let listener = TcpListener::bind((address, port)).map_err(|e| e.to_string())?;
+    if !address.is_loopback() {
+        eprintln!("umbrachyx: {BEYOND_THIS_MACHINE}");
+    }
+    eprintln!("serving {branch} on {}", SocketAddr::new(address, port));
     server.serve(listener)
 }
 
