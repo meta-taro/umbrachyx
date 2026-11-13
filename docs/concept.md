@@ -57,6 +57,38 @@ and how cheap a mistake is**.
 The rows marked "not built" are the direction after the first release;
 their order is not settled.
 
+### What speed means changes
+
+This project is built by a person and an AI agent together, and the
+second yardstick came out of that. The person asked for what experience
+with databases teaches one to ask for: keep the history, and be fast,
+counted in operations a second and set next to Valkey. The first release
+is held to that, and the tables say where it is met and where it is not.
+
+Then the agent was asked to write the page that introduces the database,
+and it did not open with history or with speed. It opened with a write
+nobody had looked at, and with a branch where being wrong costs nothing.
+Asked why, its answer was that it is the one who writes: history and
+operations a second are good to have, and whether a mistake can reach
+production decides whether it can work at all. Asked what speed is to an
+agent, it said: **not how many operations a second, but how cheap one
+round of read, try and check is.**
+
+What people ask of a database is what the past taught them. An agent has
+no such past: it meets the database new in every session, and what it
+asks for is what its next hour of work needs. Both are kept. Operations a
+second stay in the tables, because a database for hot operational data
+has to be fast in the old sense too. The round trip is the new measure,
+and it is what the direction above is ordered by: a write refused at once
+when its premise is stale saves a whole round; an answer of two lines
+where two thousand were sent saves most of the cost of the check; a
+mistake that waits on a branch costs one more round and no damage.
+
+It is not measured yet. Measuring it means giving an agent a task against
+the database and counting what the task took: calls, bytes read, rounds
+before the result was right, and what a wrong attempt left behind
+(see "How 'better' will be measured").
+
 ## Prior art
 
 Each of the ideas here already exists somewhere. What does not yet exist is
@@ -181,6 +213,7 @@ computed over encrypted values and what cannot will be drawn explicitly.
 | Dolt | Speed of history, diff and merge |
 | Postgres with audit triggers | Effort and write cost for the same history |
 | All of them | **What a hijacked agent can damage or leak**, a measure existing databases are rarely tested against |
+| All of them | **What one round of read, try and check costs an agent**: for a set task, the calls, the bytes read, the rounds until the result is right, and what a wrong attempt left behind. Not measured yet |
 
 ## Open questions
 

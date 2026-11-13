@@ -32,6 +32,16 @@ ahead, measured on AWS against Valkey, PostgreSQL and Dolt, with the raw
 output published. The latest runs are one run each; the table of three
 runs is from before two changes and is measured again with the release.
 
+**Two yardsticks.** Operations a second, next to Valkey, is the one
+experience with databases teaches a person to ask for, and the tables
+below hold Umbrachyx to it. The other came from the AI agent this
+project is built with: to an agent, speed is less how many operations a
+second than how cheap one round of read, try and check is, and how cheap
+a mistake is. The first release is measured by the first; the direction
+after it is ordered by the second
+([`docs/concept.md`](docs/concept.md), "Where it starts, and where it is
+going").
+
 The same in one page, in English and Japanese:
 <https://meta-taro.github.io/umbrachyx/>.
 
