@@ -568,6 +568,14 @@ checker to hold the shared secret that mints tokens.
   1,000,000 keys in a Linux virtual machine, as before: the second
   lookup walks the nodes the first brought into the cache, and the cost
   of the pair was the first.
+- **Keeping a group's cells in a hash table, sorted once at the end,
+  gave under 2%** (measured, not taken). The cells of a group wait in a
+  map ordered by key until the group goes into the tree; a profile in a
+  Linux virtual machine had 13% of the writing thread in that map's
+  inserts. With a hash table and one sort, writes from 50 clients
+  sending 64 at a time were ahead in six of six pairs of runs there, by
+  1 to 6% and 1.5% in the middle, and no different on a laptop or from
+  256 clients. Too little to tell from the machine's own variation.
 - **No hash index of current values beside the tree** (measured, not
   taken). A table that keeps its history answers a `GET` by walking the
   prolly tree; an index of current values would answer it with one
