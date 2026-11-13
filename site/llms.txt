@@ -18,8 +18,9 @@ is served at `/umbrachyx/llms.txt` rather than at the domain root.
   keys to set or remove and a reason; it always goes to your branch.
 - Being wrong is cheap. A commit on your branch changes nothing in
   production. A person reads the diff from where your branch began and
-  approves or rejects it; a rejection is kept with its reason, which you
-  can read.
+  approves or rejects it; a rejection is kept with its reason
+  (`UMBRA.DECISIONS` over the Redis protocol lists them; the MCP tools do
+  not show them yet).
 - If production changed the same key while your change waited, the approval
   merges nothing and names the keys. Start a new branch from `main` and
   write again from the current values; do not carry numbers over from the
