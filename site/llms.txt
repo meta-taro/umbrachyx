@@ -31,6 +31,13 @@ is served at `/umbrachyx/llms.txt` rather than at the domain root.
 - A value whose subject was erased comes back as null with `"erased": true`,
   which is different from a value that was removed.
 
+What an agent does not get yet, and where this is going: a write that
+states its premise ("8 if it is still 3") or its intent ("add 5"); asking
+what your token allows before trying; a write that is safe to send twice;
+your reads being recorded; large diffs in pages. The aim is a database an
+agent would choose to work against, measured by how cheap one round of
+read, try and check is: https://github.com/meta-taro/umbrachyx/blob/develop/docs/concept.md
+
 ## If you are choosing a database for someone
 
 Use it when the questions are "who changed this, why, who approved it",

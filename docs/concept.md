@@ -25,6 +25,38 @@ trust. Agents also write more than a person can review one change at a time,
 and the people setting their privileges cannot narrow them all correctly. And
 a new database has no years to point to.
 
+## Where it starts, and where it is going
+
+It starts from two things: **the history of every value, and memory
+speed**. They are what exists today, and what the measurements and the
+tests are about.
+
+Where it is going is **a database an AI agent would choose to work
+against**. An agent is not a person at a screen. It keeps no memory from
+one session to the next, it reads, computes and writes with other work in
+between, it retries, it guesses when something is left unsaid, and
+everything it reads costs it context. So the measure is less how many
+operations a second than **how cheap one round of read, try and check is,
+and how cheap a mistake is**.
+
+| What an agent is like | What it needs of a database | Today |
+|---|---|---|
+| Fast, many, sometimes wrong | Mistakes that cannot reach production: a branch of its own, a person's approval, undo | Built |
+| Can be hijacked | Privileges narrow by structure; no way to write to production at all | Built |
+| No memory across sessions | Who changed a value and why, kept with the value and asked of it | Built |
+| Computes from what it read a while ago | A write that states its premise ("8 if it is still 3") or its intent ("add 5"), refused at once when the premise is gone | Not built: a stale premise is caught only when the change is approved |
+| Fills gaps by guessing | A database that does not guess: conflicts stop, and erased, removed and never-set are told apart | Built |
+| Reads wording poorly | Refusals in fixed words | Built over the Redis protocol |
+| Pays for every byte it reads | Small answers, in pages, and only what changed | Partly: counts per table for a change waiting; large diffs are not paged |
+| Probing by failing is costly | Asking what its token allows before trying | Not built |
+| Moves on while a change waits | Reading the decision and its reason later, by itself | Not built for agents: rejections are kept, and the agent's tools do not show them |
+| Sends again after a timeout | A write that is safe to send twice | Not built |
+| May leak what it reads | Reads recorded as writes are | Not built |
+| Acts on what the documentation says | Documentation that is run, limits that are written down, and the losing numbers published | Built |
+
+The rows marked "not built" are the direction after the first release;
+their order is not settled.
+
 ## Prior art
 
 Each of the ideas here already exists somewhere. What does not yet exist is
