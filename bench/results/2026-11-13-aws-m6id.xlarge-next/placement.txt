@@ -1,0 +1,13 @@
+cpu0 shares a core with cpu2; cpu1 with cpu3
+free, server 1: 160513.64 162469.55 162667.75 158919.34 158856.25 162667.75 
+free, server 2: 161943.31 161290.33 156617.08 144822.59 160320.66 125549.27 
+server on one core, client on the other, server 1: 160320.66 162403.56 161812.31 161160.34 160707.11 162206.00 
+server on one core, client on the other, server 2: 160320.66 162667.75 161877.78 163065.62 163666.12 161485.67 
+server on one core, client on both threads of the other, server 1: 160384.92 162535.56 162403.56 162337.66 164203.61 161877.78 
+server on one core, client on both threads of the other, server 2: 161225.31 161160.34 162999.19 151343.17 163132.14 162999.19 
+server on a thread of each core, client beside one, server 1: 160965.80 162469.55 151057.41 162469.55 163398.70 163132.14 
+server on a thread of each core, client beside one, server 2: 159299.09 162469.55 161812.31 162601.62 162733.94 162733.94 
+server free, client on cpu1, server 1: 159744.41 161616.17 163265.30 162999.19 151860.28 157047.52 
+server free, client on cpu1, server 2: 113798.01 133689.83 111172.88 132362.67 120518.23 111234.70 
+server and client on one core, server 1: 111513.80 112139.05 111389.59 112013.44 111888.11 114057.60 
+server and client on one core, server 2: 111265.65 112296.46 111265.65 111544.90 113026.28 111358.58 

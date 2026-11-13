@@ -1,0 +1,34 @@
+# 50 clients sending GETs 16 at a time: time by thread and by where the code is
+    38.37%  resp loop 0  umbrachyx
+    38.32%  resp loop 1  umbrachyx
+     6.37%  resp loop 0  libc.so.6
+     6.28%  resp loop 1  libc.so.6
+     5.37%  resp loop 1  [kernel.kallsyms]
+     5.23%  resp loop 0  [kernel.kallsyms]
+     0.03%  resp loop 1  [vdso]
+     0.02%  resp loop 0  [vdso]
+     0.01%  resp loop 1  [unknown]
+     0.01%  resp loop 0  [unknown]
+# by function, own time
+    18.67%  [.] <umbrachyx::tree::node::KeyIndex>::search
+    14.28%  [.] <umbrachyx::tree::Tree>::get
+    12.02%  [.] <[core::core_arch::x86::__m128i; 15]>::map::<aes::backends::x86_vaes512::encdec::broadcast_keys<15>::{cl
+     6.23%  [.] 0x000000000019869e
+     5.32%  [.] <umbrachyx::server::Server>::execute
+     3.64%  [.] 0x00000000001986a5
+     3.11%  [.] <aes::backends::x86_vaes512::Aes<15>>::encrypt::<cipher::block::ctx::BlockCtx<typenum::uint::UInt<typenu
+     3.07%  [.] <umbrachyx::store::view::View>::get
+     2.44%  [.] aes::backends::x86_vaes512::encdec::broadcast_keys::<15>::{closure#0}
+     2.04%  [.] <aes::backends::x86_aes::Aes<15>>::new
+     1.62%  [.] <cmac::Cmac<aes::Aes256> as digest::FixedOutputReset>::finalize_fixed_reset
+     1.14%  [.] _rjem_malloc
+     1.08%  [.] <aes::backends::x86_vaes512::Aes<15>>::encrypt::<<ctr::ctr_core::CtrCore<_, _> as cipher::stream::core_a
+     1.02%  [.] umbrachyx::server::resp::length
+     0.90%  [k] _raw_spin_unlock_irqrestore
+     0.90%  [.] _rjem_sdallocx
+     0.59%  [.] umbrachyx::store::seal::open
+     0.58%  [.] umbrachyx::server::resp::parse
+     0.57%  [.] aes_siv::siv::s2v::<cmac::Cmac<aes::Aes256>, [&[u8]; 1], &[u8]>
+     0.56%  [.] <aes::backends::x86_vaes512::Aes<15>>::encrypt::<<cmac::block_api::CmacCore<_> as digest::block_api::Upd
+     0.55%  [.] <usize>::from_ascii_radix
+     0.53%  [.] <umbrachyx::server::event::Connection>::execute

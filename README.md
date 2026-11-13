@@ -163,7 +163,9 @@ machine on 2026-11-13, beside Valkey that day
 | `GET`s, 50 clients sending 16 at a time | 677,048 | **1,247,661** |
 
 The 50-client `GET` row is not steady: about one run in five gives
-110,000 to 145,000. With 5,000 and 10,000 connections the slowest percent
+110,000 to 145,000, when the benchmark's client lands on the core a
+serving thread is on
+([`bench/results/2026-11-13-aws-m6id.xlarge-next/`](bench/results/2026-11-13-aws-m6id.xlarge-next/)). With 5,000 and 10,000 connections the slowest percent
 of `GET`s is now 52 and 120 ms, not the 31 and 74 ms of the table, and
 memory is about 4% more.
 

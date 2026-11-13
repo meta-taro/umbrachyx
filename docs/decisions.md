@@ -561,9 +561,12 @@ checker to hold the shared secret that mints tokens.
   **What it costs:** eight bytes a key in every node that has been
   looked up, once: `memory_cost` counts the indexes built during its
   run among what a commit leaves, 723 bytes a commit over 200,000
-  commits, 637 over 400,000 and 593 over 800,000. **Not confirmed** over
-  the Redis protocol or on the release machine, where a laptop's gain
-  has been absent before; it is measured there with the next run.
+  commits, 637 over 400,000 and 593 over 800,000. On the release machine, in turn
+  with the code before it
+  ([`bench/results/2026-11-13-aws-m6id.xlarge-next/`](../bench/results/2026-11-13-aws-m6id.xlarge-next/)),
+  durable writes from 64 and from 256 clients went up 7% and 5%, `GET`s
+  sent 16 at a time 4%, and resident memory 0.4%; writes sent 64 at a
+  time did not change.
 - **Reading the replaced cell once instead of twice changed nothing**
   (measured, not taken). A write looked its key up to ask whether it was
   live, which only a removal needs to know, and again for the cell it
@@ -691,7 +694,11 @@ checker to hold the shared secret that mints tokens.
     fell about a tenth, the slowest percent with 5,000 and 10,000
     connections rose from 31 and 74 ms to 52 and 120 ms (Valkey: 76 and
     142), and about one run in five of the 50-client row gives 110,000
-    to 145,000 instead of 160,000, which is not explained yet. A machine
+    to 145,000 instead of 160,000. That is where the benchmark's client
+    runs: held to the core the serving threads are not on, every run
+    gave 160,000 or more, and held to their core, every run about
+    112,000
+    ([`bench/results/2026-11-13-aws-m6id.xlarge-next/`](../bench/results/2026-11-13-aws-m6id.xlarge-next/)). A machine
     with two processors now has one serving thread. **With one processor
     a thread does not stay awake:** looking holds the only processor the
     client could send its next request on. Pinned to one processor in a
@@ -699,7 +706,6 @@ checker to hold the shared secret that mints tokens.
     from a thread that looked first and 130,000 or more from one that
     slept at once; with two processors, about 85,000 against 53,000 the
     other way. **Look again** at
-    where the threads run when the unsteady row is looked into, and at
     the count on machines whose processors are whole cores.
   - **It replaced a thread per connection**, which was the simplest
     design and added no dependency, and which was woken for every request

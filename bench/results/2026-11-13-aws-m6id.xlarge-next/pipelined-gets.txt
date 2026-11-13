@@ -1,0 +1,4 @@
+after about 1 million writes: 826787.94 840336.12 839630.56 
+after about 2 million writes: 687757.94 691323.94 699545.31 
+after about 3 million writes: 659195.81 660283.94 664893.62 
+after about 4 million writes: 649772.56 643915.00 645369.50 

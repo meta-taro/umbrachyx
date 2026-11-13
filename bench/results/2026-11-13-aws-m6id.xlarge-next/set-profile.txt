@@ -1,0 +1,36 @@
+# 50 clients sending writes 64 at a time: time by thread
+    93.35%  resp commits
+     3.35%  resp loop 1
+     3.30%  resp loop 0
+# the thread that writes, by function, own time
+     8.77%  [.] umbrachyx::tree::insert_into
+     6.82%  [.] <umbrachyx::tree::node::KeyIndex>::search
+     5.03%  [.] <alloc::sync::Arc<umbrachyx::tree::node::Keys>>::drop_slow
+     4.69%  [.] 0x00000000001986a5
+     4.18%  [.] 0x0000000000198caa
+     4.09%  [.] <alloc::sync::Arc<umbrachyx::tree::node::Node>>::drop_slow
+     4.04%  [.] <umbrachyx::tree::Tree>::get
+     2.91%  [.] 0x000000000019869e
+     2.60%  [.] _rjem_je_edata_heap_remove_first
+     2.51%  [.] <umbrachyx::store::Head>::held_shared
+     2.43%  [.] 0x0000000000198c53
+     2.37%  [.] <[core::core_arch::x86::__m128i; 15]>::map::<aes::backends::x86_vaes512::encdec::broadcast_keys<15>::{cl
+     2.26%  [.] <umbrachyx::store::Store<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock>>::apply_co
+     2.12%  [.] <umbrachyx::store::CommitInfo>::written
+     2.05%  [.] _blake3_compress_in_place_avx512
+     1.73%  [.] <umbrachyx::tree::node::Leaf>::with_values
+     1.59%  [.] <core::iter::adapters::map::Map<core::ops::range::Range<usize>, <umbrachyx::tree::node::KeyIndex>::new<c
+     1.54%  [.] do_rallocx
+     1.51%  [.] <hashbrown::map::HashMap<[u8; 32], alloc::sync::Arc<umbrachyx::store::CommitInfo>, std::hash::random::Ra
+     1.43%  [.] umbrachyx::store::cells_of
+     1.16%  [.] 0x0000000000198cd9
+     1.07%  [.] 0x0000000000198d1d
+     0.98%  [.] <aes::backends::x86_vaes512::Aes<15>>::encrypt::<cipher::block::ctx::BlockCtx<typenum::uint::UInt<typenu
+     0.98%  [.] _rjem_je_arena_ptr_array_flush
+     0.96%  [.] _rjem_je_arena_ralloc
+     0.92%  [.] <alloc::vec::into_iter::IntoIter<alloc::sync::Arc<umbrachyx::tree::node::Node>> as core::iter::traits::i
+     0.89%  [.] umbrachyx::tree::node::split_internal
+     0.58%  [.] <blake3::ChunkState>::update
+     0.58%  [.] 0x0000000000198c40
+     0.55%  [k] do_user_addr_fault
+     0.53%  [.] <blake3::Hasher>::update

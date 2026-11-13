@@ -81,7 +81,8 @@ What got worse, or is not settled:
   `candidate.csv`). The build with the old leaf does the same, so it is
   not the leaf. On two cores with two threads each, where the two
   serving threads and the benchmark's one client land is the likely
-  cause; that has not been shown.
+  cause; the run of the same afternoon showed it is
+  ([`../2026-11-13-aws-m6id.xlarge-next/`](../2026-11-13-aws-m6id.xlarge-next/)).
 - **The slowest percent with many connections is slower than with four
   threads**: 52 ms at 5,000 connections and 120 ms at 10,000, where the
   release run of the day before had 31 ms and 74 ms.
@@ -90,8 +91,10 @@ What got worse, or is not settled:
   after 3.5 million writes, against about 735,000 before the changes;
   760,000 to 805,000 in `get-variation.txt`, which reads after about
   1.1 million. With two serving threads this row is held back by the
-  server, so it shows what a read costs; why more writes make a read
-  cost more has not been looked into.
+  server, so it shows what a read costs. More writes do not make a
+  read cost more: after fewer writes, more of the keys read are not
+  there yet, and such a read is cheap (the afternoon's run,
+  [`../2026-11-13-aws-m6id.xlarge-next/`](../2026-11-13-aws-m6id.xlarge-next/)).
 
 ## How the run went
 
