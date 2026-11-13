@@ -708,6 +708,19 @@ checker to hold the shared secret that mints tokens.
   new one on the same volume, [`docker/smoke.sh`](../docker/smoke.sh));
   only a version's tag publishes it, after every other check on that
   commit has passed.
+- **Out of memory, the server stops and says so; it does not carry on
+  with less.** A failed allocation ends the process with the size it
+  could not get. Every acknowledged write is already synced, so the next
+  start has all of them, and whoever runs the server sees why it went
+  instead of finding it slow or wrong. Everything is held in memory for
+  now, so a limit will be reached by writing long enough; what to keep on
+  disk instead belongs to the work on retention.
+  [`bench/colocated.sh`](../bench/colocated.sh) checks this under a
+  memory limit, and the two things a shared machine does to a server:
+  that it keeps answering while other programs take the processors, the
+  disk, most of the memory and the network, and that killing it mid-write
+  under that load loses nothing acknowledged. It runs with each release
+  measurement; no result from the release machine is published yet.
 - **A few threads serve all the connections, each waiting on many sockets
   at once; no async runtime.** A thread asks the operating system which of
   its sockets have something to read, reads each and carries out the

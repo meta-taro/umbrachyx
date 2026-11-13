@@ -52,9 +52,11 @@ bench/dolt.sh <dir>           # Dolt の差分と読み込み（Dolt 2.6.2 の�
 cargo test -p umbrachyx --release --test server_crash -- --ignored --nocapture
 cargo test -p umbrachyx --test crash -- --ignored --nocapture
 cargo test -p umbrachyx --lib --release ten_thousand_seeds -- --ignored --nocapture
+bench/colocated.sh <dir>      # 同居試験：ほかのプログラムが CPU・ディスク・メモリ・ネットワークを使う横で、応答・強制終了100回・メモリ不足
 ```
 
 - ベンチマークは3回流す。README には中央値を書くか、幅で書く。
+- 同居試験は1回流す。「応答し続けた」「強制終了で確定済みの書き込みを失わない」「メモリ不足で止まるときに理由を言い、確定済みの書き込みが残る」の3つが通ること。遅くなった割合は、機械と一緒に結果に書く。
 - 堅牢性の試験が1つでも落ちたら、リリースしない。落ちた試験を消したり、回数を減らしたりして通さない。
 
 ## 4. 公開の仕方

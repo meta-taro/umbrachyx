@@ -5,7 +5,8 @@
 # bench/umbrachyx.sh, bench/valkey.sh, bench/postgres.sh,
 # bench/connections.sh, bench/memory.sh and the diff and load comparison
 # with Dolt (the compare example and bench/dolt.sh, over
-# a million records) several times, then the robustness tests, and writes
+# a million records) several times, then the robustness tests and the
+# server next to noisy neighbours (bench/colocated.sh), and writes
 # everything with a description of the machine to
 # ~/umbrachyx-results/<date>-<machine>/.
 #
@@ -28,7 +29,7 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 out="$HOME/umbrachyx-results/$(date -u +%F)-$machine"
 
 sudo apt-get update -qq
-sudo apt-get install -y -qq build-essential git pkg-config curl postgresql >/dev/null
+sudo apt-get install -y -qq build-essential git pkg-config curl postgresql stress-ng >/dev/null
 # bench/postgres.sh makes its own server on the scratch disk; the one the
 # package starts would only take memory and processor time from the runs.
 sudo systemctl disable --now postgresql >/dev/null 2>&1 || true
@@ -98,5 +99,9 @@ done
   cargo test -q -p umbrachyx --test crash -- --ignored --nocapture
   cargo test -q -p umbrachyx --lib --release ten_thousand_seeds -- --ignored --nocapture
 } >"$out/robustness.txt" 2>&1
+
+# Last, so a neighbour left running by a failure cannot disturb a
+# benchmark. A failure is kept in the file with what ran before it.
+bench/colocated.sh "$scratch" >"$out/colocated.txt" 2>&1 || true
 
 echo "$out"
