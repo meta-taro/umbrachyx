@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -46,6 +46,15 @@ const WAKE: Token = Token(usize::MAX);
 const EVENTS: usize = 1024;
 /// Bytes read from one connection before the others get their turn.
 const READ_BUDGET: usize = 1024 * 1024;
+
+/// How long a serving thread with nothing to do keeps asking for more
+/// before it sleeps. A client that waits for each reply sends its next
+/// request within a few tens of microseconds of getting one, and waking a
+/// sleeping thread costs about as much again: asleep, the thread answered
+/// one client about 37,000 times a second on the release machine, and
+/// asking for this long first, about 55,000. Four times as long gave no
+/// more and took processor time from the thread that writes.
+const STAY_AWAKE: Duration = Duration::from_micros(50);
 
 /// Whether a socket that gave less than was asked for can be left without
 /// reading it again until it says it would block. On Unix every arrival is
@@ -202,8 +211,8 @@ impl Loop {
         // commands held back; they are taken again without waiting.
         let mut again: Vec<usize> = Vec::new();
         loop {
-            let timeout = (!again.is_empty()).then_some(Duration::ZERO);
-            if let Err(error) = self.poll.poll(&mut events, timeout) {
+            let has_work = !again.is_empty();
+            if let Err(error) = self.wait(&mut events, has_work) {
                 if error.kind() != io::ErrorKind::Interrupted {
                     eprintln!("umbrachyx: waiting for connections: {error}");
                 }
@@ -224,6 +233,24 @@ impl Loop {
             ready.dedup();
             self.take_turns(&ready, &mut again);
         }
+    }
+
+    /// Fills `events` with what the sockets have to say. With work left
+    /// over it only looks; otherwise it keeps looking for `STAY_AWAKE`
+    /// and then sleeps until something arrives.
+    fn wait(&mut self, events: &mut Events, has_work: bool) -> io::Result<()> {
+        if has_work {
+            return self.poll.poll(events, Some(Duration::ZERO));
+        }
+        let idle_since = Instant::now();
+        while idle_since.elapsed() < STAY_AWAKE {
+            self.poll.poll(events, Some(Duration::ZERO))?;
+            if !events.is_empty() {
+                return Ok(());
+            }
+            std::hint::spin_loop();
+        }
+        self.poll.poll(events, None)
     }
 
     /// Delivers what was written, reads, and replies, for each ready

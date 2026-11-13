@@ -245,12 +245,21 @@ impl Server {
     }
 }
 
-/// A thread per processor up to this many: reads are answered on all of
-/// them at once, and past a few the client, not the server, is what waits.
+/// At most this many serving threads unless asked for more: past a few
+/// the client, not the server, is what waits.
 const MAX_DEFAULT_LOOPS: usize = 4;
 
 fn default_loops() -> usize {
-    thread::available_parallelism().map_or(1, |cores| cores.get().min(MAX_DEFAULT_LOOPS))
+    loops_for(thread::available_parallelism().map_or(1, usize::from))
+}
+
+/// A serving thread for every two processors, at least one. The thread
+/// that writes and the clients need processors too, and virtual
+/// processors are often two to a core: with a thread for each, the
+/// threads spend their time being put to sleep and woken, and 50 clients
+/// get two thirds of the `GET`s that two threads on four processors give.
+fn loops_for(processors: usize) -> usize {
+    (processors / 2).clamp(1, MAX_DEFAULT_LOOPS)
 }
 
 /// Where a command's reply comes from.
@@ -296,5 +305,17 @@ impl Slot {
 impl Drop for Slot {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn half_the_processors_serve_connections_one_at_least_and_four_at_most() {
+        let served: Vec<usize> = [1, 2, 3, 4, 8, 16, 64].map(loops_for).to_vec();
+
+        assert_eq!(served, [1, 1, 1, 2, 4, 4, 4]);
     }
 }

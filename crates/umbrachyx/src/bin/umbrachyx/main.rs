@@ -66,8 +66,8 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               With a public key, AUTH <token> names who
                               writes; --require-auth refuses writes without it.
                               --threads is how many threads serve connections
-                              (one more writes); by default one a processor,
-                              four at most
+                              (one more writes); by default one for every two
+                              processors, four at most
   mcp --public-key K --token-file F
                               MCP over stdin and stdout, for one agent's token
 
