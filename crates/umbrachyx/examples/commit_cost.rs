@@ -15,6 +15,11 @@ use umbrachyx::keys::{KeyStorage, Keys};
 use umbrachyx::log::{Edit, Storage};
 use umbrachyx::store::{CommitRequest, MAIN_BRANCH, Provenance, Store, SystemClock};
 
+/// The allocator the server uses, so the cost here is the cost there.
+#[cfg(not(windows))]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Default)]
 struct Memory(Vec<u8>);
 

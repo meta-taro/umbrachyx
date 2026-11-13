@@ -148,12 +148,21 @@ jobs:
           for group in 1 64 3200; do
             target/release/examples/commit_cost 1000000 640000 sealed "$group"
           done | tee bench-commit-cost.txt
+          # An experiment, not what the server does: the allocator asking
+          # the kernel for huge pages, to see how much of a write's cost
+          # is finding its memory. Kept apart so the rows above stay
+          # comparable from run to run.
+          cat /sys/kernel/mm/transparent_hugepage/enabled | tee bench-commit-cost-huge-pages.txt
+          for group in 1 64; do
+            _RJEM_MALLOC_CONF=thp:always,metadata_thp:always \
+              target/release/examples/commit_cost 1000000 640000 sealed "$group"
+          done | tee -a bench-commit-cost-huge-pages.txt
 
       - name: Summary
         run: |
           {
             echo "### Benchmarks (shared runner, compare runs of this job only)"
-            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv bench-memory.csv bench-commit-cost.txt; do
+            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv bench-memory.csv bench-commit-cost.txt bench-commit-cost-huge-pages.txt; do
               echo
               echo "\`$file\`"
               echo
