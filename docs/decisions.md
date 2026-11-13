@@ -547,6 +547,27 @@ checker to hold the shared secret that mints tokens.
   **Look again if** memory per key matters more than writes from many
   clients, or if another common machine shows the laptop's loss over
   the Redis protocol.
+- **A lookup in a node compares numbers before it compares keys**
+  (measured, taken). The keys of one node are neighbours and start
+  alike: with keys like `key:000000123456`, every comparison of a binary
+  search read past the same ten bytes or more before it found a
+  difference. A node's index now keeps that shared start once and, for
+  each key, the eight bytes after it as one number; a lookup finds its
+  place among the numbers, 32 of them in four cache lines, and reads a
+  key's bytes only where two numbers are equal. With 1,000,000 keys on a
+  laptop a read from the tree went from about 590 ns to about 495
+  (`cargo run --release --example read_cost`) and a commit from about
+  6.2 µs to about 5.7 (`--example commit_cost -- 1000000 400000`).
+  **What it costs:** eight bytes a key in every node that has been
+  looked up. Not measured over the Redis protocol or on the release
+  machine yet.
+- **Reading the replaced cell once instead of twice changed nothing**
+  (measured, not taken). A write looked its key up to ask whether it was
+  live, which only a removal needs to know, and again for the cell it
+  replaces. Skipping the first left a commit at about 6.7 µs with
+  1,000,000 keys in a Linux virtual machine, as before: the second
+  lookup walks the nodes the first brought into the cache, and the cost
+  of the pair was the first.
 - **No hash index of current values beside the tree** (measured, not
   taken). A table that keeps its history answers a `GET` by walking the
   prolly tree; an index of current values would answer it with one

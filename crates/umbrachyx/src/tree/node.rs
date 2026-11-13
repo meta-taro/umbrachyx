@@ -401,6 +401,57 @@ mod tests {
         }
     }
 
+    /// Keys that share a long start, differ only after the eight bytes
+    /// that follow it, end inside it, or hold zero bytes there: the places
+    /// where comparing a number taken from each key could go wrong.
+    #[test]
+    fn the_key_index_agrees_with_a_binary_search_on_awkward_keys() {
+        let sets: Vec<Vec<&[u8]>> = vec![
+            vec![
+                b"key:000000000017",
+                b"key:000000000018",
+                b"key:000000000113",
+            ],
+            vec![
+                b"player/0001/gems/a",
+                b"player/0001/gems/b",
+                b"player/0001/gems/bb",
+            ],
+            vec![b"ab", b"ab\0", b"ab\0\0", b"ab\0\0x", b"abc"],
+            vec![b"same-start-12345678-a", b"same-start-12345678-b"],
+            vec![b"only"],
+            vec![b"", b"\0", b"\0\0\0\0\0\0\0\0", b"\0\0\0\0\0\0\0\0\0"],
+            vec![
+                b"\xff\xff\xff\xff\xff\xff\xff\xff",
+                b"\xff\xff\xff\xff\xff\xff\xff\xff\xff",
+            ],
+        ];
+        for keys in sets {
+            let index = KeyIndex::new(keys.iter().copied());
+            let mut probes: Vec<Vec<u8>> = vec![Vec::new(), vec![0], vec![0xff; 12]];
+            for key in &keys {
+                probes.push(key.to_vec());
+                probes.push([key, &b"\0"[..]].concat());
+                probes.push([key, &b"z"[..]].concat());
+                for cut in 0..key.len() {
+                    probes.push(key[..cut].to_vec());
+                    let mut changed = key.to_vec();
+                    changed[cut] = changed[cut].wrapping_add(1);
+                    probes.push(changed.clone());
+                    changed[cut] = changed[cut].wrapping_sub(2);
+                    probes.push(changed);
+                }
+            }
+            for probe in probes {
+                assert_eq!(
+                    index.search(&probe),
+                    keys.binary_search(&&probe[..]),
+                    "probe {probe:?} among {keys:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn an_empty_index_puts_every_key_first() {
         let index = KeyIndex::new(std::iter::empty::<&[u8]>());
@@ -470,10 +521,29 @@ mod tests {
 /// A node's keys in one buffer, so a lookup searches memory that sits
 /// together instead of following a pointer per key. Built the first time a
 /// lookup reaches the node, like the hash.
+///
+/// The keys of a node are neighbours, so they start alike. That shared
+/// start is kept once, and beside each key the eight bytes after it as one
+/// number: a lookup compares numbers, a few cache lines for the whole
+/// node, and reads a key's bytes only where two numbers are equal.
 #[derive(Debug)]
 pub(super) struct KeyIndex {
     bytes: Vec<u8>,
     ends: Vec<u32>,
+    /// How many bytes every key starts with in common.
+    shared: usize,
+    /// Per key, the bytes after the shared start as a number.
+    heads: Vec<u64>,
+}
+
+/// The first eight bytes of `rest` as a number that orders as the bytes
+/// do; a shorter `rest` counts as followed by zeros, which orders it no
+/// later than anything it starts.
+fn head(rest: &[u8]) -> u64 {
+    let mut bytes = [0; 8];
+    let taken = rest.len().min(8);
+    bytes[..taken].copy_from_slice(&rest[..taken]);
+    u64::from_be_bytes(bytes)
 }
 
 impl KeyIndex {
@@ -484,7 +554,27 @@ impl KeyIndex {
             bytes.extend_from_slice(key);
             ends.push(u32::try_from(bytes.len()).expect("a node's keys fit in 4 GiB"));
         }
-        Self { bytes, ends }
+        let mut index = Self {
+            bytes,
+            ends,
+            shared: 0,
+            heads: Vec::new(),
+        };
+        index.shared = index.shared_start();
+        index.heads = (0..index.ends.len())
+            .map(|at| head(&index.key(at)[index.shared..]))
+            .collect();
+        index
+    }
+
+    /// The keys are sorted, so what the first and the last start with in
+    /// common, every key between them starts with too.
+    fn shared_start(&self) -> usize {
+        let Some(last) = self.ends.len().checked_sub(1) else {
+            return 0;
+        };
+        let (first, last) = (self.key(0), self.key(last));
+        first.iter().zip(last).take_while(|(a, b)| a == b).count()
     }
 
     fn key(&self, index: usize) -> &[u8] {
@@ -496,16 +586,29 @@ impl KeyIndex {
 
     /// Where `key` is, or where it would go, as `binary_search` answers.
     pub fn search(&self, key: &[u8]) -> Result<usize, usize> {
-        let (mut low, mut high) = (0, self.ends.len());
-        while low < high {
-            let middle = low + (high - low) / 2;
-            match self.key(middle).cmp(key) {
-                std::cmp::Ordering::Less => low = middle + 1,
-                std::cmp::Ordering::Greater => high = middle,
-                std::cmp::Ordering::Equal => return Ok(middle),
+        let Some(start) = self.bytes.get(..self.shared) else {
+            return Err(0);
+        };
+        let Some(rest) = key.strip_prefix(start) else {
+            // It sorts before every key or after every key.
+            let after_all = key > start;
+            return Err(if after_all { self.ends.len() } else { 0 });
+        };
+        let wanted = head(rest);
+        let first = self.heads.partition_point(|&head| head < wanted);
+        // Keys with the same number differ, if at all, past those eight
+        // bytes or in how soon they end: their bytes decide.
+        for at in first..self.heads.len() {
+            if self.heads[at] != wanted {
+                return Err(at);
+            }
+            match self.key(at)[self.shared..].cmp(rest) {
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => return Ok(at),
+                std::cmp::Ordering::Greater => return Err(at),
             }
         }
-        Err(low)
+        Err(self.heads.len())
     }
 }
 
