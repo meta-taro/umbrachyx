@@ -65,6 +65,9 @@ $ umbrachyx history agent/support player/42/gems
   for its branch and talks to `umbrachyx mcp`; [`docs/agents.md`](docs/agents.md)
   sets one up. To watch the same history in a viewer, `umbrachyx serve
   <branch>` speaks the Redis protocol with `UMBRA.*` commands for history.
+- **[`docs/examples/`](docs/examples/) has three small systems built this
+  way**, each run by the tests as written: a game's inventory, a support
+  desk, and settings rolled out in stages.
 - **No format is stable yet.** A later version may not open a log this
   one wrote; keep the commands that load your data, not the log.
 
