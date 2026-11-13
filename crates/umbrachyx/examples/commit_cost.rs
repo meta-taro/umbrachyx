@@ -2,14 +2,18 @@
 //! that keeps appends in memory and syncs for free. What is left is what
 //! the store does around the sync.
 //!
-//! `cargo run --release --example commit_cost [-- <keys> <commits> [plain]]`
+//! With a group size, the commits are written that many to a sync, as the
+//! server writes what many clients sent together: a group's cells go into
+//! the tree once.
+//!
+//! `cargo run --release --example commit_cost [-- <keys> <commits> [plain|sealed [group]]]`
 
 use std::io;
 use std::time::Instant;
 
 use umbrachyx::keys::{KeyStorage, Keys};
 use umbrachyx::log::{Edit, Storage};
-use umbrachyx::store::{MAIN_BRANCH, Provenance, Store, SystemClock};
+use umbrachyx::store::{CommitRequest, MAIN_BRANCH, Provenance, Store, SystemClock};
 
 #[derive(Default)]
 struct Memory(Vec<u8>);
@@ -68,6 +72,7 @@ fn main() {
     let keys: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(200_000);
     let commits: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(100_000);
     let plain = args.next().as_deref() == Some("plain");
+    let group: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(1);
     let mut store = if plain {
         Store::open(Memory::default(), SystemClock).expect("opens")
     } else {
@@ -87,13 +92,25 @@ fn main() {
     }
     let mut x = 0x9E37_79B9_7F4A_7C15_u64;
     let started = Instant::now();
-    for _ in 0..commits {
+    let mut next = || {
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;
-        store
-            .commit("bench", vec![set(x as usize % keys)], by())
-            .expect("commits");
+        set(x as usize % keys)
+    };
+    for _ in 0..commits / group {
+        if group == 1 {
+            store.commit("bench", vec![next()], by()).expect("commits");
+            continue;
+        }
+        let requests = (0..group)
+            .map(|_| CommitRequest {
+                branch: "bench".to_owned(),
+                edits: vec![next()],
+                provenance: by(),
+            })
+            .collect();
+        store.commit_all(requests).expect("commits");
     }
     let per = started.elapsed().as_nanos() / commits as u128;
     let started = Instant::now();
@@ -102,7 +119,7 @@ fn main() {
     }
     let view = started.elapsed().as_nanos() / commits as u128;
     println!(
-        "keys={keys} sealed={} commit_ns={per} view_ns={view}",
+        "keys={keys} sealed={} group={group} commit_ns={per} view_ns={view}",
         !plain
     );
 }

@@ -138,11 +138,22 @@ jobs:
       - name: Memory
         run: bench/memory.sh | tee bench-memory.csv
 
+      # What one write costs the store with the disk and the network taken
+      # out, on a million keys, written 1, 64 and 3,200 to a sync: how much
+      # of a write over the server is the store's own work, and how much
+      # writing together saves.
+      - name: Commit cost in process
+        run: |
+          cargo build --quiet --release --locked -p umbrachyx --example commit_cost
+          for group in 1 64 3200; do
+            target/release/examples/commit_cost 1000000 640000 sealed "$group"
+          done | tee bench-commit-cost.txt
+
       - name: Summary
         run: |
           {
             echo "### Benchmarks (shared runner, compare runs of this job only)"
-            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv bench-memory.csv; do
+            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv bench-memory.csv bench-commit-cost.txt; do
               echo
               echo "\`$file\`"
               echo
@@ -155,7 +166,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: bench-${{ github.sha }}
-          path: bench-*.csv
+          path: |
+            bench-*.csv
+            bench-*.txt
 
   image:
     # The container image is built and tried on every change, on both
