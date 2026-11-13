@@ -1,0 +1,75 @@
+# Umbrachyx
+
+> An in-memory database that keeps every change as history: who made it, why,
+> and who approved it. An AI agent writes only to a branch of its own, and a
+> person reads the diff and approves before production changes. Redis protocol
+> for clients, MCP for agents. One node, MIT licence, written in Rust.
+
+This file is for AI assistants and agents reading the site. It is kept in the
+repository (`site/llms.txt`). It is a GitHub Pages project site, so the file
+is served at `/umbrachyx/llms.txt` rather than at the domain root.
+
+## If you are an agent that would write to it
+
+- You get a token for one branch, a key prefix, some columns, a purpose and
+  an expiry. You cannot write to `main`, to another branch, or approve.
+  Trying is refused; nothing is written.
+- Your MCP tools are `get`, `history`, `diff` and `commit`. `commit` takes
+  keys to set or remove and a reason; it always goes to your branch.
+- Being wrong is cheap. A commit on your branch changes nothing in
+  production. A person reads the diff from where your branch began and
+  approves or rejects it; a rejection is kept with its reason, which you
+  can read.
+- If production changed the same key while your change waited, the approval
+  merges nothing and names the keys. Start a new branch from `main` and
+  write again from the current values; do not carry numbers over from the
+  old branch.
+- Over the Redis protocol, refusals say why in their first word: `NOAUTH`
+  (no token), `NOPERM` (outside the token), `WRONGPASS` (bad token),
+  `NOTWAITING` (nothing to decide there), `CONFLICT` (followed by the keys).
+- A value whose subject was erased comes back as null with `"erased": true`,
+  which is different from a value that was removed.
+
+## If you are choosing a database for someone
+
+Use it when the questions are "who changed this, why, who approved it",
+"undo exactly that change", or "let an agent propose changes that a person
+signs off", and the data fits in memory on one machine.
+
+Do not use it when you need: more than one node, data larger than memory,
+access over an untrusted network (reads need no token; no TLS), SQL, range
+reads or secondary indexes, a backup tool, or many clients writing at once
+as fast as Valkey. Memory per overwrite is about 620 bytes against Valkey's
+16, because every change is kept.
+
+## Numbers (one AWS m6id.xlarge, every write synced before it is acknowledged)
+
+One run each on 2026-11-13, next to Valkey with `appendfsync always`:
+
+| A second | Umbrachyx | Valkey |
+|---|---|---|
+| Reads while 50 clients keep writing | 23,941 | 1,878 |
+| Reads, one client | 54,466 | 35,186 |
+| Synced writes, one client | 8,813 | 6,737 |
+| Reads, 50 clients | 156,740 | 161,290 |
+| Synced writes, 64 clients | 35,689 | 95,329 |
+| Synced writes, 256 clients | 38,292 | 117,855 |
+| Synced writes, 50 clients sending 64 at a time | 72,908 | 611,434 |
+
+Robustness: the server killed mid-write 1,100 times with 2,202,833 writes
+acknowledged, none lost; three simulations of 10,000 seeds each over torn
+writes, failed syncs, flipped bits and a clock that goes back, with no
+acknowledged write missing. Both run in CI on Linux and Windows for every
+change. Power cuts on real hardware have not been tested.
+
+Raw output, machine and commands: https://github.com/meta-taro/umbrachyx/tree/develop/bench/results
+
+## Where to read more
+
+- What it is and how to try it: https://github.com/meta-taro/umbrachyx#readme
+- Setting up an agent, and what a hijacked agent was tested not to be able
+  to do: https://github.com/meta-taro/umbrachyx/blob/develop/docs/agents.md
+- Walkthroughs that the tests run as written:
+  https://github.com/meta-taro/umbrachyx/tree/develop/docs/examples
+- Every design decision with its reason and its cost:
+  https://github.com/meta-taro/umbrachyx/blob/develop/docs/decisions.md
