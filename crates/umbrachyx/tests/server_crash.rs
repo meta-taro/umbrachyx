@@ -2,7 +2,8 @@
 //! check that every SET it acknowledged is there after it restarts.
 //!
 //! Each round starts `umbrachyx serve`, lets clients write, kills the server
-//! with SIGKILL (TerminateProcess on Windows) at a pseudo-random moment, and
+//! with SIGKILL (TerminateProcess on Windows) a pseudo-random time after the
+//! round's first acknowledged write, and
 //! reopens the log with its key file, as the server does. Half the clients send one SET at a time; the other half
 //! pipeline several, so writes that share a sync are cut too. A client keeps
 //! a write only once it has read the `+OK` for it.
@@ -21,6 +22,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -43,6 +46,12 @@ const SEED: u64 = 0x5EED_0002;
 /// listens, which by the last rounds takes seconds on a slow CI runner.
 const START_TIMEOUT: Duration = Duration::from_secs(120);
 const START_WAIT: Duration = Duration::from_millis(25);
+/// How long a round waits for its first acknowledged write before it
+/// kills the server anyway. The delay to the kill is counted from that
+/// write: counted from the start, a slow machine was killed before it had
+/// acknowledged anything in any round, and the test proved nothing.
+const FIRST_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const FIRST_WRITE_WAIT: Duration = Duration::from_millis(1);
 
 /// SplitMix64, so the kill delays repeat for a given seed with no dependency.
 fn next_random(state: &mut u64) -> u64 {
@@ -153,8 +162,9 @@ fn set(key: &str, value: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Writes until the server goes away; returns the writes it acknowledged.
-fn client(port: u16, round: u32, client: usize) -> Vec<(String, String)> {
+/// Writes until the server goes away; returns the writes it acknowledged,
+/// and says so once it has one.
+fn client(port: u16, round: u32, client: usize, has_written: &AtomicBool) -> Vec<(String, String)> {
     let mut acknowledged = Vec::new();
     let Ok(stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return acknowledged;
@@ -184,7 +194,10 @@ fn client(port: u16, round: u32, client: usize) -> Vec<(String, String)> {
         for write in writes {
             line.clear();
             match replies.read_line(&mut line) {
-                Ok(_) if line == "+OK\r\n" => acknowledged.push(write),
+                Ok(_) if line == "+OK\r\n" => {
+                    acknowledged.push(write);
+                    has_written.store(true, Ordering::Relaxed);
+                }
                 // Killed mid-reply, or never answered: not acknowledged.
                 _ => return acknowledged,
             }
@@ -213,9 +226,17 @@ fn kill_rounds(name: &str, rounds: u32) {
         let span = MAX_KILL_DELAY_MILLIS - MIN_KILL_DELAY_MILLIS;
         let delay = MIN_KILL_DELAY_MILLIS + next_random(&mut random) % span;
         let (server, port) = start_server(&dir.log(), &dir.0.join("serve.err"));
+        let has_written = Arc::new(AtomicBool::new(false));
         let clients: Vec<_> = (0..CLIENTS)
-            .map(|n| thread::spawn(move || client(port, round, n)))
+            .map(|n| {
+                let has_written = Arc::clone(&has_written);
+                thread::spawn(move || client(port, round, n, &has_written))
+            })
             .collect();
+        let started = Instant::now();
+        while !has_written.load(Ordering::Relaxed) && started.elapsed() < FIRST_WRITE_TIMEOUT {
+            thread::sleep(FIRST_WRITE_WAIT);
+        }
         thread::sleep(Duration::from_millis(delay));
         server.kill();
         for handle in clients {
