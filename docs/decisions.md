@@ -824,7 +824,8 @@ checker to hold the shared secret that mints tokens.
   end, which is a write. The commands read any branch, main included,
   since a branch is reviewed against main, and `BRANCHES` names the branch
   the server writes to. They write nothing. Like `GET`,
-  they are guarded only by listening on this machine, so anyone who can
+  they are guarded only by where the server listens (this machine,
+  unless `--bind` says otherwise), so anyone who can
   reach the port also sees who changed what and why; values of erased
   subjects stay unreadable here as everywhere.
 - **The store answers them in a writer's turn, between groups of

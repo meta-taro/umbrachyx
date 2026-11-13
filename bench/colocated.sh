@@ -99,15 +99,17 @@ quiet_rps="$(row alone "1 client" -t set -n 2000 -c 1 | cut -d, -f4 | cut -d. -f
 rows alone "$((quiet_rps * 5))"
 start_neighbours
 rows crowded "$((quiet_rps * seconds / 4))"
-kill -0 "$server" 2>/dev/null || { echo "FAILED: the server stopped under load" >&2; cat "$dir/rows.stderr" >&2; exit 1; }
+kill -0 "$server" 2>/dev/null || { echo "FAILED: the server stopped under load"; cat "$dir/rows.stderr"; exit 1; }
 echo "ok: the server answered throughout"
 stop
 
 echo
 echo "# 2. killed mid-write next to the neighbours, 100 rounds"
-TMPDIR="$dir" cargo test -p umbrachyx --release --test server_crash -- --ignored --nocapture 2>&1 |
-  grep -E "^test |test result" | tee "$dir/crash.txt"
-grep -q "test result: ok. 1 passed" "$dir/crash.txt" || { echo "FAILED: the crash test did not pass" >&2; exit 1; }
+# The verdict is read from what the test printed, so a failing run still
+# gets its FAILED line here instead of ending the script at the pipe.
+TMPDIR="$dir" cargo test -p umbrachyx --release --test server_crash -- --ignored --nocapture >"$dir/crash.txt" 2>&1 || true
+grep -E "^test |test result|panicked|lost" "$dir/crash.txt" || true
+grep -q "test result: ok. 1 passed" "$dir/crash.txt" || { echo "FAILED: the crash test did not pass"; exit 1; }
 stop_neighbours
 
 echo
@@ -151,8 +153,8 @@ echo "acknowledged before it stopped: $acknowledged"
 echo "exit status: $status"
 echo "what it said:"
 grep -v "^serving " "$dir/memory.stderr" | sed 's/^/  /' || true
-grep -q "memory" "$dir/memory.stderr" || { echo "FAILED: the server stopped without saying it was out of memory" >&2; exit 1; }
-[ "$acknowledged" -gt 0 ] || { echo "FAILED: nothing was acknowledged before the limit" >&2; exit 1; }
+grep -q "memory" "$dir/memory.stderr" || { echo "FAILED: the server stopped without saying it was out of memory"; exit 1; }
+[ "$acknowledged" -gt 0 ] || { echo "FAILED: nothing was acknowledged before the limit"; exit 1; }
 
 start memory
 missing="$(python3 - "$port" "$acknowledged" <<'PYTHON'
@@ -175,5 +177,5 @@ PYTHON
 )"
 stop
 echo "acknowledged writes missing after it started again: $missing"
-[ "$missing" -eq 0 ] || { echo "FAILED: acknowledged writes were lost" >&2; exit 1; }
+[ "$missing" -eq 0 ] || { echo "FAILED: acknowledged writes were lost"; exit 1; }
 echo "ok: it said why it stopped, and every acknowledged write is there"
