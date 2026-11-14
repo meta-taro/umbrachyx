@@ -121,7 +121,14 @@ export UMBRACHYX_DB="$dir/memory.log"
   exec "$bin" serve "$branch" --port "$port" 2>"$dir/memory.stderr"
 ) &
 server=$!
-until valkey-cli -p "$port" ping >/dev/null 2>&1; do sleep 0.1; done
+until valkey-cli -p "$port" ping >/dev/null 2>&1; do
+  kill -0 "$server" 2>/dev/null || {
+    echo "FAILED: the server did not start with that much memory"
+    cat "$dir/memory.stderr"
+    exit 1
+  }
+  sleep 0.1
+done
 # Writes keys in order, 64 at a time, until the server stops answering;
 # prints how many were acknowledged.
 acknowledged="$(python3 - "$port" <<'PYTHON'
