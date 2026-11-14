@@ -47,24 +47,25 @@ signs off", and the data fits in memory on one machine.
 Do not use it when you need: more than one node, data larger than memory,
 access over an untrusted network (reads need no token; no TLS), SQL, range
 reads or secondary indexes, a backup tool, or many clients writing at once
-as fast as Valkey. Memory per overwrite is about 620 bytes against Valkey's
+as fast as Valkey. Memory per overwrite is about 650 bytes against Valkey's
 16, because every change is kept.
 
 ## Numbers (one AWS m6id.xlarge, every write synced before it is acknowledged)
 
-One run each on 2026-11-13, next to Valkey with `appendfsync always`:
+The median of three runs on 2026-11-14, next to Valkey with `appendfsync always`
+(Valkey keeps only the current value; the Umbrachyx rows are with the history kept):
 
 | A second | Umbrachyx | Valkey |
 |---|---|---|
-| Reads while 50 clients keep writing | 23,941 | 1,878 |
-| Reads, one client | 54,466 | 35,186 |
-| Synced writes, one client | 8,813 | 6,737 |
-| Reads, 50 clients | 156,740 | 161,290 |
-| Synced writes, 64 clients | 35,689 | 95,329 |
-| Synced writes, 256 clients | 38,292 | 117,855 |
-| Synced writes, 50 clients sending 64 at a time | 72,908 | 611,434 |
+| Reads while 50 clients keep writing | 24,612 | 1,782 |
+| Reads, one client | 54,230 | 36,443 |
+| Synced writes, one client | 8,548 | 6,401 |
+| Reads, 50 clients | 144,509 | 153,374 |
+| Synced writes, 64 clients | 36,010 | 98,717 |
+| Synced writes, 256 clients | 39,746 | 116,347 |
+| Synced writes, 50 clients sending 64 at a time | 73,443 | 629,327 |
 
-Robustness: the server killed mid-write 1,100 times with 2,202,833 writes
+Robustness: the server killed mid-write 1,100 times with 2,333,963 writes
 acknowledged, none lost; three simulations of 10,000 seeds each over torn
 writes, failed syncs, flipped bits and a clock that goes back, with no
 acknowledged write missing. Both run in CI on Linux and Windows for every

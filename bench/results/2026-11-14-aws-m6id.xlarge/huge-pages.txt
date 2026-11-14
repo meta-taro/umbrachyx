@@ -1,0 +1,63 @@
+transparent huge pages: always [madvise] never
+commit: 269dc7afe545b23fb6562e50e054df602850f691
+== round 1, default
+keys=1000000 sealed=false group=1 commit_ns=14716 view_ns=124
+keys=1000000 sealed=false group=64 commit_ns=14566 view_ns=132
+fill, 50 clients 64 at a time, SET/s: 72669.14
+again, 50 clients 64 at a time, SET/s: 66591.20
+50 clients, GET/s: 156176.80
+1 client, GET/s: 54899.81
+1 client, SET/s: 8571.43
+/proc/39191/status:VmRSS: 1424908 kB
+AnonHugePages: 0 kB
+== round 1, thp:always,metadata_thp:always
+keys=1000000 sealed=false group=1 commit_ns=11307 view_ns=125
+keys=1000000 sealed=false group=64 commit_ns=9565 view_ns=133
+fill, 50 clients 64 at a time, SET/s: 84466.59
+again, 50 clients 64 at a time, SET/s: 81287.59
+50 clients, GET/s: 160926.94
+1 client, GET/s: 56100.98
+1 client, SET/s: 9202.45
+/proc/39259/status:VmRSS: 1441044 kB
+AnonHugePages: 937984 kB
+== round 2, default
+keys=1000000 sealed=false group=1 commit_ns=14661 view_ns=128
+keys=1000000 sealed=false group=64 commit_ns=14605 view_ns=132
+fill, 50 clients 64 at a time, SET/s: 72992.70
+again, 50 clients 64 at a time, SET/s: 66818.12
+50 clients, GET/s: 156690.69
+1 client, GET/s: 54704.60
+1 client, SET/s: 8517.89
+/proc/39338/status:VmRSS: 1425140 kB
+AnonHugePages: 0 kB
+== round 2, thp:always,metadata_thp:always
+keys=1000000 sealed=false group=1 commit_ns=11207 view_ns=144
+keys=1000000 sealed=false group=64 commit_ns=9537 view_ns=132
+fill, 50 clients 64 at a time, SET/s: 84274.40
+again, 50 clients 64 at a time, SET/s: 82054.65
+50 clients, GET/s: 145836.38
+1 client, GET/s: 55772.45
+1 client, SET/s: 9213.76
+/proc/39406/status:VmRSS: 1443924 kB
+AnonHugePages: 931840 kB
+== round 3, default
+keys=1000000 sealed=false group=1 commit_ns=14361 view_ns=128
+keys=1000000 sealed=false group=64 commit_ns=14339 view_ns=130
+fill, 50 clients 64 at a time, SET/s: 73008.69
+again, 50 clients 64 at a time, SET/s: 67604.11
+50 clients, GET/s: 159693.39
+1 client, GET/s: 54200.54
+1 client, SET/s: 8527.57
+/proc/39488/status:VmRSS: 1425052 kB
+AnonHugePages: 0 kB
+== round 3, thp:always,metadata_thp:always
+keys=1000000 sealed=false group=1 commit_ns=11103 view_ns=124
+keys=1000000 sealed=false group=64 commit_ns=9415 view_ns=125
+fill, 50 clients 64 at a time, SET/s: 84246.00
+again, 50 clients 64 at a time, SET/s: 82385.90
+50 clients, GET/s: 150285.55
+1 client, GET/s: 55928.41
+1 client, SET/s: 9146.34
+/proc/39556/status:VmRSS: 1443664 kB
+AnonHugePages: 935936 kB
+HUGE-DONE

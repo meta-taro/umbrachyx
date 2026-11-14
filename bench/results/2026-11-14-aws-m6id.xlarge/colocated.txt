@@ -1,0 +1,27 @@
+# 1. the server alone, then next to the neighbours
+state,clients,test,rps,p50_latency_ms,p99_latency_ms
+alone,"1 client",SET,9361.68,0.103,0.151
+alone,"1 client",GET,57055.49,0.015,0.031
+alone,"50 clients",SET,55563.06,0.735,0.999
+alone,"50 clients",GET,158088.75,0.159,0.247
+crowded,"1 client",SET,1330.89,0.255,5.127
+crowded,"1 client",GET,7004.95,0.031,2.583
+crowded,"50 clients",SET,10615.66,3.815,10.951
+crowded,"50 clients",GET,24232.77,0.847,9.239
+ok: the server answered throughout
+
+# 2. killed mid-write next to the neighbours, 100 rounds
+test kill_the_server_during_writes has been running for over 60 seconds
+100 rounds, 471378 acknowledged SETs, none lost
+test kill_the_server_during_writes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1101.80s
+
+# 3. out of memory: the server may have 1024 MiB
+bench/colocated.sh: line 156: 38332 Aborted                 (core dumped) ( ulimit -v "$memory_limit_kib"; exec "$bin" serve "$branch" --port "$port" 2> "$dir/memory.stderr" )
+acknowledged before it stopped: 343232
+exit status: 134
+what it said:
+  memory allocation of 36480 bytes failed
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+acknowledged writes missing after it started again: 0
+ok: it said why it stopped, and every acknowledged write is there
