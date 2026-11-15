@@ -222,12 +222,14 @@ when the benchmark's client lands on the core a serving thread is on
 ([`bench/results/2026-11-13-aws-m6id.xlarge-next/`](bench/results/2026-11-13-aws-m6id.xlarge-next/)),
 which is why its range is beside its median.
 
-Not in the table, because it is not what was released: with the
-allocator asked for huge pages, the same machine gave about 16% more
-writes sent 64 at a time, 7% more from one client, the same reads, and
-1.3% more memory, in three rounds taken in turn
+Not in the table, because the table was measured before it: the server
+now asks Linux for huge pages for its memory. On the same machine that
+gave about 16% more writes sent 64 at a time, 7% more from one client,
+the same reads, and 1.3% more memory, in three rounds taken in turn
 ([`huge-pages.txt`](bench/results/2026-11-14-aws-m6id.xlarge/huge-pages.txt)).
-It is not the default yet.
+A server holding almost nothing takes about 12 MiB more for it. The
+table will be measured again with it on; why, and how to turn it off, is
+in [`docs/decisions.md`](docs/decisions.md).
 
 Next to noisy neighbours on the same machine (other programs keeping
 every processor busy, syncing files on the same disk, churning 70% of

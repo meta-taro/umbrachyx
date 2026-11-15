@@ -23,15 +23,8 @@ use umbrachyx::store::{
 };
 use umbrachyx::tree::Bytes;
 
+mod allocator;
 mod tokens;
-
-/// jemalloc rather than the system's allocator: when nodes were hashed on
-/// every write, each hash filled a buffer and glibc's malloc took twice the
-/// time jemalloc does (`docs/decisions.md`). Nodes are now hashed only for
-/// diffs; the allocator was not measured again since.
-#[cfg(not(windows))]
-#[global_allocator]
-static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 const DB_ENV: &str = "UMBRACHYX_DB";
 const DEFAULT_DB: &str = "umbrachyx.log";
