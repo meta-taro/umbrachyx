@@ -1,0 +1,594 @@
+commit: dfbd56cde184a3552596fb81292367338d4bf2dc
+4 processors, 7.0.0-1014-aws
+
+# plain, answered first, 50 clients sending 64 at a time
+writes a second: "113785.06"
+## processor use by thread, the server's then the client's (one 3 s sample)
+98.3% resp co+
+6.0% resp lo+
+6.0% resp lo+
+4.3% valkey-+
+## share of the samples by thread
+88.95%  resp commits
+5.77%  resp loop 1
+5.27%  resp loop 0
+## the thread that writes, own time
+27.85% <alloc::sync::Arc<umbrachyx::hamt::Node>>::drop_slow
+18.85% umbrachyx::hamt::insert
+16.10% <alloc::vec::Vec<(u64, alloc::sync::Arc<[u8]>, alloc::sync::Arc<[u8]>)> as core::clone::Clone
+5.20% _rjem_je_edata_heap_remove_first
+2.21% _rjem_je_arena_ptr_array_flush
+2.06% <umbrachyx::hamt::Hamt>::insert
+1.53% _blake3_compress_in_place_avx512
+1.41% <umbrachyx::store::Store<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock>>
+0.78% <aes::backends::x86_aes::Aes<15>>::encrypt::<cipher::block::ctx::BlockCtx<typenum::uint::UInt<
+0.72% _rjem_je_bin_slab_reg_alloc_batch
+0.49% <cmac::Cmac<aes::Aes256> as digest::FixedOutputReset>::finalize_fixed_reset
+0.39% umbrachyx::log::record::push_commit
+0.39% <aes::backends::x86_aes::Aes<15>>::new
+0.38% _rjem_sdallocx
+0.36% <umbrachyx::store::seal::Sealer>::seal
+0.32% _rjem_je_edata_heap_insert
+0.32% <umbrachyx::store::committer::Turns>::next_group
+0.29% core::ptr::drop_glue::<umbrachyx::log::record::Commit>
+0.28% _rjem_malloc
+0.26% <alloc::sync::Arc<[u8]>>::drop_slow
+0.26% k:rep_movs_alternative
+0.25% core::iter::adapters::try_process::<core::iter::adapters::map::Map<alloc::vec::into_iter::Into
+0.24% <alloc::vec::into_iter::IntoIter<umbrachyx::log::record::Edit> as core::iter::traits::iterator
+0.23% <umbrachyx::store::committer::Slot>::fill
+0.20% _rjem_je_arena_ptr_array_fill_small
+## the thread that writes, with what each calls
+88.95%     0.00% call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+88.95%     0.00% catch_unwind<!, core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::
+88.95%     0.00% catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spa
+88.95%     0.00% drop<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::
+88.95%     0.00% for_value_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+88.95%     0.00% new<!> (inlined)
+88.95%     0.00% size_of_val_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Sen
+88.95%     0.00% write_queue<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (i
+88.95%     0.00% write_queued (inlined)
+88.95%     0.00% {closure#1} (inlined)
+88.95%     0.00% {closure#1}<umbrachyx::server::event::spawn_writer::{closure_env#1}, !> (inlined)
+88.49%     0.00% write<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (inlined
+84.61%     0.00% write_group<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (i
+56.61%     0.00% commit_all<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (in
+56.52%     0.00% spike_commit_plain<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemCl
+42.76%     0.00% insert (inlined)
+40.57%     0.00% from (inlined)
+40.54%     0.00% insert (inlined)
+30.17%     0.00% drop_slow<umbrachyx::hamt::Node, alloc::alloc::Global> (inlined)
+30.04%     0.00% drop<(u8, alloc::sync::Arc<umbrachyx::hamt::Node, alloc::alloc::Global>), alloc::al
+30.04%     0.00% drop_glue<[(u8, alloc::sync::Arc<umbrachyx::hamt::Node, alloc::alloc::Global>)]> (i
+30.04%     0.00% drop_glue<alloc::vec::Vec<(u8, alloc::sync::Arc<umbrachyx::hamt::Node, alloc::alloc
+30.04%     0.00% drop_glue<umbrachyx::hamt::Node> (inlined)
+30.04%     0.00% drop_in_place<[(u8, alloc::sync::Arc<umbrachyx::hamt::Node, alloc::alloc::Global>)]
+30.04%     0.00% drop_in_place<umbrachyx::hamt::Node> (inlined)
+30.02%     0.00% drop_glue<(u8, alloc::sync::Arc<umbrachyx::hamt::Node, alloc::alloc::Global>)> (inl
+## the threads that serve, own time
+0.88% <umbrachyx::store::committer::Writer>::send
+0.83% <umbrachyx::server::event::Loop>::run
+0.74% <umbrachyx::server::event::Connection>::execute
+0.64% k:do_syscall_64
+0.62% umbrachyx::server::resp::length
+0.54% _rjem_malloc
+0.36% umbrachyx::server::resp::parse
+0.32% epoll_wait
+0.28% <alloc::vec::into_iter::IntoIter<core::ops::range::Range<usize>> as core::iter::traits::iterat
+0.27% <usize>::from_ascii_radix
+0.25% __rustc::__rust_alloc
+0.24% _rjem_sdallocx
+0.22% __rustc::__rust_no_alloc_shim_is_unstable_v2
+0.19% core::str::converts::from_utf8
+0.17% k:_raw_spin_unlock_irqrestore
+0.14% _rjem_je_bin_slab_reg_alloc_batch
+0.14% k:finish_task_switch.isra.0
+0.14% __rustc::__rust_dealloc
+0.12% <umbrachyx::server::session::Session>::provenance
+0.12% k:__fget_files
+0.11% <alloc::sync::Arc<umbrachyx::store::committer::Slot>>::drop_slow
+0.10% <alloc::vec::Vec<alloc::vec::Vec<u8>> as alloc::vec::spec_from_iter_nested::SpecFromIterNested
+0.10% <umbrachyx::server::session::Session>::may_write
+0.10% k:fput
+0.09% _rjem_je_arena_ptr_array_flush
+0.08% k:handle_softirqs
+0.08% <std::time::Instant>::elapsed
+0.08% k:ep_poll
+## the threads that serve, with what each calls
+11.05%     0.00% call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+11.05%     0.00% drop<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::
+11.05%     0.00% for_value_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+11.05%     0.00% size_of_val_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Sen
+11.05%     0.00% {closure#0} (inlined)
+11.05%     0.00% {closure#1}<umbrachyx::server::event::spawn::{closure_env#0}, ()> (inlined)
+10.85%     0.00% run (inlined)
+8.84%     0.00% take_turns (inlined)
+6.55%     0.00% read (inlined)
+5.46%     0.00% execute (inlined)
+2.83%     0.00% entry_SYSCALL_64_after_hwframe
+2.80%     0.64% do_syscall_64
+2.33%     0.00% parse (inlined)
+2.15%     0.05% x64_sys_call
+1.94%     0.00% wait (inlined)
+1.55%     0.00% poll (inlined)
+1.53%     0.00% select (inlined)
+1.44%     0.32% epoll_wait
+1.26%     0.00% send (inlined)
+1.25%     0.00% write (inlined)
+1.23%     0.05% __send
+1.23%     0.00% write (inlined)
+1.16%     0.02% __sys_sendto
+1.16%     0.00% __x64_sys_sendto
+1.11%     0.00% send (inlined)
+
+# plain, answered first, 64 clients one at a time
+writes a second: "100593.50"
+## processor use by thread, the server's then the client's (one 3 s sample)
+94.0% resp lo+
+93.7% resp lo+
+93.0% valkey-+
+89.7% resp co+
+## share of the samples by thread
+33.76%  resp loop 0
+33.76%  resp loop 1
+32.48%  resp commits
+## the thread that writes, own time
+7.78% <alloc::vec::Vec<(u64, alloc::sync::Arc<[u8]>, alloc::sync::Arc<[u8]>)> as core::clone::Clone>
+7.15% umbrachyx::hamt::insert
+3.28% <alloc::sync::Arc<umbrachyx::hamt::Node>>::drop_slow
+0.74% k:finish_task_switch.isra.0
+0.71% k:_raw_spin_unlock_irq
+0.70% k:do_syscall_64
+0.53% <umbrachyx::store::committer::Core<umbrachyx::log::storage::FileStorage, umbrachyx::store::Sys
+0.51% <umbrachyx::store::Store<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock>>
+0.49% _blake3_compress_in_place_avx512
+0.40% <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+0.38% write
+0.37% _rjem_je_arena_ptr_array_flush
+0.35% <umbrachyx::store::committer::Turns>::next_group
+0.32% <aes::backends::x86_aes::Aes<15>>::encrypt::<cipher::block::ctx::BlockCtx<typenum::uint::UInt<
+0.32% _rjem_malloc
+0.30% <aes::backends::x86_aes::Aes<15>>::new
+0.29% k:__fget_files
+0.29% _rjem_sdallocx
+0.26% <cmac::Cmac<aes::Aes256> as digest::FixedOutputReset>::finalize_fixed_reset
+0.18% umbrachyx::log::record::push_commit
+0.17% <umbrachyx::store::seal::Sealer>::seal
+0.16% <alloc::vec::into_iter::IntoIter<umbrachyx::log::record::Edit> as core::iter::traits::iterator
+0.16% <umbrachyx::store::committer::Slot>::fill
+0.15% core::ptr::drop_glue::<umbrachyx::log::record::Commit>
+0.14% <std::hash::random::DefaultHasher as core::hash::Hasher>::write
+0.14% __rustc::__rust_alloc
+0.13% <umbrachyx::keys::Keys<alloc::boxed::Box<dyn umbrachyx::keys::KeyStorage + core::marker::Send>
+## the thread that writes, with what each calls
+32.48%     0.00% call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+32.48%     0.00% catch_unwind<!, core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::
+32.48%     0.00% catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spa
+32.48%     0.00% drop<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::
+32.48%     0.00% for_value_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+32.48%     0.00% new<!> (inlined)
+32.48%     0.00% size_of_val_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Sen
+32.48%     0.00% {closure#1}<umbrachyx::server::event::spawn_writer::{closure_env#1}, !> (inlined)
+32.28%     0.00% {closure#1} (inlined)
+30.74%     0.00% write_queued (inlined)
+30.66%     0.00% write_queue<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (i
+30.05%     0.00% write<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (inlined
+28.05%     0.00% write_group<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (i
+20.72%     0.00% commit_all<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (in
+20.60%     0.00% spike_commit_plain<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemCl
+16.00%     0.00% insert (inlined)
+15.57%     0.00% from (inlined)
+15.50%     0.00% insert (inlined)
+7.87%     0.00% non_null<alloc::alloc::Global, (u64, alloc::sync::Arc<[u8], alloc::alloc::Global>, a
+7.87%     0.00% ptr<(u64, alloc::sync::Arc<[u8], alloc::alloc::Global>, alloc::sync::Arc<[u8], alloc
+7.87%     0.00% ptr<alloc::alloc::Global, (u64, alloc::sync::Arc<[u8], alloc::alloc::Global>, alloc:
+7.87%     0.00% as_ptr<(u64, alloc::sync::Arc<[u8], alloc::alloc::Global>, alloc::sync::Arc<[u8], al
+7.87%     0.00% as_slice<(u64, alloc::sync::Arc<[u8], alloc::alloc::Global>, alloc::sync::Arc<[u8], 
+7.87%     0.00% deref<(u64, alloc::sync::Arc<[u8], alloc::alloc::Global>, alloc::sync::Arc<[u8], all
+7.85%     0.00% clone<(u64, alloc::sync::Arc<[u8], alloc::alloc::Global>, alloc::sync::Arc<[u8], all
+7.84%     0.00% to_vec<(u64, alloc::sync::Arc<[u8], alloc::alloc::Global>, alloc::sync::Arc<[u8], al
+## the threads that serve, own time
+11.28% k:do_syscall_64
+5.32% epoll_wait
+3.42% <umbrachyx::server::event::Loop>::run
+2.09% k:__fget_files
+1.67% k:fput
+1.63% k:_raw_spin_unlock_irqrestore
+1.26% k:ep_poll
+0.76% recv
+0.68% <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&usize>
+0.68% k:_raw_spin_unlock_irq
+0.66% <umbrachyx::store::committer::Writer>::send
+0.63% <std::time::Instant>::elapsed
+0.62% k:do_epoll_wait
+0.61% k:x64_sys_call
+0.53% <mio::poll::Poll>::poll
+0.52% <std::sys::pal::unix::time::Timespec>::sub_timespec
+0.51% k:tcp_clean_rtx_queue
+0.49% k:skb_release_data
+0.49% k:tcp_recvmsg_locked
+0.48% k:__x64_sys_epoll_wait
+0.47% k:_raw_spin_lock_bh
+0.46% k:its_return_thunk
+0.46% __send
+0.45% k:aa_inet_msg_perm
+0.45% k:fdget
+## the threads that serve, with what each calls
+67.52%     0.00% call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+67.52%     0.00% drop<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::
+67.52%     0.00% for_value_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+67.52%     0.00% size_of_val_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Sen
+67.52%     0.00% {closure#0} (inlined)
+67.52%     0.00% {closure#1}<umbrachyx::server::event::spawn::{closure_env#0}, ()> (inlined)
+64.94%     0.00% run (inlined)
+42.58%     0.00% entry_SYSCALL_64_after_hwframe
+42.42%    11.28% do_syscall_64
+33.47%     0.00% wait (inlined)
+31.02%     0.61% x64_sys_call
+30.94%     0.00% take_turns (inlined)
+27.34%     0.00% poll (inlined)
+27.19%     0.00% select (inlined)
+23.74%     5.32% epoll_wait
+17.36%     0.00% send (inlined)
+17.26%     0.00% write (inlined)
+17.15%     0.00% write (inlined)
+17.01%     0.46% __send
+16.09%     0.05% __x64_sys_sendto
+15.93%     0.27% __sys_sendto
+15.43%     0.09% inet_sendmsg
+15.30%     0.04% tcp_sendmsg
+14.85%     0.35% tcp_sendmsg_locked
+12.59%     0.05% tcp_push
+
+# plain, synced, 50 clients sending 64 at a time
+writes a second: "113154.18"
+## processor use by thread, the server's then the client's (one 3 s sample)
+97.0% resp co+
+5.7% resp lo+
+5.7% resp lo+
+4.7% valkey-+
+## share of the samples by thread
+89.56%  resp commits
+5.30%  resp loop 1
+5.13%  resp loop 0
+## the thread that writes, own time
+30.01% <alloc::sync::Arc<umbrachyx::hamt::Node>>::drop_slow
+19.46% umbrachyx::hamt::insert
+16.05% <alloc::vec::Vec<(u64, alloc::sync::Arc<[u8]>, alloc::sync::Arc<[u8]>)> as core::clone::Clone
+5.37% _rjem_je_edata_heap_remove_first
+2.04% _rjem_je_arena_ptr_array_flush
+1.82% <umbrachyx::hamt::Hamt>::insert
+1.30% _blake3_compress_in_place_avx512
+1.17% <umbrachyx::store::Store<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock>>
+0.74% <aes::backends::x86_aes::Aes<15>>::encrypt::<cipher::block::ctx::BlockCtx<typenum::uint::UInt<
+0.60% _rjem_je_bin_slab_reg_alloc_batch
+0.52% <cmac::Cmac<aes::Aes256> as digest::FixedOutputReset>::finalize_fixed_reset
+0.36% _rjem_je_edata_heap_insert
+0.35% <aes::backends::x86_aes::Aes<15>>::new
+0.34% _rjem_sdallocx
+0.33% <umbrachyx::store::seal::Sealer>::seal
+0.29% <umbrachyx::store::committer::Turns>::next_group
+0.22% <aes::backends::x86_aes::Aes<15>>::encrypt::<<ctr::ctr_core::CtrCore<_, _> as cipher::stream::
+0.22% _rjem_je_arena_ptr_array_fill_small
+0.22% core::iter::adapters::try_process::<core::iter::adapters::map::Map<alloc::vec::into_iter::Into
+0.21% <umbrachyx::store::committer::Slot>::fill
+0.20% <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&[u8]>
+0.20% umbrachyx::log::record::push_commit
+0.19% <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+0.19% k:kernel_init_pages
+0.17% <alloc::vec::into_iter::IntoIter<umbrachyx::log::record::Edit> as core::iter::traits::iterator
+0.17% <std::hash::random::DefaultHasher as core::hash::Hasher>::write
+## the thread that writes, with what each calls
+89.56%     0.00% call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+89.56%     0.00% catch_unwind<!, core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::
+89.56%     0.00% catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spa
+89.56%     0.00% drop<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::
+89.56%     0.00% for_value_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+89.56%     0.00% new<!> (inlined)
+89.56%     0.00% size_of_val_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Sen
+89.56%     0.00% {closure#1}<umbrachyx::server::event::spawn_writer::{closure_env#1}, !> (inlined)
+89.56%     0.00% {closure#1} (inlined)
+89.49%     0.00% write_queue<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (i
+89.49%     0.00% write_queued (inlined)
+89.08%     0.00% write<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (inlined
+88.92%     0.00% write_group<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (i
+59.27%     0.00% commit_all<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (in
+59.22%     0.00% spike_commit_plain<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemCl
+43.02%     0.00% insert (inlined)
+41.03%     0.00% from (inlined)
+41.00%     0.00% insert (inlined)
+32.36%     0.00% drop_slow<umbrachyx::hamt::Node, alloc::alloc::Global> (inlined)
+32.23%     0.00% drop<(u8, alloc::sync::Arc<umbrachyx::hamt::Node, alloc::alloc::Global>), alloc::al
+32.23%     0.00% drop_glue<alloc::vec::Vec<(u8, alloc::sync::Arc<umbrachyx::hamt::Node, alloc::alloc
+32.23%     0.00% drop_glue<umbrachyx::hamt::Node> (inlined)
+32.23%     0.00% drop_in_place<umbrachyx::hamt::Node> (inlined)
+32.22%     0.00% drop_glue<[(u8, alloc::sync::Arc<umbrachyx::hamt::Node, alloc::alloc::Global>)]> (i
+32.22%     0.00% drop_in_place<[(u8, alloc::sync::Arc<umbrachyx::hamt::Node, alloc::alloc::Global>)]
+32.18%     0.00% drop_glue<(u8, alloc::sync::Arc<umbrachyx::hamt::Node, alloc::alloc::Global>)> (inl
+## the threads that serve, own time
+1.33% <umbrachyx::store::committer::Writer>::send
+0.79% <umbrachyx::server::event::Loop>::run
+0.62% <umbrachyx::server::event::Connection>::execute
+0.57% k:do_syscall_64
+0.53% _rjem_malloc
+0.42% umbrachyx::server::resp::length
+0.32% epoll_wait
+0.30% umbrachyx::server::resp::parse
+0.29% core::str::converts::from_utf8
+0.26% <alloc::vec::into_iter::IntoIter<core::ops::range::Range<usize>> as core::iter::traits::iterat
+0.26% __rustc::__rust_alloc
+0.23% _rjem_sdallocx
+0.22% <usize>::from_ascii_radix
+0.18% __rustc::__rust_no_alloc_shim_is_unstable_v2
+0.15% _rjem_je_bin_slab_reg_alloc_batch
+0.15% k:finish_task_switch.isra.0
+0.12% <std::sys::sync::mutex::futex::Mutex>::lock_contended
+0.12% __rustc::__rust_dealloc
+0.12% k:_raw_spin_unlock_irqrestore
+0.11% k:__fget_files
+0.10% <alloc::vec::Vec<alloc::vec::Vec<u8>> as alloc::vec::spec_from_iter_nested::SpecFromIterNested
+0.09% <umbrachyx::server::session::Session>::provenance
+0.08% <umbrachyx::server::session::Session>::may_write
+0.08% _rjem_je_arena_ptr_array_flush
+0.07% <core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next
+0.07% k:rep_movs_alternative
+## the threads that serve, with what each calls
+10.44%     0.00% call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+10.44%     0.00% drop<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::
+10.44%     0.00% for_value_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+10.44%     0.00% size_of_val_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Sen
+10.44%     0.00% {closure#0} (inlined)
+10.44%     0.00% {closure#1}<umbrachyx::server::event::spawn::{closure_env#0}, ()> (inlined)
+10.26%     0.00% run (inlined)
+8.38%     0.00% take_turns (inlined)
+6.42%     0.00% read (inlined)
+5.48%     0.00% execute (inlined)
+2.41%     0.57% k:do_syscall_64
+2.41%     0.00% entry_SYSCALL_64_after_hwframe
+2.09%     0.00% parse (inlined)
+1.83%     0.00% wait (inlined)
+1.83%     0.02% x64_sys_call
+1.63%     0.00% send (inlined)
+1.53%     0.00% poll (inlined)
+1.52%     0.00% select (inlined)
+1.33%     1.33% <umbrachyx::store::committer::Writer>::send
+1.30%     0.32% epoll_wait
+1.04%     0.00% send (inlined)
+1.03%     0.00% write (inlined)
+1.03%     0.00% write (inlined)
+1.00%     0.01% __send
+0.97%     0.01% __x64_sys_sendto
+
+# history, 50 clients sending 64 at a time
+writes a second: "87485.23"
+## processor use by thread, the server's then the client's (one 3 s sample)
+97.0% resp co+
+5.0% resp lo+
+5.0% resp lo+
+4.0% valkey-+
+## share of the samples by thread
+90.49%  resp commits
+4.82%  resp loop 0
+4.69%  resp loop 1
+## the thread that writes, own time
+11.18% <umbrachyx::tree::node::KeyIndex>::search
+6.55% umbrachyx::tree::insert_into
+6.21% <umbrachyx::tree::node::Leaf>::with_values
+5.81% <alloc::sync::Arc<umbrachyx::tree::node::Node>>::drop_slow
+4.23% <umbrachyx::tree::Tree>::get
+3.97% <umbrachyx::store::Head>::held_shared
+3.35% _blake3_compress_in_place_avx512
+2.94% <umbrachyx::store::CommitInfo>::written
+2.94% <umbrachyx::store::Store<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock>>
+2.26% _rjem_je_edata_heap_remove_first
+1.46% <alloc::vec::into_iter::IntoIter<alloc::sync::Arc<umbrachyx::tree::node::Node>> as core::iter:
+1.29% _rjem_je_arena_ptr_array_flush
+1.27% <hashbrown::map::HashMap<[u8; 32], alloc::sync::Arc<umbrachyx::store::CommitInfo>, std::hash::
+1.02% umbrachyx::store::cells_of
+0.87% <blake3::ChunkState>::update
+0.74% k:kernel_init_pages
+0.65% <alloc::collections::btree::map::BTreeMap<alloc::sync::Arc<[u8]>, alloc::sync::Arc<[u8]>>>::in
+0.62% <aes::backends::x86_aes::Aes<15>>::encrypt::<cipher::block::ctx::BlockCtx<typenum::uint::UInt<
+0.62% <blake3::Hasher>::update
+0.47% <alloc::vec::Vec<(usize, &[u8])> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(usi
+0.41% <alloc::vec::into_iter::IntoIter<umbrachyx::log::record::Edit> as core::iter::traits::iterator
+## the thread that writes, with what each calls
+90.49%     0.00% call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+90.49%     0.00% catch_unwind<!, core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::
+90.49%     0.00% catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spa
+90.49%     0.00% drop<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::
+90.49%     0.00% for_value_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+90.49%     0.00% new<!> (inlined)
+90.49%     0.00% size_of_val_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Sen
+90.49%     0.00% {closure#1}<umbrachyx::server::event::spawn_writer::{closure_env#1}, !> (inlined)
+90.47%     0.00% {closure#1} (inlined)
+90.38%     0.00% write_queue<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (i
+90.38%     0.00% write_queued (inlined)
+89.95%     0.00% write<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (inlined
+89.85%     0.00% write_group<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (i
+82.31%     0.00% commit_all<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (in
+76.51%     0.00% branch<alloc::vec::Vec<[u8; 32], alloc::alloc::Global>, umbrachyx::store::StoreErro
+76.51%     0.00% write<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (inlined
+73.80%     0.00% apply<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (inlined
+39.07%     0.00% collect<core::iter::adapters::map::Map<core::slice::iter::Iter<umbrachyx::log::reco
+39.07%     0.00% from_iter<[u8; 32], core::iter::adapters::GenericShunt<core::iter::adapters::map::M
+39.07%     0.00% from_iter<[u8; 32], umbrachyx::store::StoreError, alloc::vec::Vec<[u8; 32], alloc::
+39.07%     0.00% try_process<core::iter::adapters::map::Map<core::slice::iter::Iter<umbrachyx::log::
+39.00%     0.00% next<core::iter::adapters::map::Map<core::slice::iter::Iter<umbrachyx::log::record:
+39.00%     0.00% try_fold<core::iter::adapters::map::Map<core::slice::iter::Iter<umbrachyx::log::rec
+39.00%     0.00% try_fold<core::result::Result<[u8; 32], umbrachyx::store::StoreError>, core::slice:
+39.00%     0.00% try_fold<core::slice::iter::Iter<umbrachyx::log::record::Commit>, (), core::iter::a
+39.00%     0.00% try_for_each<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core
+## the threads that serve, own time
+0.93% <umbrachyx::store::committer::Writer>::send
+0.87% <umbrachyx::server::event::Connection>::execute
+0.60% <umbrachyx::server::event::Loop>::run
+0.51% k:do_syscall_64
+0.48% umbrachyx::server::resp::length
+0.48% _rjem_malloc
+0.40% epoll_wait
+0.29% <alloc::vec::into_iter::IntoIter<core::ops::range::Range<usize>> as core::iter::traits::iterat
+0.26% core::str::converts::from_utf8
+0.23% umbrachyx::server::resp::parse
+0.23% __rustc::__rust_alloc
+0.19% <usize>::from_ascii_radix
+0.18% _rjem_je_bin_slab_reg_alloc_batch
+0.16% _rjem_sdallocx
+0.15% <umbrachyx::server::session::Session>::provenance
+0.15% k:finish_task_switch.isra.0
+0.14% <alloc::sync::Arc<umbrachyx::store::committer::Slot>>::drop_slow
+0.14% <std::sys::sync::mutex::futex::Mutex>::lock_contended
+0.11% __rustc::__rust_dealloc
+0.09% __rustc::__rust_no_alloc_shim_is_unstable_v2
+0.09% k:_raw_spin_unlock_irqrestore
+0.08% <alloc::string::String>::from_utf8_lossy
+0.07% <alloc::vec::Vec<alloc::vec::Vec<u8>> as alloc::vec::spec_from_iter_nested::SpecFromIterNested
+0.07% k:__fget_files
+0.06% <core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next
+0.06% _rjem_je_edata_heap_remove_first
+0.06% k:x64_sys_call
+## the threads that serve, with what each calls
+9.51%     0.00% call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send),
+9.51%     0.00% drop<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::a
+9.51%     0.00% for_value_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)>
+9.51%     0.00% size_of_val_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send
+9.51%     0.00% {closure#0} (inlined)
+9.51%     0.00% {closure#1}<umbrachyx::server::event::spawn::{closure_env#0}, ()> (inlined)
+9.34%     0.00% run (inlined)
+7.53%     0.00% take_turns (inlined)
+5.80%     0.00% read (inlined)
+5.05%     0.00% execute (inlined)
+2.13%     0.00% entry_SYSCALL_64_after_hwframe
+2.09%     0.51% do_syscall_64
+1.92%     0.00% parse (inlined)
+1.78%     0.00% wait (inlined)
+1.60%     0.06% x64_sys_call
+1.46%     0.00% poll (inlined)
+1.46%     0.00% select (inlined)
+1.31%     0.40% epoll_wait
+1.27%     0.00% send (inlined)
+0.93%     0.93% <umbrachyx::store::committer::Writer>::send
+0.93%     0.00% branch<core::option::Option<usize>, umbrachyx::server::resp::ProtocolError> (inlined
+0.90%     0.00% send (inlined)
+0.90%     0.00% write (inlined)
+0.90%     0.00% write (inlined)
+0.89%     0.01% __send
+
+# plain, answered first, with a token, 50 clients sending 64 at a time
+writes a second: "62974.27"
+## processor use by thread, the server's then the client's (one 3 s sample)
+99.3% resp lo+
+97.7% resp lo+
+46.3% resp co+
+3.0% valkey-+
+## share of the samples by thread
+40.51%  resp loop 0
+40.38%  resp loop 1
+19.11%  resp commits
+## the thread that writes, own time
+3.83% <alloc::vec::Vec<(u64, alloc::sync::Arc<[u8]>, alloc::sync::Arc<[u8]>)> as core::clone::Clone>
+3.49% <alloc::sync::Arc<umbrachyx::hamt::Node>>::drop_slow
+2.12% umbrachyx::hamt::insert
+0.53% <std::hash::random::DefaultHasher as core::hash::Hasher>::write
+0.51% <hashbrown::map::HashMap<[u8; 8], [u8; 64], std::hash::random::RandomState>>::insert
+0.48% <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+0.47% _rjem_je_arena_ptr_array_flush
+0.44% <umbrachyx::keys::Keys<alloc::boxed::Box<dyn umbrachyx::keys::KeyStorage + core::marker::Send>
+0.36% <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&[u8; 8]>
+0.34% <umbrachyx::store::Store<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock>>
+0.34% <umbrachyx::store::seal::Sealer>::seal
+0.33% <aes::backends::x86_aes::Aes<15>>::new
+0.31% _blake3_compress_in_place_avx512
+0.29% _rjem_je_edata_heap_remove_first
+0.25% <alloc::vec::into_iter::IntoIter<umbrachyx::log::record::Edit> as core::iter::traits::iterator
+0.23% <cmac::Cmac<aes::Aes256> as digest::FixedOutputReset>::finalize_fixed_reset
+0.21% <aes::backends::x86_aes::Aes<15>>::encrypt::<cipher::block::ctx::BlockCtx<typenum::uint::UInt<
+0.20% <umbrachyx::keys::Keys<alloc::boxed::Box<dyn umbrachyx::keys::KeyStorage + core::marker::Send>
+0.18% _rjem_malloc
+0.16% _rjem_sdallocx
+0.11% _rjem_je_bin_slab_reg_alloc_batch
+0.10% <umbrachyx::store::committer::Turns>::next_group
+0.10% <aes::backends::x86_aes::Aes<15>>::encrypt::<<ctr::ctr_core::CtrCore<_, _> as cipher::stream::
+0.09% <aes_siv::siv::Siv<aes::Aes256, cmac::Cmac<aes::Aes256>>>::encrypt::<[&[u8]; 1], &[u8]>
+## the thread that writes, with what each calls
+19.11%     0.00% call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+19.11%     0.00% catch_unwind<!, core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::
+19.11%     0.00% catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spa
+19.11%     0.00% drop<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::
+19.11%     0.00% for_value_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+19.11%     0.00% new<!> (inlined)
+19.11%     0.00% size_of_val_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Sen
+19.11%     0.00% {closure#1} (inlined)
+19.11%     0.00% {closure#1}<umbrachyx::server::event::spawn_writer::{closure_env#1}, !> (inlined)
+19.10%     0.00% write_queue<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (i
+19.10%     0.00% write_queued (inlined)
+18.89%     0.00% write<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (inlined
+17.85%     0.00% write_group<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (i
+14.48%     0.00% commit_all<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemClock> (in
+14.46%     0.00% spike_commit_plain<umbrachyx::log::storage::FileStorage, umbrachyx::store::SystemCl
+7.05%     0.00% insert (inlined)
+6.61%     0.00% from (inlined)
+6.56%     0.00% insert (inlined)
+4.74%     0.00% try_process<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<umbrachyx
+4.73%     0.00% branch<alloc::vec::Vec<umbrachyx::log::record::Edit, alloc::alloc::Global>, umbrachy
+4.67%     0.00% from_iter_in_place<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map
+4.66%     0.00% collect_in_place<umbrachyx::log::record::Edit, core::iter::adapters::GenericShunt<co
+4.66%     0.00% into_try<core::result::Result<alloc::vec::in_place_drop::InPlaceDrop<umbrachyx::log:
+4.66%     0.00% try_fold<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<umbrachyx::l
+4.64%     0.00% try_fold<umbrachyx::log::record::Edit, alloc::alloc::Global, alloc::vec::in_place_dr
+4.54%     0.00% {closure#0}<umbrachyx::log::record::Edit, core::result::Result<umbrachyx::log::recor
+## the threads that serve, own time
+4.44% _rjem_sdallocx
+3.93% _rjem_malloc
+3.67% <biscuit_auth::datalog::symbol::SymbolTable>::insert
+2.31% <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+1.62% __rustc::__rust_alloc
+1.60% <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&&str>
+1.50% __rustc::__rust_dealloc
+1.44% <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&u32>
+1.43% <alloc::vec::Vec<biscuit_auth::token::builder::rule::Rule> as core::clone::Clone>::clone
+1.42% <hashbrown::raw::RawTable<(u32, core::option::Option<biscuit_auth::datalog::Term>)> as core::c
+1.27% __rustc::__rust_no_alloc_shim_is_unstable_v2
+1.24% <core::iter::adapters::filter::Filter<core::iter::adapters::flatten::Flatten<core::iter::adapt
+1.23% <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+1.18% <core::iter::adapters::map::Map<alloc::vec::drain::Drain<biscuit_auth::token::builder::term::T
+1.06% <alloc::string::String as core::clone::Clone>::clone
+0.98% <biscuit_auth::datalog::CombineIt<core::iter::adapters::flatten::Flatten<core::iter::adapters:
+0.97% biscuit_auth::datalog::match_preds
+0.86% <alloc::vec::Vec<biscuit_auth::token::builder::predicate::Predicate> as core::clone::Clone>::c
+0.84% <alloc::vec::Vec<biscuit_auth::token::builder::term::Term> as alloc::vec::spec_from_iter::Spec
+0.80% <alloc::vec::Vec<biscuit_auth::token::builder::term::Term> as core::clone::Clone>::clone
+0.77% <biscuit_auth::token::builder::fact::Fact as biscuit_auth::token::builder::Convert<biscuit_aut
+0.76% <alloc::collections::btree::set::BTreeSet<usize>>::is_subset
+0.76% <biscuit_auth::token::builder::predicate::Predicate as biscuit_auth::token::builder::Convert<b
+0.75% <biscuit_auth::datalog::expression::Expression>::evaluate
+0.74% <alloc::vec::Vec<biscuit_auth::datalog::Term> as core::clone::Clone>::clone
+0.74% <umbrachyx::capability::Verified>::authorize
+0.73% core::ptr::drop_glue::<biscuit_auth::datalog::CombineIt<core::iter::adapters::flatten::Flatten
+0.67% <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&biscuit_auth::datalog
+## the threads that serve, with what each calls
+80.89%     0.00% call_once<(), (dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+80.89%     0.00% drop<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send), alloc::
+80.89%     0.00% for_value_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Send)
+80.89%     0.00% size_of_val_raw<(dyn core::ops::function::FnOnce<(), Output=()> + core::marker::Sen
+80.89%     0.00% {closure#0} (inlined)
+80.89%     0.00% {closure#1}<umbrachyx::server::event::spawn::{closure_env#0}, ()> (inlined)
+80.82%     0.00% run (inlined)
+80.70%     0.00% take_turns (inlined)
+80.16%     0.00% read (inlined)
+79.62%     0.00% execute (inlined)
+78.10%     0.00% may_write (inlined)
+77.90%     0.00% map_err<(), umbrachyx::capability::Denied, umbrachyx::server::resp::Reply, fn(umbra
+77.26%     0.00% authorize (inlined)
+35.38%     0.00% authorize (inlined)
+34.72%     0.00% authorize_with_limits (inlined)
+34.58%     0.00% authorize_inner (inlined)
+32.05%     0.00% and_then<biscuit_auth::token::builder::authorizer::AuthorizerBuilder, biscuit_auth:
+32.05%     0.00% {closure#1} (inlined)
+32.04%     0.01% <biscuit_auth::token::builder::authorizer::AuthorizerBuilder>::build
+31.84%     0.00% build_inner (inlined)
+19.46%     0.00% query_match (inlined)
+19.39%     0.00% find_match (inlined)
+18.04%     0.00% collect<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<c
+18.04%     0.00% from_iter<biscuit_auth::token::block::Block, biscuit_auth::error::Token, alloc::vec
+18.04%     0.00% try_process<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumera

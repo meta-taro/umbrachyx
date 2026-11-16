@@ -31,3 +31,31 @@ writes well below that.
 
 The instance ran from 05:17 to 05:54 UTC; the measurement started six
 minutes after it was up.
+
+## Where the time goes (`profile.txt`)
+
+`bench/spike-profile.sh <nvme dir>` on another instance of the machine,
+at dfbd56c: each variant under load, sampled with `perf` for 12 s. The
+instance ran from 06:00 to 06:20 UTC; the measurement started nine
+minutes after it was up.
+
+- **Writes sent 64 at a time (113,000 a second, plain, either way of
+  syncing)**: the one thread that writes is at 97 to 98% of a processor
+  and everything else is idle (the serving threads 6% each, the
+  benchmark's client 4%). Three quarters of that thread is the map: 28
+  to 30% freeing the nodes each write replaces, 19% making the new
+  path, 16% copying a node's entries, about 8% in the allocator. The
+  map is the persistent one a latest table uses, which copies the path
+  to a key on every write so that readers keep the old one. Sealing the
+  value, the checksum and building the record are under 5% together.
+- **64 clients one at a time (101,000 a second)**: both serving threads
+  and the benchmark's client are at 93 to 94% each, the writing thread
+  at 90%. Two fifths of a serving thread is system calls: waiting for
+  events (a quarter to a third) and one `send` per reply (a sixth).
+- **A table with history, 64 at a time (87,000)**: the writing thread
+  again, spread over the tree: searching and inserting about a third,
+  reading the replaced cell 8%, freeing nodes 6%, hashing the commit 4%.
+- **With a capability token (63,000)**: the two serving threads are at
+  98 to 99% and the writing thread at 46%. 77% of a serving thread is
+  checking the token, and nearly half of that is building the
+  authorizer again for each write.
