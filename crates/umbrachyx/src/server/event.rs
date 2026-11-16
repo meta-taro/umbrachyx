@@ -106,6 +106,14 @@ pub(super) fn spawn_writer(
     queued: Arc<Queued>,
     wakers: Vec<Arc<Waker>>,
 ) -> io::Result<()> {
+    if std::env::var("UMBRACHYX_SPIKE_NOWAIT").is_ok() {
+        let early = wakers.clone();
+        let _ = crate::store::SPIKE_WAKE.set(Box::new(move || {
+            for waker in &early {
+                let _ = waker.wake();
+            }
+        }));
+    }
     thread::Builder::new()
         .name("resp commits".to_owned())
         .spawn(move || {

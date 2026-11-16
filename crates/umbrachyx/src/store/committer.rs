@@ -436,6 +436,10 @@ fn write_group<S: Storage, C: Clock>(
             for (slot, answer) in slots.into_iter().zip(answers) {
                 slot.fill(answer);
             }
+            if let Some(wake) = super::SPIKE_WAKE.get() {
+                wake();
+            }
+            store.spike_sync();
         }
         Err(error) => {
             for slot in slots {

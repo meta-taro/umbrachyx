@@ -402,7 +402,21 @@ pub struct Store<S: Storage, C: Clock> {
     rejections: BTreeMap<String, Rejection>,
     /// Every approval and rejection, oldest first.
     decisions: Vec<Decision>,
+    /// SPIKE: keys under this prefix keep no commits and no branches.
+    spike_plain: Option<Vec<u8>>,
+    /// SPIKE: answer writes to those keys before their record is synced,
+    /// and sync what was answered at most this often.
+    spike_nowait: Option<std::time::Duration>,
+    spike_last_sync: std::time::Instant,
+    /// SPIKE: the current values of those keys, one map for every branch.
+    plain: Hamt,
+    /// SPIKE: the commits answered but not yet written.
+    spike_unsynced: Vec<Commit>,
 }
+
+/// SPIKE: wakes the serving threads once answers are left, before the sync.
+pub static SPIKE_WAKE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> =
+    std::sync::OnceLock::new();
 
 impl<S: Storage, C: Clock> Store<S, C> {
     /// Opens the log and replays every record. Values are kept as given.
@@ -463,6 +477,15 @@ impl<S: Storage, C: Clock> Store<S, C> {
             tables: Tables::default(),
             rejections: BTreeMap::new(),
             decisions: Vec::new(),
+            spike_plain: std::env::var("UMBRACHYX_SPIKE_PLAIN")
+                .ok()
+                .map(|table| format!("{table}/").into_bytes()),
+            spike_nowait: std::env::var("UMBRACHYX_SPIKE_NOWAIT")
+                .ok()
+                .map(|ms| std::time::Duration::from_millis(ms.parse().unwrap_or(10))),
+            spike_last_sync: std::time::Instant::now(),
+            plain: Hamt::empty(),
+            spike_unsynced: Vec::new(),
         };
         let mut replayed = Vec::new();
         for record in records {
@@ -506,6 +529,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
         &mut self,
         requests: Vec<CommitRequest>,
     ) -> Result<Vec<Result<CommitId, StoreError>>, StoreError> {
+        if let Some(prefix) = &self.spike_plain
+            && requests
+                .iter()
+                .all(|r| r.edits.iter().all(|e| e.key.starts_with(prefix)))
+        {
+            return self.spike_commit_plain(requests);
+        }
         let time = self.next_time();
         if let Some(sealer) = &mut self.sealer {
             let written = requests
@@ -531,6 +561,64 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 None => Ok(ids.next().expect("one id per accepted request")),
             })
             .collect())
+    }
+
+    /// SPIKE: the cheapest write a table without history could do: seal,
+    /// one record for the group, one map insert per key. No commit id, no
+    /// commit kept, no tree.
+    fn spike_commit_plain(
+        &mut self,
+        requests: Vec<CommitRequest>,
+    ) -> Result<Vec<Result<CommitId, StoreError>>, StoreError> {
+        let time = self.next_time();
+        if let Some(sealer) = &mut self.sealer {
+            let written = requests
+                .iter()
+                .flat_map(|request| &request.edits)
+                .filter(|edit| edit.value.is_some());
+            sealer.make_keys_for(written.map(|edit| edit.key.as_slice()))?;
+        }
+        let mut commits = Vec::with_capacity(requests.len());
+        for mut request in requests {
+            request.edits = self.seal(request.edits)?;
+            commits.push(new_commit(request, time, None));
+        }
+        let count = commits.len();
+        let mut plain = self.plain.clone();
+        for edit in commits.iter().flat_map(|commit| &commit.changes) {
+            plain = match &edit.value {
+                Some(value) => plain.insert(
+                    Arc::from(edit.key.as_slice()),
+                    encode_cell(&[0; COMMIT_ID_LEN], Some(value)),
+                ),
+                None => plain.remove(&edit.key),
+            };
+        }
+        if self.spike_nowait.is_some() {
+            self.spike_unsynced.append(&mut commits);
+        } else {
+            let record = match count {
+                1 => Record::Commit(commits.pop().expect("one commit")),
+                _ => Record::Group(commits),
+            };
+            self.log.append(&record)?;
+        }
+        self.plain = plain;
+        self.last_time = self.last_time.max(time);
+        Ok((0..count).map(|_| Ok([0; COMMIT_ID_LEN])).collect())
+    }
+
+    /// SPIKE: writes and syncs the record answered before it was written.
+    pub fn spike_sync(&mut self) {
+        let Some(interval) = self.spike_nowait else {
+            return;
+        };
+        if self.spike_unsynced.is_empty() || self.spike_last_sync.elapsed() < interval {
+            return;
+        }
+        let record = Record::Group(std::mem::take(&mut self.spike_unsynced));
+        let _ = self.log.append(&record);
+        self.spike_last_sync = std::time::Instant::now();
     }
 
     fn commit_with(
@@ -692,6 +780,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 .map(|(name, head)| (name.clone(), (head.state.clone(), head.latest.clone())))
                 .collect(),
             self.sealer.as_ref().map(Sealer::ring),
+            self.plain.clone(),
         )
     }
 

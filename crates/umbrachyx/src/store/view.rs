@@ -19,11 +19,21 @@ pub struct View {
     /// The store's keys when values are encrypted. Shared, not copied: a
     /// subject erased after the view was taken is unreadable through it too.
     ring: Option<Ring>,
+    /// SPIKE: keys without history, the same on every branch.
+    plain: Hamt,
 }
 
 impl View {
-    pub(super) fn new(states: BTreeMap<String, (Tree, Hamt)>, ring: Option<Ring>) -> Self {
-        Self { states, ring }
+    pub(super) fn new(
+        states: BTreeMap<String, (Tree, Hamt)>,
+        ring: Option<Ring>,
+        plain: Hamt,
+    ) -> Self {
+        Self {
+            states,
+            ring,
+            plain,
+        }
     }
 
     pub fn has_branch(&self, branch: &str) -> bool {
@@ -41,6 +51,7 @@ impl View {
         let (tree, latest) = self.states.get(branch)?;
         tree.get(key)
             .or_else(|| latest.get(key).map(|cell| &**cell))
+            .or_else(|| self.plain.get(key).map(|cell| &**cell))
     }
 
     /// The keys holding a value on `branch`, readable or erased, among the
