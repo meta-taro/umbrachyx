@@ -143,7 +143,7 @@ fn ask(store: &dyn Inspect, served: &str, question: &Question) -> Result<Value, 
         }
         Question::History { branch, key } => {
             require_branch(store, branch)?;
-            if let Some(table) = store.latest_table_of(key) {
+            if let Some(table) = store.table_without_history_of(key) {
                 return Err(Refusal::NoHistory(table.to_vec()));
             }
             Ok(history(store, branch, key))
@@ -201,9 +201,9 @@ fn names(tables: &[Vec<u8>]) -> Vec<Value> {
         .collect()
 }
 
-/// One page of cells. `omitted_tables` names every latest-value table,
-/// on every page and whichever keys the branch holds: their keys are never
-/// listed here. `next` is the last key of the page when more follow,
+/// One page of cells. `omitted_tables` names every table that keeps only
+/// latest values or no history at all, on every page and whichever keys
+/// the branch holds: their keys are never listed here. `next` is the last key of the page when more follow,
 /// to be sent back as `after`, and `null` on the last page.
 fn cells(store: &dyn Inspect, branch: &str, after: Option<&[u8]>) -> Value {
     let mut cells = store.cells(branch, after, MAX_PAGE + 1);
@@ -226,7 +226,7 @@ fn cells(store: &dyn Inspect, branch: &str, after: Option<&[u8]>) -> Value {
         "branch": branch,
         "cells": cells,
         "next": next,
-        "omitted_tables": names(&store.latest_tables()),
+        "omitted_tables": names(&store.tables_without_history()),
     })
 }
 

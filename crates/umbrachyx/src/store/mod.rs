@@ -813,6 +813,24 @@ impl<S: Storage, C: Clock> Store<S, C> {
         self.cell(branch, key)?.value
     }
 
+    /// What `key` holds on `branch` now, and whether that is a value
+    /// whose subject was erased. Answers for every kind of table.
+    pub fn current(&self, branch: &str, key: &[u8]) -> (Option<Bytes>, bool) {
+        if self.tables.plain_table_of(key).is_none() {
+            return self
+                .cell(branch, key)
+                .map_or((None, false), |cell| (cell.value, cell.erased));
+        }
+        if !self.branches.contains_key(branch) {
+            return (None, false);
+        }
+        let held = self.plain.get(key);
+        let was_written = held.is_some();
+        let value = self.reveal(key, held);
+        let erased = was_written && value.is_none();
+        (value, erased)
+    }
+
     /// Every branch as it is now, to read from other threads.
     pub fn view(&self) -> View {
         View::new(
@@ -833,10 +851,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
         if !self.commits.contains_key(commit) {
             return Err(StoreError::UnknownCommit(*commit));
         }
-        if let Some(table) = self.latest_table_of(key)
+        if let Some(table) = self.table_without_history_of(key)
             && self.head_of(commit).is_none()
         {
             return Err(StoreError::NoPast(table.to_vec()));
+        }
+        if self.tables.plain_table_of(key).is_some() {
+            return Ok(self.reveal(key, self.plain.get(key)));
         }
         let Some(cell) = self.cell_at(commit, key) else {
             return Ok(None);

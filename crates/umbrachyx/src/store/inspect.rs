@@ -31,10 +31,10 @@ pub trait Inspect {
     fn cells(&self, branch: &str, after: Option<&[u8]>, limit: usize) -> Vec<(Bytes, Cell)>;
     /// Every declared table and its engine ([`Store::tables`]).
     fn tables(&self) -> Vec<(Vec<u8>, Engine)>;
-    /// [`Store::latest_table_of`].
-    fn latest_table_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]>;
-    /// [`Store::latest_tables`].
-    fn latest_tables(&self) -> Vec<Vec<u8>>;
+    /// [`Store::table_without_history_of`].
+    fn table_without_history_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]>;
+    /// [`Store::tables_without_history`].
+    fn tables_without_history(&self) -> Vec<Vec<u8>>;
     /// [`Store::omitted_tables`].
     fn omitted_tables(&self, from: Option<&CommitId>, to: Option<&CommitId>) -> Vec<Vec<u8>>;
     /// [`Store::pending`].
@@ -186,12 +186,12 @@ impl<S: Storage, C: Clock> Inspect for Store<S, C> {
             .collect()
     }
 
-    fn latest_table_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
-        Store::latest_table_of(self, key)
+    fn table_without_history_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
+        Store::table_without_history_of(self, key)
     }
 
-    fn latest_tables(&self) -> Vec<Vec<u8>> {
-        Store::latest_tables(self)
+    fn tables_without_history(&self) -> Vec<Vec<u8>> {
+        Store::tables_without_history(self)
     }
 
     fn omitted_tables(&self, from: Option<&CommitId>, to: Option<&CommitId>) -> Vec<Vec<u8>> {

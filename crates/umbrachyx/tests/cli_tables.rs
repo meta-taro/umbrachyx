@@ -69,7 +69,7 @@ fn a_table_cannot_be_declared_with_an_unknown_engine_or_once_written() {
     let unknown = declare(&dir, "pos", "append");
     assert_eq!(unknown.status.code(), Some(2));
     assert!(
-        String::from_utf8_lossy(&unknown.stderr).contains("history or latest"),
+        String::from_utf8_lossy(&unknown.stderr).contains("history, latest, plain or plain-async"),
         "{}",
         String::from_utf8_lossy(&unknown.stderr)
     );
@@ -123,5 +123,48 @@ fn a_diff_into_the_past_of_main_names_the_table_it_left_out() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         "(left out: pos keeps only its latest values, and main keeps no past for it)\n"
+    );
+}
+
+/// A plain table from the command line: written with `put`, read with
+/// `get` on any branch, refused a commit, and with no history to print.
+#[test]
+fn a_plain_table_is_written_with_put_and_has_no_history() {
+    let dir = TempDir::new("plain");
+    assert!(declare(&dir, "session", "plain").status.success());
+    assert_eq!(dir.ok(&["tables"]), "session  plain\n");
+    let mut commit = vec!["commit", "main", "player/1/gold=1"];
+    commit.extend(WHO);
+    dir.ok(&commit);
+    dir.ok(&["branch", "agent", "--from", "main"]);
+
+    assert_eq!(
+        dir.ok(&["put", "session/1/token=a", "session/2/token=b"]),
+        "put 2 keys\n"
+    );
+    dir.ok(&["put", "--remove", "session/2/token"]);
+
+    assert_eq!(dir.ok(&["get", "agent", "session/1/token"]), "a\n");
+    assert_eq!(dir.ok(&["get", "main", "session/2/token"]), "(absent)\n");
+    let mut commit = vec!["commit", "main", "session/1/token=c"];
+    commit.extend(WHO);
+    let refused = dir.run(&commit);
+    assert_eq!(refused.status.code(), Some(2));
+    let refused = dir.run(&["put", "player/1/gold=9"]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert_eq!(dir.ok(&["get", "main", "player/1/gold"]), "1\n");
+    let history = dir.run(&["history", "main", "session/1/token"]);
+    assert_eq!(history.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&history.stderr)
+            .contains("table 'session' keeps only the latest value"),
+        "{}",
+        String::from_utf8_lossy(&history.stderr)
+    );
+    let diff = dir.run(&["diff", "main", "agent"]);
+    assert!(diff.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&diff.stderr),
+        "(left out: session keeps no history, so no commit holds its writes)\n"
     );
 }

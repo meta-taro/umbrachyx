@@ -35,6 +35,9 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                                   its keys: the same name with .keys added)
 
   commit <branch> [key=value]... [--remove key]... --who W --why Y [--approved-by A]
+  put [key=value]... [--remove key]...
+                              writes tables that keep no history (plain):
+                              the value is replaced on every branch at once
   get <branch> <key>
   history <branch> <key>
   log <branch> [--limit N]
@@ -45,9 +48,14 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   erase <subject> --who W --why Y [--approved-by A]
                               destroys the key of a subject such as player/42
   erasures                    every subject erased, with who and why
-  table <name> <history|latest> --who W --why Y [--approved-by A]
-                              how the table <name>/... is held; latest keeps
-                              only current values. Only before its first write
+  table <name> <history|latest|plain|plain-async> --who W --why Y
+        [--approved-by A]
+                              how the table <name>/... is held. latest keeps
+                              only current values of what commits write.
+                              plain keeps no history at all: no commits, no
+                              branches, no review, written with put or SET.
+                              plain-async also answers a SET before it is on
+                              disk. Only before the table's first write
   tables                      every declared table and its engine
   export                      every record of the log as a line of JSON, for
                               jq and grep: commits with their changes,
@@ -197,6 +205,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         Store::open_sealed(storage, keys, SystemClock).map_err(|e| format!("{path}: {e}"))?;
     match command.as_str() {
         "commit" => commit(&mut store, &args),
+        "put" => put(&mut store, &args),
         "get" => get(&store, &args),
         "history" => history(&store, &args),
         "log" => log(&store, &args),
@@ -238,20 +247,7 @@ fn commit(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
     let (branch, sets) = args.positional[1..]
         .split_first()
         .ok_or_else(|| format!("commit needs a branch\n\n{USAGE}"))?;
-    let mut edits = Vec::new();
-    for set in sets {
-        let (key, value) = set
-            .split_once('=')
-            .ok_or_else(|| format!("{set:?} is not key=value"))?;
-        edits.push(Edit {
-            key: key.as_bytes().to_vec(),
-            value: Some(value.as_bytes().to_vec()),
-        });
-    }
-    edits.extend(args.removes.iter().map(|key| Edit {
-        key: key.as_bytes().to_vec(),
-        value: None,
-    }));
+    let edits = edits(sets, &args.removes)?;
     if edits.is_empty() {
         return Err("nothing to commit".to_owned());
     }
@@ -262,14 +258,46 @@ fn commit(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Each `key=value` as a write, then each key to remove.
+fn edits(sets: &[String], removes: &[String]) -> Result<Vec<Edit>, String> {
+    let mut edits = Vec::new();
+    for set in sets {
+        let (key, value) = set
+            .split_once('=')
+            .ok_or_else(|| format!("{set:?} is not key=value"))?;
+        edits.push(Edit {
+            key: key.as_bytes().to_vec(),
+            value: Some(value.as_bytes().to_vec()),
+        });
+    }
+    edits.extend(removes.iter().map(|key| Edit {
+        key: key.as_bytes().to_vec(),
+        value: None,
+    }));
+    Ok(edits)
+}
+
+/// Writes tables that keep no history: no branch, and no one to name,
+/// since nothing would record it.
+fn put(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
+    let edits = edits(&args.positional[1..], &args.removes)?;
+    if edits.is_empty() {
+        return Err("nothing to put".to_owned());
+    }
+    let count = edits.len();
+    store.put(edits).map_err(|e| e.to_string())?;
+    println!("put {count} key{}", if count == 1 { "" } else { "s" });
+    Ok(ExitCode::SUCCESS)
+}
+
 fn get(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
     let [branch, key] = args.exactly()?;
     require_branch(store, branch)?;
-    let cell = store.cell(branch, key.as_bytes());
-    if cell.as_ref().is_some_and(|cell| cell.erased) {
+    let (value, erased) = store.current(branch, key.as_bytes());
+    if erased {
         println!("(erased)");
     } else {
-        println!("{}", shown(cell.and_then(|cell| cell.value).as_ref()));
+        println!("{}", shown(value.as_ref()));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -277,7 +305,7 @@ fn get(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
 fn history(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
     let [branch, key] = args.exactly()?;
     require_branch(store, branch)?;
-    if let Some(table) = store.latest_table_of(key.as_bytes()) {
+    if let Some(table) = store.table_without_history_of(key.as_bytes()) {
         return Err(format!(
             "table '{}' keeps only the latest value; there is no history to show",
             String::from_utf8_lossy(table)
@@ -337,8 +365,9 @@ fn erasures(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
 /// Declares the engine of a table that nothing has been written to yet.
 fn table(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
     let [name, engine_name] = args.exactly()?;
-    let engine = Engine::named(engine_name)
-        .ok_or_else(|| format!("engine {engine_name:?} is not one of history or latest"))?;
+    let engine = Engine::named(engine_name).ok_or_else(|| {
+        format!("engine {engine_name:?} is not one of history, latest, plain or plain-async")
+    })?;
     store
         .declare_table(name.as_bytes(), engine, args.provenance()?)
         .map_err(|e| e.to_string())?;
@@ -407,11 +436,15 @@ fn diff(store: &FileStore, args: &Args) -> Result<ExitCode, String> {
         }
     }
     // On stderr, so a script reading the changes reads only changes.
+    let engines = store.tables();
     for table in store.omitted_tables(from.as_ref(), to.as_ref()) {
-        eprintln!(
-            "(left out: {} keeps only its latest values, and main keeps no past for it)",
-            String::from_utf8_lossy(&table)
-        );
+        let is_plain = engines.get(&table).is_some_and(|engine| engine.is_plain());
+        let why = if is_plain {
+            "keeps no history, so no commit holds its writes"
+        } else {
+            "keeps only its latest values, and main keeps no past for it"
+        };
+        eprintln!("(left out: {} {why})", String::from_utf8_lossy(&table));
     }
     Ok(ExitCode::SUCCESS)
 }

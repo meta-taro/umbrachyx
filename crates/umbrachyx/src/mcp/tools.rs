@@ -17,6 +17,7 @@ use crate::store::{Clock, MAIN_BRANCH, Provenance, short};
 
 /// The arguments `commit` takes. There is no branch among them.
 const COMMIT_ARGUMENTS: [&str; 3] = ["set", "remove", "why"];
+const PUT_ARGUMENTS: [&str; 2] = ["set", "remove"];
 
 type Outcome = Result<Value, String>;
 
@@ -86,6 +87,27 @@ pub(super) fn list() -> Value {
                 "additionalProperties": false,
             },
         },
+        {
+            "name": "put",
+            "description": "Write values to tables that keep no history (engine plain or \
+                            plain-async; the tables are listed by the server's UMBRA.TABLES). \
+                            Unlike commit this is not reviewed and cannot be undone: each key \
+                            holds the new value on every branch at once, and nothing records \
+                            who wrote it or what it held before. Every key must be inside the \
+                            agent's token and in such a table, or nothing is written.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "set": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Keys and their new values",
+                    },
+                    "remove": {"type": "array", "items": {"type": "string"}},
+                },
+                "additionalProperties": false,
+            },
+        },
     ])
 }
 
@@ -100,6 +122,7 @@ pub(super) fn call<S: Storage, C: Clock>(
         "history" => history(session, arguments),
         "diff" => diff(session, arguments),
         "commit" => commit(session, arguments),
+        "put" => put(session, arguments),
         _ => return None,
     })
 }
@@ -110,9 +133,7 @@ fn get<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> Outc
     session
         .check(Operation::Read, &branch, key)
         .map_err(refused)?;
-    let cell = session.store.cell(&branch, key.as_bytes());
-    let erased = cell.as_ref().is_some_and(|cell| cell.erased);
-    let value = cell.and_then(|cell| cell.value);
+    let (value, erased) = session.store.current(&branch, key.as_bytes());
     Ok(json!({"branch": branch, "key": key, "value": shown(value.as_deref()), "erased": erased}))
 }
 
@@ -122,7 +143,7 @@ fn history<S: Storage, C: Clock>(session: &Session<S, C>, arguments: &Value) -> 
     session
         .check(Operation::Read, &branch, key)
         .map_err(refused)?;
-    if let Some(table) = session.store.latest_table_of(key.as_bytes()) {
+    if let Some(table) = session.store.table_without_history_of(key.as_bytes()) {
         return Err(format!(
             "table '{}' keeps only the latest value",
             String::from_utf8_lossy(table)
@@ -246,6 +267,17 @@ fn commit<S: Storage, C: Clock>(session: &mut Session<S, C>, arguments: &Value) 
             .check(Operation::Write, &branch, key)
             .map_err(refused)?;
     }
+    // Before the branch is made: a commit the store would refuse must
+    // leave nothing behind, not even an empty branch.
+    if let Some(edit) = edits
+        .iter()
+        .find(|edit| session.store.engine_of(&edit.key).is_plain())
+    {
+        return Err(format!(
+            "{:?} is in a table that keeps no history; write it with put",
+            String::from_utf8_lossy(&edit.key)
+        ));
+    }
     if !session.store.branches().any(|name| name == branch) {
         session
             .store
@@ -262,6 +294,31 @@ fn commit<S: Storage, C: Clock>(session: &mut Session<S, C>, arguments: &Value) 
         .commit(&branch, edits, provenance)
         .map_err(|e| e.to_string())?;
     Ok(json!({"branch": branch, "commit": short(&id)}))
+}
+
+/// A write to tables that keep no history, straight to the store: the
+/// one write an agent makes that no branch holds for review. The token
+/// decides as it does for a commit, asked about the agent's own branch.
+fn put<S: Storage, C: Clock>(session: &mut Session<S, C>, arguments: &Value) -> Outcome {
+    if let Some(other) = arguments.as_object().and_then(|fields| {
+        fields
+            .keys()
+            .find(|name| !PUT_ARGUMENTS.contains(&name.as_str()))
+    }) {
+        return Err(format!(
+            "put takes no {other:?}: it writes no branch and keeps no reason"
+        ));
+    }
+    let edits = edits(arguments)?;
+    for edit in &edits {
+        let key = std::str::from_utf8(&edit.key).expect("keys are read from JSON text");
+        session
+            .check(Operation::Write, &session.holder.branch, key)
+            .map_err(refused)?;
+    }
+    let written = edits.len();
+    session.store.put(edits).map_err(|e| e.to_string())?;
+    Ok(json!({"written": written}))
 }
 
 /// The keys `set` gives values and the keys `remove` takes away, in that

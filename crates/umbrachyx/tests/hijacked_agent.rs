@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PublicKey};
 use serde_json::{Value, json};
 use umbrachyx::capability::{self, Denied, Grant, Operation};
-use umbrachyx::log::{Edit, FileStorage};
+use umbrachyx::log::{Edit, Engine, FileStorage};
 use umbrachyx::mcp::Session;
 use umbrachyx::store::{MAIN_BRANCH, Provenance, Store, SystemClock};
 
@@ -321,6 +321,62 @@ fn writing_outside_the_token_writes_nothing_at_all() {
             out_of_scope()
         );
     });
+}
+
+/// `put` is the one write no branch holds for review. It reaches only
+/// tables declared to keep no history: here there is none, so even a key
+/// the token may write is refused, and the token is asked first.
+#[test]
+fn put_cannot_write_a_table_that_keeps_its_history() {
+    attack("put-history", |agent| {
+        let refused = agent.refused("put", json!({"set": {"player/42/gems": "999999"}}));
+        assert!(refused.contains("keeps its history"), "{refused}");
+        assert_eq!(
+            agent.refused("put", json!({"set": {"player/7/gems": "999999"}})),
+            out_of_scope()
+        );
+        assert_eq!(
+            agent.refused("put", json!({"remove": ["player/42/email"]})),
+            out_of_scope()
+        );
+    });
+}
+
+/// Where a table that keeps no history exists, `put` still stays inside
+/// the token: the agent cannot write another table's keys, and one key
+/// outside the token stops the whole put.
+#[test]
+fn put_cannot_write_a_plain_table_outside_the_token() {
+    let dir = TempDir::new("put-scope");
+    let mut store = open(&dir.log());
+    store
+        .declare_table(
+            b"session",
+            Engine::Plain,
+            by("ops", "sessions need no past"),
+        )
+        .expect("declares");
+    store.put(vec![set("session/7/token", "t7")]).expect("puts");
+    drop(store);
+    let store = seeded(&dir);
+    let root = KeyPair::new();
+    let token = capability::issue(&root, &grant(SystemTime::now() + HOUR)).expect("issues");
+    let mut agent = Agent::start(store, &token, root.public());
+
+    for arguments in [
+        json!({"set": {"session/7/token": "stolen"}}),
+        json!({"remove": ["session/7/token"]}),
+        json!({"set": {"player/42/gems": "1", "session/7/token": "stolen"}}),
+    ] {
+        assert_eq!(agent.refused("put", arguments), out_of_scope());
+    }
+
+    drop(agent);
+    let store = open(&dir.log());
+    assert_eq!(
+        store.get(MAIN_BRANCH, b"session/7/token").as_deref(),
+        Some(&b"t7"[..])
+    );
 }
 
 #[test]

@@ -39,9 +39,14 @@ impl Tables {
         &self.declared
     }
 
-    /// The table of `key` when that table keeps only latest values.
-    pub fn latest_table_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
-        table_of(key).filter(|table| self.declared.get(*table) == Some(&Engine::Latest))
+    /// The table of `key` when that table has no history to show: it
+    /// keeps only latest values, or no history at all.
+    pub fn table_without_history_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
+        table_of(key).filter(|table| {
+            self.declared
+                .get(*table)
+                .is_some_and(|engine| *engine != Engine::History)
+        })
     }
 
     /// The names of the tables that keep no history.

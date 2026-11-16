@@ -24,30 +24,34 @@ impl<S: Storage, C: Clock> Store<S, C> {
         self.tables.engine_of(key) == Engine::Latest
     }
 
-    /// The table of `key` when it keeps only the latest value of each key,
-    /// and so has no history to show.
-    pub fn latest_table_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
-        self.tables.latest_table_of(key)
+    /// The table of `key` when it has no history to show: it keeps only
+    /// the latest value of each key, or no history at all.
+    pub fn table_without_history_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
+        self.tables.table_without_history_of(key)
     }
 
-    /// Every table that keeps only latest values: what a listing of cells
-    /// leaves out.
-    pub fn latest_tables(&self) -> Vec<Vec<u8>> {
+    /// Every table whose keys have no commit to name: what a listing of
+    /// cells leaves out.
+    pub fn tables_without_history(&self) -> Vec<Vec<u8>> {
+        self.tables_where(|engine| engine != Engine::History)
+    }
+
+    fn tables_where(&self, wanted: impl Fn(Engine) -> bool) -> Vec<Vec<u8>> {
         self.tables
             .declared()
             .iter()
-            .filter(|(_, engine)| **engine == Engine::Latest)
+            .filter(|(_, engine)| wanted(**engine))
             .map(|(name, _)| name.clone())
             .collect()
     }
 
-    /// The latest-value tables a diff from `from` to `to` leaves out,
-    /// because `main` keeps no past for them. Empty when the diff is whole.
+    /// The tables a diff from `from` to `to` leaves out, in name order.
+    /// A table that keeps no history is always among them: no commit
+    /// holds its writes, so a diff of commits says nothing of it. A
+    /// latest-value table is when `main` keeps no past for it.
     pub fn omitted_tables(&self, from: Option<&CommitId>, to: Option<&CommitId>) -> Vec<Vec<u8>> {
-        if self.latest_changes(from, to).is_some() {
-            return Vec::new();
-        }
-        self.latest_tables()
+        let knows_latest = self.latest_changes(from, to).is_some();
+        self.tables_where(|engine| engine.is_plain() || (engine == Engine::Latest && !knows_latest))
     }
 
     /// The changes to latest-value tables from `from` to `to`, values

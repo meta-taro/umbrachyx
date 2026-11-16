@@ -9,6 +9,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::thread;
 
+use serde_json::{Value, json};
 use umbrachyx::log::{Engine, FileStorage};
 use umbrachyx::server::Server;
 use umbrachyx::store::{Committer, MAIN_BRANCH, Provenance, Store, SystemClock};
@@ -92,6 +93,18 @@ fn read_line(client: &mut TcpStream) -> String {
 fn ask_line(client: &mut TcpStream, args: &[&str]) -> String {
     client.write_all(&command(args)).expect("sends");
     read_line(client)
+}
+
+/// Sends one command and reads its reply as JSON in a bulk string.
+fn ask_json(client: &mut TcpStream, args: &[&str]) -> Value {
+    let line = ask_line(client, args);
+    let len: usize = line
+        .strip_prefix('$')
+        .and_then(|len| len.parse().ok())
+        .unwrap_or_else(|| panic!("{args:?} answers a bulk string, not {line:?}"));
+    let mut body = vec![0; len + 2];
+    client.read_exact(&mut body).expect("reads the body");
+    serde_json::from_slice(&body[..len]).expect("the body is JSON")
 }
 
 /// What `GET key` answers: the value, or `None` for a key that holds
@@ -207,4 +220,41 @@ fn a_viewer_sees_the_keys_of_a_plain_table() {
         .expect("sends");
     let lines: Vec<String> = (0..6).map(|_| read_line(&mut client)).collect();
     assert_eq!(lines, ["*2", "$1", "0", "*1", "$15", "session/1/token"]);
+}
+
+/// Asked for the past of a plain table, the server says there is none
+/// rather than answering as if nothing had happened: a key's history is
+/// refused, and listings of cells and diffs name the table they left out,
+/// between branch heads too, since no commit holds its writes.
+#[test]
+fn history_cells_and_diffs_say_a_plain_table_has_no_past() {
+    let dir = TempDir::new("no-past");
+    let (_committer, mut client) = serve(store(&dir));
+    assert_eq!(ask_line(&mut client, &["SET", "player/1/gold", "5"]), "+OK");
+    assert_eq!(
+        ask_line(&mut client, &["SET", "session/1/token", "a"]),
+        "+OK"
+    );
+
+    assert_eq!(
+        ask_line(&mut client, &["UMBRA.HISTORY", BRANCH, "session/1/token"]),
+        "-NOHISTORY table 'session' keeps only the latest value"
+    );
+    let tables = ask_json(&mut client, &["UMBRA.TABLES"]);
+    assert_eq!(
+        tables["tables"],
+        json!([{"name": "session", "engine": "plain"}])
+    );
+    let cells = ask_json(&mut client, &["UMBRA.CELLS", BRANCH]);
+    let keys: Vec<&Value> = cells["cells"]
+        .as_array()
+        .expect("a list of cells")
+        .iter()
+        .map(|cell| &cell["key"])
+        .collect();
+    assert_eq!(keys, ["player/1/gold"]);
+    assert_eq!(cells["omitted_tables"], json!(["session"]));
+    let diff = ask_json(&mut client, &["UMBRA.DIFF", MAIN_BRANCH, BRANCH]);
+    assert_eq!(diff["changes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(diff["omitted_tables"], json!(["session"]));
 }

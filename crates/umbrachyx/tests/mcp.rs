@@ -150,7 +150,7 @@ fn initialize_and_list_the_tools() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("named"))
         .collect();
-    for name in ["get", "history", "diff", "commit"] {
+    for name in ["get", "history", "diff", "commit", "put"] {
         assert!(names.contains(&name), "{name} in {names:?}");
     }
     for tool in tools["result"]["tools"].as_array().expect("lists tools") {
@@ -616,4 +616,119 @@ fn a_narrowed_token_is_told_of_a_table_it_can_still_read() {
 
     assert!(!is_error, "{diff}");
     assert_eq!(diff["omitted_tables"], json!(["player"]));
+}
+
+/// Main with one commit to `shop`, and `player` declared plain.
+fn plain_store(dir: &TempDir) -> FileStore {
+    let storage = FileStorage::open(&dir.0.join("log")).expect("opens file");
+    let mut store = Store::open(storage, SystemClock).expect("opens store");
+    store
+        .declare_table(b"player", Engine::Plain, by("ops", "sessions need no past"))
+        .expect("declares");
+    store
+        .commit(
+            MAIN_BRANCH,
+            vec![set("shop/1/price", "10")],
+            by("ops", "opening"),
+        )
+        .expect("commits");
+    store
+}
+
+/// An agent writes a plain table directly when its token reaches the
+/// key: no branch, no review, read back at once; and a commit cannot
+/// write there.
+#[test]
+fn a_put_writes_a_plain_table_inside_the_token() {
+    let dir = TempDir::new("put");
+    let mut session = session(plain_store(&dir), SystemTime::now() + HOUR);
+
+    let (put, is_error) = call(
+        &mut session,
+        "put",
+        json!({"set": {"player/42/gems": "7", "player/42/item": "bow"}}),
+    );
+    assert!(!is_error, "{put}");
+    assert_eq!(put["written"], 2);
+    let (removed, is_error) = call(&mut session, "put", json!({"remove": ["player/42/item"]}));
+    assert!(!is_error, "{removed}");
+
+    let get = call(&mut session, "get", json!({"key": "player/42/gems"})).0;
+    assert_eq!(get["value"], "7");
+    assert_eq!(get["erased"], false);
+    let gone = call(&mut session, "get", json!({"key": "player/42/item"})).0;
+    assert_eq!(gone["value"], Value::Null);
+    let (commit, is_error) = call(
+        &mut session,
+        "commit",
+        json!({"set": {"player/42/gems": "8"}, "why": "try"}),
+    );
+    assert!(is_error, "{commit}");
+    let (history, is_error) = call(&mut session, "history", json!({"key": "player/42/gems"}));
+    assert!(is_error);
+    assert_eq!(history, "table 'player' keeps only the latest value");
+    let (diff, _) = call(&mut session, "diff", json!({"from": "main", "to": "main"}));
+    assert_eq!(diff["omitted_tables"], json!(["player"]));
+}
+
+/// A put is all or nothing, and stays inside the token and inside plain
+/// tables.
+#[test]
+fn a_put_outside_the_token_or_outside_plain_tables_writes_nothing() {
+    let dir = TempDir::new("put-refused");
+    let mut session = session(plain_store(&dir), SystemTime::now() + HOUR);
+
+    let (outside, outside_is_error) = call(
+        &mut session,
+        "put",
+        json!({"set": {"player/42/gems": "7", "player/7/gems": "7"}}),
+    );
+    let (nothing, nothing_is_error) = call(&mut session, "put", json!({}));
+
+    assert!(outside_is_error, "{outside}");
+    assert!(nothing_is_error, "{nothing}");
+    let get = call(&mut session, "get", json!({"key": "player/42/gems"})).0;
+    assert_eq!(get["value"], Value::Null);
+}
+
+/// The token reaches the key, but its table keeps its history: a put is
+/// refused there.
+#[test]
+fn a_put_to_a_table_that_keeps_its_history_is_refused() {
+    let dir = TempDir::new("put-kind");
+    let mut session = session(store(&dir), SystemTime::now() + HOUR);
+    let (not_plain, is_error) = call(&mut session, "put", json!({"set": {"player/42/gems": "1"}}));
+    assert!(is_error, "{not_plain}");
+    assert!(
+        not_plain
+            .as_str()
+            .is_some_and(|text| text.contains("keeps its history")),
+        "{not_plain}"
+    );
+    let get = call(&mut session, "get", json!({"key": "player/42/gems"})).0;
+    assert_eq!(get["value"], "95");
+}
+
+/// A commit to a plain table is refused before the agent's branch is
+/// made, so it leaves nothing behind.
+#[test]
+fn a_commit_to_a_plain_table_leaves_no_branch_behind() {
+    let dir = TempDir::new("commit-kind");
+    let mut session = session(plain_store(&dir), SystemTime::now() + HOUR);
+    let (refused, is_error) = call(
+        &mut session,
+        "commit",
+        json!({"set": {"player/42/gems": "8"}, "why": "try"}),
+    );
+    assert!(is_error, "{refused}");
+    assert!(
+        refused
+            .as_str()
+            .is_some_and(|text| text.contains("write it with put")),
+        "{refused}"
+    );
+    drop(session);
+    let storage = FileStorage::open(&dir.0.join("log")).expect("opens file");
+    let store = Store::open(storage, SystemClock).expect("opens store");
+    assert_eq!(store.branches().collect::<Vec<_>>(), [MAIN_BRANCH]);
 }
