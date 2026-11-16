@@ -65,6 +65,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 "why": table.why,
                 "approved_by": approvers(table.approved_by.as_ref()),
             })],
+            Record::Puts(puts) => puts.iter().map(|edit| put_line(edit, ring)).collect(),
+            Record::Batch { commits, puts } => commits
+                .iter()
+                .zip(ids)
+                .map(|(commit, id)| self.commit_line(commit, id, ring))
+                .chain(puts.iter().map(|edit| put_line(edit, ring)))
+                .collect(),
             Record::Reject(reject) => vec![json!({
                 "record": "reject",
                 "branch": reject.branch,
@@ -109,6 +116,15 @@ fn change(edit: &Edit, ring: &Ring) -> Value {
         "value": shown(opened.as_ref().and_then(|value| value.as_deref())),
         "erased": matches!(opened, Some(None)),
     })
+}
+
+/// One write to a table that keeps no history: the key and what it holds
+/// now, with nothing about who wrote it or when.
+fn put_line(edit: &Edit, ring: &Ring) -> Value {
+    let mut line = change(edit, ring);
+    line["record"] = json!("put");
+    line["removed"] = json!(edit.value.is_none());
+    line
 }
 
 /// Who approved, as a list, as [`crate::report`] writes it.

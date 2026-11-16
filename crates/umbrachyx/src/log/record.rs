@@ -23,6 +23,18 @@ pub enum Record {
     Table(Table),
     /// A change waiting on a branch, closed without merging.
     Reject(Reject),
+    /// Writes to tables that keep no history, in the order written. They
+    /// are not commits: no branch, no author, no time, only what each key
+    /// now holds.
+    Puts(Vec<Edit>),
+    /// Commits and writes to tables without history acknowledged together
+    /// by one sync. One frame, as a group is, so a crash keeps all of it
+    /// or none. The two parts touch different tables, so their order
+    /// against each other does not matter.
+    Batch {
+        commits: Vec<Commit>,
+        puts: Vec<Edit>,
+    },
 }
 
 /// Changes to one branch, made together, with who made them, why, who
@@ -63,28 +75,48 @@ pub enum Engine {
     History,
     /// Only the current value of each key.
     Latest,
+    /// Only the current value, with no commits, branches or merges: a
+    /// write replaces the value for everyone. Acknowledged once synced.
+    Plain,
+    /// As `Plain`, but a write is acknowledged once it is in memory and
+    /// synced shortly after, so a crash can lose the last ones answered.
+    PlainAsync,
 }
 
 impl Engine {
     /// The name tools see and the command line takes.
+    /// Every engine, in the order their names are listed to a person.
+    pub const ALL: [Self; 4] = [Self::History, Self::Latest, Self::Plain, Self::PlainAsync];
+
     pub const fn name(self) -> &'static str {
         match self {
             Self::History => "history",
             Self::Latest => "latest",
+            Self::Plain => "plain",
+            Self::PlainAsync => "plain-async",
+        }
+    }
+
+    /// Whether the table keeps no commits at all: its writes are not part
+    /// of any branch's history and go to the log as puts.
+    pub const fn is_plain(self) -> bool {
+        match self {
+            Self::History | Self::Latest => false,
+            Self::Plain | Self::PlainAsync => true,
         }
     }
 
     /// The engine called `name`, as [`Engine::name`] spells it.
     pub fn named(name: &str) -> Option<Self> {
-        [Self::History, Self::Latest]
-            .into_iter()
-            .find(|engine| engine.name() == name)
+        Self::ALL.into_iter().find(|engine| engine.name() == name)
     }
 
     const fn byte(self) -> u8 {
         match self {
             Self::History => 0,
             Self::Latest => 1,
+            Self::Plain => 2,
+            Self::PlainAsync => 3,
         }
     }
 
@@ -92,6 +124,8 @@ impl Engine {
         match byte {
             0 => Some(Self::History),
             1 => Some(Self::Latest),
+            2 => Some(Self::Plain),
+            3 => Some(Self::PlainAsync),
             _ => None,
         }
     }
@@ -164,6 +198,8 @@ const KIND_GROUP: u8 = 3;
 const KIND_ERASE: u8 = 4;
 const KIND_TABLE: u8 = 5;
 const KIND_REJECT: u8 = 6;
+const KIND_PUTS: u8 = 7;
+const KIND_BATCH: u8 = 8;
 /// The version and kind bytes that start every payload.
 const KIND_PREFIX: usize = 2;
 /// The bytes in front of a group's commits: the version, kind and count.
@@ -237,6 +273,20 @@ fn encode_payload(record: &Record) -> Result<Vec<u8>, LogError> {
             payload.extend_from_slice(&reject.time.to_le_bytes());
             payload
         }
+        Record::Puts(puts) => {
+            let mut payload = vec![FORMAT_VERSION, KIND_PUTS];
+            push_edits(&mut payload, puts)?;
+            payload
+        }
+        Record::Batch { commits, puts } => {
+            let mut payload = vec![FORMAT_VERSION, KIND_BATCH];
+            push_count(&mut payload, commits.len())?;
+            for commit in commits {
+                push_commit(&mut payload, commit)?;
+            }
+            push_edits(&mut payload, puts)?;
+            payload
+        }
     };
     if payload.len() > MAX_PAYLOAD_LEN {
         return Err(LogError::RecordTooLarge { len: payload.len() });
@@ -284,8 +334,13 @@ fn push_commit(payload: &mut Vec<u8>, record: &Commit) -> Result<(), LogError> {
     push_optional(payload, record.approved_by.as_deref().map(str::as_bytes));
     payload.extend_from_slice(&record.time.to_le_bytes());
     push_optional(payload, record.merged.as_ref().map(|id| &id[..]));
-    push_count(payload, record.changes.len())?;
-    for write in &record.changes {
+    push_edits(payload, &record.changes)
+}
+
+/// A count, then each edit: its key and what it holds, if anything.
+fn push_edits(payload: &mut Vec<u8>, edits: &[Edit]) -> Result<(), LogError> {
+    push_count(payload, edits.len())?;
+    for write in edits {
         push_field(payload, &write.key);
         push_optional(payload, write.value.as_deref());
         if payload.len() > MAX_PAYLOAD_LEN {
@@ -433,6 +488,11 @@ fn decode_payload(payload: &[u8]) -> Option<Record> {
             why: cursor.text()?,
             time: cursor.u64()?,
         }),
+        KIND_PUTS => Record::Puts(decode_edits(&mut cursor)?),
+        KIND_BATCH => Record::Batch {
+            commits: decode_group(&mut cursor)?,
+            puts: decode_edits(&mut cursor)?,
+        },
         _ => return None,
     };
     cursor.rest.is_empty().then_some(record)
@@ -496,13 +556,7 @@ fn decode_commit(cursor: &mut Cursor<'_>) -> Option<Commit> {
         None => None,
         Some(id) => Some(<[u8; 32]>::try_from(id).ok()?),
     };
-    let count = read_u32(cursor.take(LEN_PREFIX)?, 0);
-    let mut changes = Vec::new();
-    for _ in 0..count {
-        let key = cursor.field()?.to_vec();
-        let value = cursor.optional()?.map(<[u8]>::to_vec);
-        changes.push(Edit { key, value });
-    }
+    let changes = decode_edits(cursor)?;
     Some(Commit {
         branch,
         changes,
@@ -512,6 +566,17 @@ fn decode_commit(cursor: &mut Cursor<'_>) -> Option<Commit> {
         time,
         merged,
     })
+}
+
+fn decode_edits(cursor: &mut Cursor<'_>) -> Option<Vec<Edit>> {
+    let count = read_u32(cursor.take(LEN_PREFIX)?, 0);
+    let mut edits = Vec::new();
+    for _ in 0..count {
+        let key = cursor.field()?.to_vec();
+        let value = cursor.optional()?.map(<[u8]>::to_vec);
+        edits.push(Edit { key, value });
+    }
+    Some(edits)
 }
 
 fn bytes_to_text(bytes: &[u8]) -> Option<String> {
@@ -865,10 +930,78 @@ mod tests {
             record("a", None),
             table(Engine::Latest, Some("ops:lead")),
             table(Engine::History, None),
+            table(Engine::Plain, None),
+            table(Engine::PlainAsync, Some("ops:lead")),
             group(&["b"]),
         ];
 
         assert_eq!(scan(&frames(&records)).expect("scans").records, records);
+    }
+
+    #[test]
+    fn every_engine_is_found_by_its_name() {
+        for engine in Engine::ALL {
+            assert_eq!(Engine::named(engine.name()), Some(engine));
+            assert_eq!(Engine::from_byte(engine.byte()), Some(engine));
+        }
+        assert_eq!(Engine::named("append"), None);
+    }
+
+    fn edits(keys: &[&str]) -> Vec<Edit> {
+        keys.iter()
+            .enumerate()
+            .map(|(at, key)| Edit {
+                key: key.as_bytes().to_vec(),
+                value: (at % 2 == 0).then(|| format!("value of {key} — 値").into_bytes()),
+            })
+            .collect()
+    }
+
+    /// Writes to tables without history carry no commit: only the keys
+    /// and what each now holds, in the order written.
+    #[test]
+    fn puts_round_trip_alone_and_beside_commits() {
+        let Record::Group(commits) = group(&["b", "c"]) else {
+            unreachable!("group() makes a group");
+        };
+        let records = vec![
+            record("a", None),
+            Record::Puts(edits(&["session/1/token", "session/2/token"])),
+            Record::Batch {
+                commits,
+                puts: edits(&["session/3/token", "session/3/token", "hits/home/count"]),
+            },
+            // The smallest puts a store writes: one key removed.
+            Record::Puts(vec![Edit {
+                key: Vec::new(),
+                value: None,
+            }]),
+            group(&["d"]),
+        ];
+
+        assert_eq!(scan(&frames(&records)).expect("scans").records, records);
+    }
+
+    /// A batch is one frame, as a group is: cut anywhere inside it,
+    /// neither its commits nor its puts come back.
+    #[test]
+    fn a_batch_cut_anywhere_comes_back_whole_or_not_at_all() {
+        let Record::Group(commits) = group(&["b"]) else {
+            unreachable!("group() makes a group");
+        };
+        let before = record("a", None);
+        let batch = Record::Batch {
+            commits,
+            puts: edits(&["session/1/token"]),
+        };
+        let whole = frames(&[before.clone(), batch.clone()]);
+        let first_len = frames(std::slice::from_ref(&before)).len();
+
+        for cut in first_len..whole.len() {
+            let found = scan(&whole[..cut]).expect("a torn tail is not damage");
+            assert_eq!(found.records, vec![before.clone()], "cut at {cut}");
+        }
+        assert_eq!(scan(&whole).expect("scans").records, vec![before, batch]);
     }
 
     /// An engine this build does not know is not guessed at: the frame is

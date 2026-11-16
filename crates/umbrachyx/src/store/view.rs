@@ -6,7 +6,9 @@
 //! change once built.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use super::plain::PlainMap;
 use super::seal::Ring;
 use super::{decode_cell, reveal};
 use crate::hamt::Hamt;
@@ -19,11 +21,23 @@ pub struct View {
     /// The store's keys when values are encrypted. Shared, not copied: a
     /// subject erased after the view was taken is unreadable through it too.
     ring: Option<Ring>,
+    /// The values of tables that keep no history. Not a moment kept: the
+    /// one map the store goes on writing, the same for every branch, so
+    /// a view reads what such a table holds now.
+    plain: Arc<PlainMap>,
 }
 
 impl View {
-    pub(super) fn new(states: BTreeMap<String, (Tree, Hamt)>, ring: Option<Ring>) -> Self {
-        Self { states, ring }
+    pub(super) fn new(
+        states: BTreeMap<String, (Tree, Hamt)>,
+        ring: Option<Ring>,
+        plain: Arc<PlainMap>,
+    ) -> Self {
+        Self {
+            states,
+            ring,
+            plain,
+        }
     }
 
     pub fn has_branch(&self, branch: &str) -> bool {
@@ -34,6 +48,7 @@ impl View {
     pub fn contains(&self, branch: &str, key: &[u8]) -> bool {
         self.cell(branch, key)
             .is_some_and(|bytes| decode_cell(bytes).value.is_some())
+            || (self.has_branch(branch) && self.plain.contains(key))
     }
 
     /// A latest-value map holds only live keys, and no key is in both.
@@ -68,7 +83,13 @@ impl View {
 
     /// The live value of `key` on `branch` at this moment.
     pub fn get(&self, branch: &str, key: &[u8]) -> Option<Bytes> {
-        let value = decode_cell(self.cell(branch, key)?).value;
+        let value = match self.cell(branch, key) {
+            Some(cell) => decode_cell(cell).value,
+            None => {
+                self.states.get(branch)?;
+                Some(self.plain.get(key)?)
+            }
+        };
         reveal(self.ring.as_ref(), key, value)
     }
 }

@@ -44,6 +44,7 @@ mod export;
 mod inspect;
 mod latest;
 mod merge;
+mod plain;
 mod replica;
 mod seal;
 mod tables;
@@ -234,6 +235,12 @@ pub enum StoreError {
     /// The key's table keeps only its latest value, so it has none to give
     /// for a commit that is not the head of a branch.
     NoPast(Vec<u8>),
+    /// A commit names a key of this table, which keeps no history and so
+    /// takes no commits: its keys are written with a put.
+    PlainTable(Vec<u8>),
+    /// A put names this key, whose table keeps a history: its keys are
+    /// written with a commit.
+    NotPlain(Vec<u8>),
     /// The branch has no change waiting at this head; the second field
     /// says why.
     NotWaiting(CommitId, NotWaiting),
@@ -304,6 +311,16 @@ impl fmt::Display for StoreError {
                 f,
                 "table {:?} already has keys; its engine can only be declared before the first write",
                 String::from_utf8_lossy(name)
+            ),
+            Self::PlainTable(name) => write!(
+                f,
+                "table {:?} keeps no history, so a commit cannot write it; write its keys on their own",
+                String::from_utf8_lossy(name)
+            ),
+            Self::NotPlain(key) => write!(
+                f,
+                "{:?} is in a table that keeps its history; it is written with a commit",
+                String::from_utf8_lossy(key)
             ),
             Self::NoPast(name) => write!(
                 f,
@@ -402,6 +419,9 @@ pub struct Store<S: Storage, C: Clock> {
     rejections: BTreeMap<String, Rejection>,
     /// Every approval and rejection, oldest first.
     decisions: Vec<Decision>,
+    /// The values of tables that keep no history: one map, the same for
+    /// every branch, shared with the views that read it.
+    plain: Arc<plain::PlainMap>,
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
@@ -463,6 +483,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             tables: Tables::default(),
             rejections: BTreeMap::new(),
             decisions: Vec::new(),
+            plain: Arc::new(plain::PlainMap::new()),
         };
         let mut replayed = Vec::new();
         for record in records {
@@ -518,7 +539,11 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let mut refusals = Vec::with_capacity(requests.len());
         for mut request in requests {
             request.edits = self.seal(request.edits)?;
-            refusals.push(self.require_branch(&request.branch).err());
+            refusals.push(
+                self.require_branch(&request.branch)
+                    .and_then(|()| self.refuse_plain(&request.edits))
+                    .err(),
+            );
             if refusals.last().is_some_and(Option::is_none) {
                 commits.push(new_commit(request, time, None));
             }
@@ -541,6 +566,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         merged: Option<CommitId>,
     ) -> Result<CommitId, StoreError> {
         self.require_branch(branch)?;
+        self.refuse_plain(&edits)?;
         let request = CommitRequest {
             branch: branch.to_owned(),
             edits,
@@ -549,6 +575,41 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let commit = new_commit(request, self.next_time(), merged);
         let ids = self.write(vec![commit])?;
         Ok(ids[0])
+    }
+
+    /// A commit cannot write a table that keeps no history.
+    fn refuse_plain(&self, edits: &[Edit]) -> Result<(), StoreError> {
+        match edits
+            .iter()
+            .find_map(|edit| self.tables.plain_table_of(&edit.key))
+        {
+            Some(table) => Err(StoreError::PlainTable(table.to_vec())),
+            None => Ok(()),
+        }
+    }
+
+    /// Writes `edits` to tables that keep no history, in order, and
+    /// returns once they are durable. Each key then holds its new value
+    /// on every branch; nothing records who wrote it or what it held
+    /// before. Refused, with nothing written, if any key is in a table
+    /// that keeps its history. No edits write nothing.
+    pub fn put(&mut self, edits: Vec<Edit>) -> Result<(), StoreError> {
+        if edits.is_empty() {
+            return Ok(());
+        }
+        if let Some(edit) = edits
+            .iter()
+            .find(|edit| self.tables.plain_table_of(&edit.key).is_none())
+        {
+            return Err(StoreError::NotPlain(edit.key.clone()));
+        }
+        if let Some(sealer) = &mut self.sealer {
+            let written = edits.iter().filter(|edit| edit.value.is_some());
+            sealer.make_keys_for(written.map(|edit| edit.key.as_slice()))?;
+        }
+        let record = Record::Puts(self.seal(edits)?);
+        self.log.append(&record)?;
+        self.apply(&record).map(drop)
     }
 
     /// Seals the values of edits coming in, if values are encrypted.
@@ -681,6 +742,10 @@ impl<S: Storage, C: Clock> Store<S, C> {
 
     /// The live value of `key` on `branch`.
     pub fn get(&self, branch: &str, key: &[u8]) -> Option<Bytes> {
+        if self.tables.plain_table_of(key).is_some() {
+            self.branches.get(branch)?;
+            return self.reveal(key, self.plain.get(key));
+        }
         self.cell(branch, key)?.value
     }
 
@@ -692,6 +757,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 .map(|(name, head)| (name.clone(), (head.state.clone(), head.latest.clone())))
                 .collect(),
             self.sealer.as_ref().map(Sealer::ring),
+            Arc::clone(&self.plain),
         )
     }
 
@@ -774,9 +840,18 @@ impl<S: Storage, C: Clock> Store<S, C> {
 
     fn head_entries(&self, head: &Head) -> Vec<(Bytes, Bytes)> {
         let mut entries = self.live_entries(&head.state);
-        if head.latest.is_empty() {
+        if head.latest.is_empty() && self.plain.is_empty() {
             return entries;
         }
+        entries.extend(
+            self.plain
+                .sorted_entries()
+                .into_iter()
+                .filter_map(|(key, sealed)| {
+                    let value = self.reveal(&key, Some(sealed))?;
+                    Some((key, value))
+                }),
+        );
         entries.extend(
             head.latest
                 .sorted_entries()
@@ -1020,6 +1095,15 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 }
                 ids
             }
+            Record::Puts(puts) => {
+                self.apply_puts(puts);
+                Ok(Vec::new())
+            }
+            Record::Batch { commits, puts } => {
+                let ids = self.apply(&Record::Group(commits.clone()));
+                self.apply_puts(puts);
+                ids
+            }
             Record::Table(table) => {
                 self.tables
                     .declare(&table.name, table.engine)
@@ -1134,6 +1218,16 @@ impl<S: Storage, C: Clock> Store<S, C> {
         self.commits.insert(id, Arc::new(info));
         self.last_time = self.last_time.max(commit.time);
         Ok(id)
+    }
+
+    /// Sets or removes each key in the map of tables without history, in
+    /// order.
+    fn apply_puts(&mut self, puts: &[Edit]) {
+        for edit in puts {
+            self.plain
+                .put(&edit.key, edit.value.as_deref().map(Bytes::from));
+            self.tables.note_written(&edit.key);
+        }
     }
 
     fn live_entries(&self, state: &Tree) -> Vec<(Bytes, Bytes)> {
@@ -1334,12 +1428,21 @@ fn check_sealed(records: &[Record], ring: &Ring) -> Result<(), StoreError> {
         })
         .collect();
     let commits = records.iter().flat_map(|record| match record {
-        Record::Branch(_) | Record::Erase(_) | Record::Table(_) | Record::Reject(_) => &[][..],
+        Record::Branch(_)
+        | Record::Erase(_)
+        | Record::Table(_)
+        | Record::Reject(_)
+        | Record::Puts(_) => &[][..],
         Record::Commit(commit) => std::slice::from_ref(commit),
-        Record::Group(commits) => commits.as_slice(),
+        Record::Group(commits) | Record::Batch { commits, .. } => commits.as_slice(),
+    });
+    let puts = records.iter().flat_map(|record| match record {
+        Record::Puts(puts) | Record::Batch { puts, .. } => puts.as_slice(),
+        _ => &[][..],
     });
     for value in commits
         .flat_map(|c| &c.changes)
+        .chain(puts)
         .filter_map(|e| e.value.as_ref())
     {
         let fingerprint = seal::key_fingerprint(value).ok_or(StoreError::NotSealed)?;

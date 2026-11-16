@@ -59,6 +59,8 @@ fn key(engine: Engine, n: usize) -> Vec<u8> {
     match engine {
         Engine::History => format!("key:{n:012}").into_bytes(),
         Engine::Latest => format!("pos/bench/key:{n:012}").into_bytes(),
+        // Not measured here: their keys are written with puts.
+        Engine::Plain | Engine::PlainAsync => format!("kv/bench/key:{n:012}").into_bytes(),
     }
 }
 
