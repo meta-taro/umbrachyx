@@ -38,7 +38,7 @@ use mio::{Events, Interest, Poll, Token, Waker};
 use super::resp::{self, Reply};
 use super::session::Session;
 use super::{MAX_PENDING_OUT, READ_CHUNK, Server, Slot, Step, is_set, set_reply};
-use crate::store::{Pending, Writer};
+use crate::store::{Pending, PendingPut, Writer};
 
 /// The token of the waker that announces new connections.
 const WAKE: Token = Token(usize::MAX);
@@ -192,6 +192,8 @@ struct Connection {
 enum Outgoing {
     /// A `SET` being written.
     Waiting(Pending),
+    /// A `SET` to a table that keeps no history, being written.
+    WaitingPut(PendingPut),
     /// A reply held back behind one.
     Ready(Reply),
 }
@@ -389,6 +391,10 @@ impl Connection {
                     Some(answer) => set_reply(answer).write_to(&mut self.out),
                     None => return,
                 },
+                Outgoing::WaitingPut(pending) => match pending.poll() {
+                    Some(answer) => set_reply(answer).write_to(&mut self.out),
+                    None => return,
+                },
                 Outgoing::Ready(reply) => reply.write_to(&mut self.out),
             }
             self.unanswered.pop_front();
@@ -458,6 +464,9 @@ impl Connection {
                     match server.execute(&command, &mut self.session) {
                         Some(Step::Sent(commit)) => {
                             self.unanswered.push_back(Outgoing::Waiting(commit));
+                        }
+                        Some(Step::Put(put)) => {
+                            self.unanswered.push_back(Outgoing::WaitingPut(put));
                         }
                         Some(Step::Reply(reply)) => self.reply(reply),
                         None => {}

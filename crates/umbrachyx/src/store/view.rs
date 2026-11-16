@@ -5,7 +5,7 @@
 //! its latest-value map, nothing more: both share their nodes and never
 //! change once built.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use super::plain::PlainMap;
@@ -25,6 +25,8 @@ pub struct View {
     /// one map the store goes on writing, the same for every branch, so
     /// a view reads what such a table holds now.
     plain: Arc<PlainMap>,
+    /// The tables that keep no history, by name.
+    plain_tables: Arc<HashSet<Vec<u8>>>,
 }
 
 impl View {
@@ -32,12 +34,21 @@ impl View {
         states: BTreeMap<String, (Tree, Hamt)>,
         ring: Option<Ring>,
         plain: Arc<PlainMap>,
+        plain_tables: Arc<HashSet<Vec<u8>>>,
     ) -> Self {
         Self {
             states,
             ring,
             plain,
+            plain_tables,
         }
+    }
+
+    /// Whether `key` is in a table that keeps no history, and so is
+    /// written with a put rather than a commit.
+    pub fn is_plain(&self, key: &[u8]) -> bool {
+        !self.plain_tables.is_empty()
+            && super::tables::table_of(key).is_some_and(|table| self.plain_tables.contains(table))
     }
 
     pub fn has_branch(&self, branch: &str) -> bool {

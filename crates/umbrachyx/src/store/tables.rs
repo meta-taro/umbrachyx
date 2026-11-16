@@ -10,6 +10,7 @@
 //! written equal to the store as the log replays.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use crate::log::Engine;
 
@@ -19,6 +20,10 @@ pub(super) struct Tables {
     /// Tables some commit has written to, on any branch, including keys
     /// removed since.
     written: HashSet<Vec<u8>>,
+    /// The declared tables that keep no history, to hand to views: made
+    /// anew when a declaration changes it, which is seldom, and shared
+    /// otherwise.
+    plain: Arc<HashSet<Vec<u8>>>,
 }
 
 /// Why a table cannot be declared.
@@ -37,6 +42,11 @@ impl Tables {
     /// The table of `key` when that table keeps only latest values.
     pub fn latest_table_of<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
         table_of(key).filter(|table| self.declared.get(*table) == Some(&Engine::Latest))
+    }
+
+    /// The names of the tables that keep no history.
+    pub fn plain(&self) -> Arc<HashSet<Vec<u8>>> {
+        Arc::clone(&self.plain)
     }
 
     /// The table of `key` when that table keeps no history at all.
@@ -70,6 +80,10 @@ impl Tables {
     pub fn declare(&mut self, name: &[u8], engine: Engine) -> Result<(), Refusal> {
         self.check(name)?;
         self.declared.insert(name.to_vec(), engine);
+        if engine.is_plain() != self.plain.contains(name) {
+            let plain = self.declared.iter().filter(|(_, engine)| engine.is_plain());
+            self.plain = Arc::new(plain.map(|(name, _)| name.clone()).collect());
+        }
         Ok(())
     }
 
@@ -85,7 +99,7 @@ impl Tables {
 }
 
 /// The table `key` is in, or `None` for a key of one part.
-fn table_of(key: &[u8]) -> Option<&[u8]> {
+pub(super) fn table_of(key: &[u8]) -> Option<&[u8]> {
     let at = key.iter().position(|byte| *byte == b'/')?;
     Some(&key[..at])
 }

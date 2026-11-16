@@ -26,8 +26,10 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 
-use super::{Clock, CommitId, CommitRequest, Inspect, Provenance, Review, Store, StoreError, View};
-use crate::log::record::{GROUP_OVERHEAD, commit_len};
+use super::{
+    Clock, CommitId, CommitRequest, Inspect, Provenance, Request, Review, Store, StoreError, View,
+};
+use crate::log::record::{BATCH_OVERHEAD, commit_len, edits_len};
 use crate::log::{Edit, LogError, MAX_PAYLOAD_LEN, Storage};
 
 type Answer = Result<CommitId, StoreError>;
@@ -38,7 +40,7 @@ type Question<'a> = Box<dyn FnOnce(&dyn Inspect) + 'a>;
 type Decision<'a> = Box<dyn FnOnce(&mut dyn Review) + 'a>;
 
 struct Job {
-    request: CommitRequest,
+    request: Request,
     /// The bytes the request adds to a group's payload.
     len: usize,
     answer: Arc<Slot>,
@@ -107,7 +109,9 @@ impl Turns {
     /// at least one if there is any.
     fn next_group(&self) -> Vec<Job> {
         let mut queue = lock(&self.queue);
-        let mut len = GROUP_OVERHEAD;
+        // A group of commits alone has less in front of it than a batch;
+        // counting a batch's keeps either within one record.
+        let mut len = BATCH_OVERHEAD;
         let mut group = Vec::new();
         while let Some(job) = queue.jobs.front() {
             if !group.is_empty() && len + job.len > MAX_PAYLOAD_LEN {
@@ -311,11 +315,23 @@ impl Writer {
             false,
             &edits,
         );
-        let request = CommitRequest {
+        let request = Request::Commit(CommitRequest {
             branch: branch.to_owned(),
             edits,
             provenance,
-        };
+        });
+        self.queue(request, len)
+    }
+
+    /// Queues writes to tables that keep no history, as [`Store::put`]
+    /// makes them, without waiting. They are written in the order sent
+    /// among everything else queued, with the same sync.
+    pub fn put(&self, edits: Vec<Edit>) -> PendingPut {
+        let len = edits_len(&edits);
+        PendingPut(self.queue(Request::Put(edits), len))
+    }
+
+    fn queue(&self, request: Request, len: usize) -> Pending {
         let answer = Arc::new(Slot::default());
         lock(&self.engine.turns().queue).jobs.push_back(Job {
             request,
@@ -404,6 +420,25 @@ impl Pending {
     }
 }
 
+/// Writes to tables without history sent to a [`Committer`] and not yet
+/// answered. There is no commit to name, so the answer is only whether
+/// they were written.
+pub struct PendingPut(Pending);
+
+impl PendingPut {
+    /// The answer, if the puts have been written, without waiting or
+    /// writing. The answer is given once.
+    pub fn poll(&mut self) -> Option<Result<(), StoreError>> {
+        self.0.poll().map(|answer| answer.map(drop))
+    }
+
+    /// Returns once the puts are durable. If nobody is writing, this
+    /// thread writes: its own puts and everything else queued.
+    pub fn wait(self) -> Result<(), StoreError> {
+        self.0.wait().map(drop)
+    }
+}
+
 impl Reader {
     /// Every branch as of the latest group written.
     pub fn view(&self) -> Arc<View> {
@@ -427,7 +462,7 @@ fn write_group<S: Storage, C: Clock>(
         .into_iter()
         .map(|job| (job.request, job.answer))
         .unzip();
-    match store.commit_all(requests) {
+    match store.write_requests(requests) {
         Ok(answers) => {
             // Published before any answer is left: a writer that finds its
             // answer must be able to read its write.

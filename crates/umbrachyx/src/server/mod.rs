@@ -34,7 +34,7 @@ use std::time::Duration;
 use biscuit_auth::PublicKey;
 
 use crate::log::Edit;
-use crate::store::{CommitId, MAIN_BRANCH, Pending, Provenance, Reader, StoreError, Writer};
+use crate::store::{MAIN_BRANCH, Pending, PendingPut, Reader, StoreError, Writer};
 
 mod event;
 mod history;
@@ -207,9 +207,7 @@ impl Server {
             ("AUTH", args) => session.authenticate(self.public_key, args),
             ("SET", [key, value]) => {
                 match session.may_write(&self.branch, key, self.require_auth) {
-                    Ok(()) => {
-                        return Some(Step::Sent(self.set(key, value, session.provenance("SET"))));
-                    }
+                    Ok(()) => return Some(self.set(key, value, session)),
                     Err(refused) => refused,
                 }
             }
@@ -237,12 +235,19 @@ impl Server {
         }))
     }
 
-    fn set(&self, key: &[u8], value: &[u8], provenance: Provenance) -> Pending {
+    /// A commit to the branch served, or a put when the key's table
+    /// keeps no history. Tables are declared while no server holds the
+    /// log, so the view this reads cannot be behind on them.
+    fn set(&self, key: &[u8], value: &[u8], session: &Session) -> Step {
         let edit = Edit {
             key: key.to_vec(),
             value: Some(value.to_vec()),
         };
-        self.writer.send(&self.branch, vec![edit], provenance)
+        if self.reader.view().is_plain(key) {
+            return Step::Put(self.writer.put(vec![edit]));
+        }
+        let provenance = session.provenance("SET");
+        Step::Sent(self.writer.send(&self.branch, vec![edit], provenance))
     }
 }
 
@@ -268,6 +273,8 @@ enum Step {
     Reply(Reply),
     /// A SET, answered once its write is durable.
     Sent(Pending),
+    /// A SET to a table that keeps no history, answered the same way.
+    Put(PendingPut),
 }
 
 fn is_set(command: &Command) -> bool {
@@ -276,7 +283,7 @@ fn is_set(command: &Command) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(b"SET"))
 }
 
-fn set_reply(answer: Result<CommitId, StoreError>) -> Reply {
+fn set_reply<T>(answer: Result<T, StoreError>) -> Reply {
     match answer {
         Ok(_) => Reply::Simple("OK"),
         Err(error) => Reply::Error(format!("ERR {error}")),

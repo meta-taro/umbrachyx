@@ -54,7 +54,7 @@ use seal::{Ring, Sealer};
 use tables::{Refusal, Tables};
 
 pub use approvals::{Approved, PendingChange};
-pub use committer::{Committer, Pending, Reader, Writer};
+pub use committer::{Committer, Pending, PendingPut, Reader, Writer};
 pub use inspect::{Inspect, Review};
 pub use merge::{Conflict, Merged, Reverted, ValueChange};
 pub use view::View;
@@ -109,6 +109,33 @@ pub struct CommitRequest {
     pub edits: Vec<Edit>,
     pub provenance: Provenance,
 }
+
+/// One thing a writer asks for: a commit, or writes to tables that keep
+/// no history.
+pub(crate) enum Request {
+    Commit(CommitRequest),
+    Put(Vec<Edit>),
+}
+
+impl Request {
+    fn edits(&self) -> &[Edit] {
+        match self {
+            Self::Commit(request) => &request.edits,
+            Self::Put(edits) => edits,
+        }
+    }
+}
+
+/// What a request came to, before its commit has an id.
+enum Outcome {
+    Commit,
+    Put,
+    Refused(StoreError),
+}
+
+/// What a put is answered with where a commit's id would go. It never
+/// leaves the committer: a put has no commit to name.
+const NO_COMMIT: CommitId = [0; 32];
 
 /// A key's value at some commit, and the commit that last changed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,33 +554,60 @@ impl<S: Storage, C: Clock> Store<S, C> {
         &mut self,
         requests: Vec<CommitRequest>,
     ) -> Result<Vec<Result<CommitId, StoreError>>, StoreError> {
+        self.write_requests(requests.into_iter().map(Request::Commit).collect())
+    }
+
+    /// Writes commits and puts with one sync, as one record, and returns
+    /// once all of them are durable: a crash keeps all or none. A request
+    /// that cannot be written is refused on its own; the result for each
+    /// request is in its place, a put's being an id that names nothing.
+    /// If the log fails, none is written.
+    pub(crate) fn write_requests(
+        &mut self,
+        requests: Vec<Request>,
+    ) -> Result<Vec<Result<CommitId, StoreError>>, StoreError> {
         let time = self.next_time();
         if let Some(sealer) = &mut self.sealer {
             let written = requests
                 .iter()
-                .flat_map(|request| &request.edits)
+                .flat_map(Request::edits)
                 .filter(|edit| edit.value.is_some());
             sealer.make_keys_for(written.map(|edit| edit.key.as_slice()))?;
         }
-        let mut commits = Vec::with_capacity(requests.len());
-        let mut refusals = Vec::with_capacity(requests.len());
-        for mut request in requests {
-            request.edits = self.seal(request.edits)?;
-            refusals.push(
-                self.require_branch(&request.branch)
-                    .and_then(|()| self.refuse_plain(&request.edits))
-                    .err(),
-            );
-            if refusals.last().is_some_and(Option::is_none) {
-                commits.push(new_commit(request, time, None));
-            }
+        let mut commits = Vec::new();
+        let mut puts = Vec::new();
+        let mut outcomes = Vec::with_capacity(requests.len());
+        for request in requests {
+            outcomes.push(match request {
+                Request::Commit(mut request) => {
+                    request.edits = self.seal(request.edits)?;
+                    let refusal = self
+                        .require_branch(&request.branch)
+                        .and_then(|()| self.refuse_plain(&request.edits));
+                    match refusal {
+                        Ok(()) => {
+                            commits.push(new_commit(request, time, None));
+                            Outcome::Commit
+                        }
+                        Err(error) => Outcome::Refused(error),
+                    }
+                }
+                Request::Put(edits) => match self.refuse_not_plain(&edits) {
+                    Ok(()) => {
+                        puts.extend(self.seal(edits)?);
+                        Outcome::Put
+                    }
+                    Err(error) => Outcome::Refused(error),
+                },
+            });
         }
-        let mut ids = self.write(commits)?.into_iter();
-        Ok(refusals
+        let mut ids = self.write_both(commits, puts)?.into_iter();
+        Ok(outcomes
             .into_iter()
-            .map(|refusal| match refusal {
-                Some(error) => Err(error),
-                None => Ok(ids.next().expect("one id per accepted request")),
+            .map(|outcome| match outcome {
+                Outcome::Refused(error) => Err(error),
+                Outcome::Commit => Ok(ids.next().expect("one id per accepted commit")),
+                Outcome::Put => Ok(NO_COMMIT),
             })
             .collect())
     }
@@ -594,22 +648,19 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// before. Refused, with nothing written, if any key is in a table
     /// that keeps its history. No edits write nothing.
     pub fn put(&mut self, edits: Vec<Edit>) -> Result<(), StoreError> {
-        if edits.is_empty() {
-            return Ok(());
-        }
-        if let Some(edit) = edits
+        let mut answers = self.write_requests(vec![Request::Put(edits)])?;
+        answers.pop().expect("one answer per request").map(drop)
+    }
+
+    /// A put cannot write a table that keeps its history.
+    fn refuse_not_plain(&self, edits: &[Edit]) -> Result<(), StoreError> {
+        match edits
             .iter()
             .find(|edit| self.tables.plain_table_of(&edit.key).is_none())
         {
-            return Err(StoreError::NotPlain(edit.key.clone()));
+            Some(edit) => Err(StoreError::NotPlain(edit.key.clone())),
+            None => Ok(()),
         }
-        if let Some(sealer) = &mut self.sealer {
-            let written = edits.iter().filter(|edit| edit.value.is_some());
-            sealer.make_keys_for(written.map(|edit| edit.key.as_slice()))?;
-        }
-        let record = Record::Puts(self.seal(edits)?);
-        self.log.append(&record)?;
-        self.apply(&record).map(drop)
     }
 
     /// Seals the values of edits coming in, if values are encrypted.
@@ -713,11 +764,24 @@ impl<S: Storage, C: Clock> Store<S, C> {
     }
 
     /// Appends the commits as one record, then applies them in order.
-    fn write(&mut self, mut commits: Vec<Commit>) -> Result<Vec<CommitId>, StoreError> {
-        let record = match commits.len() {
-            0 => return Ok(Vec::new()),
-            1 => Record::Commit(commits.pop().expect("one commit")),
-            _ => Record::Group(commits),
+    fn write(&mut self, commits: Vec<Commit>) -> Result<Vec<CommitId>, StoreError> {
+        self.write_both(commits, Vec::new())
+    }
+
+    /// Appends the commits and the puts as one record, then applies them:
+    /// the commits in order, then the puts in order. Nothing to write is
+    /// no record.
+    fn write_both(
+        &mut self,
+        mut commits: Vec<Commit>,
+        puts: Vec<Edit>,
+    ) -> Result<Vec<CommitId>, StoreError> {
+        let record = match (commits.len(), puts.is_empty()) {
+            (0, true) => return Ok(Vec::new()),
+            (1, true) => Record::Commit(commits.pop().expect("one commit")),
+            (_, true) => Record::Group(commits),
+            (0, false) => Record::Puts(puts),
+            (_, false) => Record::Batch { commits, puts },
         };
         self.log.append(&record)?;
         self.apply(&record)
@@ -758,6 +822,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 .collect(),
             self.sealer.as_ref().map(Sealer::ring),
             Arc::clone(&self.plain),
+            self.tables.plain(),
         )
     }
 

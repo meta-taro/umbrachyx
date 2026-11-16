@@ -203,7 +203,8 @@ const KIND_BATCH: u8 = 8;
 /// The version and kind bytes that start every payload.
 const KIND_PREFIX: usize = 2;
 /// The bytes in front of a group's commits: the version, kind and count.
-pub const GROUP_OVERHEAD: usize = KIND_PREFIX + LEN_PREFIX;
+#[cfg(test)]
+const GROUP_OVERHEAD: usize = KIND_PREFIX + LEN_PREFIX;
 const TIME_LEN: usize = 8;
 const ID_LEN: usize = 32;
 const ABSENT: u8 = 0;
@@ -296,7 +297,8 @@ fn encode_payload(record: &Record) -> Result<Vec<u8>, LogError> {
 
 /// What a commit adds to a payload, in bytes: exactly what `push_commit`
 /// writes for it. A commit record's payload is this plus the version and
-/// kind; a group's is the sum over its commits plus `GROUP_OVERHEAD`.
+/// kind; a group's is the sum over its commits plus the version, the
+/// kind and their count.
 pub fn commit_len(
     branch: &str,
     who: &str,
@@ -567,6 +569,20 @@ fn decode_commit(cursor: &mut Cursor<'_>) -> Option<Commit> {
         merged,
     })
 }
+
+/// What `edits` add to a batch's payload, in bytes: exactly what
+/// `push_edits` writes for them, less their count.
+pub fn edits_len(edits: &[Edit]) -> usize {
+    let value = |value: &Option<Vec<u8>>| 1 + value.as_ref().map_or(0, |v| LEN_PREFIX + v.len());
+    edits
+        .iter()
+        .map(|edit| LEN_PREFIX + edit.key.len() + value(&edit.value))
+        .sum()
+}
+
+/// The bytes in front of a batch's commits and puts: the version, the
+/// kind and the two counts. A group's are fewer.
+pub const BATCH_OVERHEAD: usize = KIND_PREFIX + 2 * LEN_PREFIX;
 
 fn decode_edits(cursor: &mut Cursor<'_>) -> Option<Vec<Edit>> {
     let count = read_u32(cursor.take(LEN_PREFIX)?, 0);
@@ -980,6 +996,34 @@ mod tests {
         ];
 
         assert_eq!(scan(&frames(&records)).expect("scans").records, records);
+    }
+
+    /// The committer packs requests into one frame by these sizes, so
+    /// they must be what encoding writes.
+    #[test]
+    fn a_batch_is_as_long_as_its_parts_say() {
+        let Record::Group(commits) = group(&["b", "c"]) else {
+            unreachable!("group() makes a group");
+        };
+        let puts = edits(&["session/1/token", "session/2/token", ""]);
+        let commits_len: usize = commits
+            .iter()
+            .map(|c| {
+                commit_len(
+                    &c.branch,
+                    &c.who,
+                    &c.why,
+                    c.approved_by.as_deref(),
+                    c.merged.is_some(),
+                    &c.changes,
+                )
+            })
+            .sum();
+        let expected = BATCH_OVERHEAD + commits_len + edits_len(&puts);
+
+        let frame = encode(&Record::Batch { commits, puts }).expect("encodes");
+
+        assert_eq!(frame.len() - HEADER_LEN, expected);
     }
 
     /// A batch is one frame, as a group is: cut anywhere inside it,
