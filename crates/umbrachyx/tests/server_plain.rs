@@ -4,14 +4,15 @@
 //!
 //! The data is synthetic: players and their sessions.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use umbrachyx::log::{Engine, FileStorage};
+use umbrachyx::log::{Engine, FileStorage, Storage};
 use umbrachyx::server::Server;
 use umbrachyx::store::{Committer, MAIN_BRANCH, Provenance, Store, SystemClock};
 
@@ -65,10 +66,10 @@ fn serve(store: FileStore) -> (Committer<FileStorage, SystemClock>, TcpStream) {
 }
 
 /// As `serve`, writing puts answered before the disk within `sync_every`.
-fn serve_syncing_every(
-    store: FileStore,
+fn serve_syncing_every<S: Storage + Send + 'static>(
+    store: Store<S, SystemClock>,
     sync_every: Duration,
-) -> (Committer<FileStorage, SystemClock>, TcpStream) {
+) -> (Committer<S, SystemClock>, TcpStream) {
     let committer = Committer::start(store);
     let server = Server::new(BRANCH, committer.writer(), committer.reader())
         .expect("serves a branch")
@@ -269,14 +270,70 @@ fn history_cells_and_diffs_say_a_plain_table_has_no_past() {
     assert_eq!(diff["omitted_tables"], json!(["session"]));
 }
 
-/// What a power cut now would leave of `key`: read from a copy of the
-/// log file, opened on its own.
-fn on_disk(dir: &TempDir, key: &str) -> Option<String> {
-    let copy = dir.0.join("copy");
-    std::fs::copy(dir.0.join("log"), &copy).expect("copies the log");
-    let storage = FileStorage::open(&copy).expect("opens file");
-    let store: FileStore = Store::open(storage, SystemClock).expect("opens store");
-    text(store.get(MAIN_BRANCH, key.as_bytes()))
+/// What a power cut would leave of a log: the bytes that were appended
+/// and then synced. Kept beside the file because a log held open cannot
+/// be read by another handle on every system.
+#[derive(Clone, Default)]
+struct Disk(Arc<Mutex<Vec<u8>>>);
+
+impl Disk {
+    /// The store those bytes open as, in a file of their own.
+    fn after_a_power_cut(&self, dir: &TempDir) -> FileStore {
+        let copy = dir.0.join("copy");
+        let bytes = self.0.lock().expect("no test panics holding it").clone();
+        std::fs::write(&copy, bytes).expect("writes the copy");
+        let storage = FileStorage::open(&copy).expect("opens file");
+        Store::open(storage, SystemClock).expect("opens store")
+    }
+}
+
+/// A file that tells a [`Disk`] what it has synced.
+struct Mirrored {
+    file: FileStorage,
+    written: Vec<u8>,
+    disk: Disk,
+}
+
+impl Mirrored {
+    fn open(path: &Path) -> (Self, Disk) {
+        let mut file = FileStorage::open(path).expect("opens file");
+        let written = file.read_all().expect("reads the log");
+        let disk = Disk(Arc::new(Mutex::new(written.clone())));
+        let mirrored = Self {
+            file,
+            written,
+            disk: disk.clone(),
+        };
+        (mirrored, disk)
+    }
+}
+
+impl Storage for Mirrored {
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        self.file.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.file.append(bytes)?;
+        self.written.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        self.file.sync()?;
+        self.disk
+            .0
+            .lock()
+            .expect("no test panics holding it")
+            .clone_from(&self.written);
+        Ok(())
+    }
+
+    fn truncate(&mut self, len: u64) -> io::Result<()> {
+        self.file.truncate(len)?;
+        self.written.truncate(len as usize);
+        Ok(())
+    }
 }
 
 /// A `SET` to a plain-async table is answered and read back before it is
@@ -294,17 +351,26 @@ fn a_set_to_a_plain_async_table_reaches_the_disk_within_the_time_given() {
     store
         .declare_table(b"cache", Engine::PlainAsync, provenance)
         .expect("declares");
+    drop(store);
+    let (storage, disk) = Mirrored::open(&dir.0.join("log"));
+    let store = Store::open(storage, SystemClock).expect("opens store");
+    let on_disk = |key: &str| {
+        text(
+            disk.after_a_power_cut(&dir)
+                .get(MAIN_BRANCH, key.as_bytes()),
+        )
+    };
     let (_committer, mut client) = serve_syncing_every(store, Duration::from_millis(300));
 
     assert_eq!(ask_line(&mut client, &["SET", "cache/top", "1"]), "+OK");
     let answered = Instant::now();
     assert_eq!(get(&mut client, "cache/top"), Some("1".to_owned()));
-    let early = on_disk(&dir, "cache/top");
+    let early = on_disk("cache/top");
     if answered.elapsed() < Duration::from_millis(200) {
         assert_eq!(early, None, "answered before it was on disk");
     }
 
-    while on_disk(&dir, "cache/top").is_none() {
+    while on_disk("cache/top").is_none() {
         assert!(
             answered.elapsed() < Duration::from_secs(10),
             "never reached the disk"

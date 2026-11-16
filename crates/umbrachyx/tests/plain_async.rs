@@ -4,15 +4,15 @@
 //! of them; it loses nothing else, and never one answered before a write
 //! that survived.
 //!
-//! "The disk as a power cut would leave it" is a copy of the log file,
-//! taken while the store still holds it open.
+//! "The disk as a power cut would leave it" is every byte that was
+//! appended and then synced, opened as a log of its own.
 //!
 //! The data is synthetic: cached leaderboards and player gold.
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use umbrachyx::log::{Edit, Engine, FileStorage, Storage};
 use umbrachyx::store::{Committer, MAIN_BRANCH, Provenance, Store, SystemClock};
@@ -33,20 +33,6 @@ impl TempDir {
 
     fn log(&self) -> PathBuf {
         self.0.join("log")
-    }
-
-    /// The store a power cut at this moment would leave: what the log
-    /// file holds now, opened on its own.
-    fn after_a_power_cut(&self) -> FileStore {
-        let copy = self.0.join("copy");
-        std::fs::copy(self.log(), &copy).expect("copies the log");
-        open(&copy)
-    }
-
-    fn log_len(&self) -> u64 {
-        std::fs::metadata(self.log())
-            .expect("the log is there")
-            .len()
     }
 }
 
@@ -81,6 +67,76 @@ fn value(store: &FileStore, key: &str) -> Option<String> {
         .map(|bytes| String::from_utf8(bytes.to_vec()).expect("utf-8"))
 }
 
+/// What a power cut would leave of a log: the bytes that were appended
+/// and then synced. Kept beside the file because a log held open cannot
+/// be read by another handle on every system.
+#[derive(Clone, Default)]
+struct Disk(Arc<Mutex<Vec<u8>>>);
+
+impl Disk {
+    fn len(&self) -> usize {
+        self.0.lock().expect("no test panics holding it").len()
+    }
+
+    /// The store those bytes open as, in a file of their own.
+    fn after_a_power_cut(&self, dir: &TempDir) -> FileStore {
+        let copy = dir.0.join("copy");
+        let bytes = self.0.lock().expect("no test panics holding it").clone();
+        std::fs::write(&copy, bytes).expect("writes the copy");
+        let storage = FileStorage::open(&copy).expect("opens file");
+        Store::open(storage, SystemClock).expect("opens store")
+    }
+}
+
+/// A file that tells a [`Disk`] what it has synced.
+struct Mirrored {
+    file: FileStorage,
+    written: Vec<u8>,
+    disk: Disk,
+}
+
+impl Mirrored {
+    fn open(path: &Path) -> (Self, Disk) {
+        let mut file = FileStorage::open(path).expect("opens file");
+        let written = file.read_all().expect("reads the log");
+        let disk = Disk(Arc::new(Mutex::new(written.clone())));
+        let mirrored = Self {
+            file,
+            written,
+            disk: disk.clone(),
+        };
+        (mirrored, disk)
+    }
+}
+
+impl Storage for Mirrored {
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        self.file.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.file.append(bytes)?;
+        self.written.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        self.file.sync()?;
+        self.disk
+            .0
+            .lock()
+            .expect("no test panics holding it")
+            .clone_from(&self.written);
+        Ok(())
+    }
+
+    fn truncate(&mut self, len: u64) -> io::Result<()> {
+        self.file.truncate(len)?;
+        self.written.truncate(len as usize);
+        Ok(())
+    }
+}
+
 /// `cache` answers before the disk, `session` waits for it, `player`
 /// keeps its history.
 fn store(dir: &TempDir) -> FileStore {
@@ -94,12 +150,21 @@ fn store(dir: &TempDir) -> FileStore {
     store
 }
 
+/// The same store, opened so that what is on disk can be asked.
+fn mirrored(dir: &TempDir) -> (Store<Mirrored, SystemClock>, Disk) {
+    drop(store(dir));
+    let (storage, disk) = Mirrored::open(&dir.log());
+    let store = Store::open(storage, SystemClock).expect("opens store");
+    (store, disk)
+}
+
 #[test]
 fn a_put_is_answered_and_read_before_it_is_on_disk() {
     let dir = TempDir::new("answered");
-    let committer = Committer::start(store(&dir));
+    let (store, disk) = mirrored(&dir);
+    let committer = Committer::start(store);
     let (writer, reader) = (committer.writer(), committer.reader());
-    let len = dir.log_len();
+    let len = disk.len();
 
     writer
         .put(vec![set("cache/top", "1")])
@@ -112,14 +177,14 @@ fn a_put_is_answered_and_read_before_it_is_on_disk() {
         "read as soon as it is answered"
     );
     assert!(writer.has_unsynced_puts());
-    assert_eq!(dir.log_len(), len, "nothing written yet");
-    assert_eq!(value(&dir.after_a_power_cut(), "cache/top"), None);
+    assert_eq!(disk.len(), len, "nothing written yet");
+    assert_eq!(value(&disk.after_a_power_cut(&dir), "cache/top"), None);
 
     writer.sync_puts().expect("syncs");
 
     assert!(!writer.has_unsynced_puts());
     assert_eq!(
-        value(&dir.after_a_power_cut(), "cache/top"),
+        value(&disk.after_a_power_cut(&dir), "cache/top"),
         Some("1".to_owned())
     );
 }
@@ -148,7 +213,7 @@ fn stopping_writes_every_put_that_was_answered() {
 fn a_write_that_waits_for_the_disk_carries_the_earlier_puts() {
     for (name, waits) in [("commit", "player/1/gold"), ("plain", "session/1/token")] {
         let dir = TempDir::new(name);
-        let store = store(&dir);
+        let (store, disk) = mirrored(&dir);
         let records = store.log_records();
         let committer = Committer::start(store);
         let writer = committer.writer();
@@ -164,7 +229,7 @@ fn a_write_that_waits_for_the_disk_carries_the_earlier_puts() {
         }
 
         assert!(!writer.has_unsynced_puts(), "{name}");
-        let left = dir.after_a_power_cut();
+        let left = disk.after_a_power_cut(&dir);
         assert_eq!(value(&left, "cache/a"), Some("2".to_owned()), "{name}");
         assert!(value(&left, waits).is_some(), "{name}");
         assert_eq!(
@@ -180,9 +245,10 @@ fn a_write_that_waits_for_the_disk_carries_the_earlier_puts() {
 #[test]
 fn held_puts_are_written_once_they_pass_the_bound() {
     let dir = TempDir::new("bound");
-    let committer = Committer::start(store(&dir));
+    let (store, disk) = mirrored(&dir);
+    let committer = Committer::start(store);
     let writer = committer.writer();
-    let len = dir.log_len();
+    let len = disk.len();
     let megabyte = "x".repeat(1024 * 1024);
 
     for n in 0..6 {
@@ -192,7 +258,7 @@ fn held_puts_are_written_once_they_pass_the_bound() {
             .expect("puts");
     }
 
-    assert!(dir.log_len() > len + 4 * 1024 * 1024);
+    assert!(disk.len() > len + 4 * 1024 * 1024);
     drop(committer.stop());
     let store = open(&dir.log());
     for n in 0..6 {
@@ -206,10 +272,10 @@ fn held_puts_are_written_once_they_pass_the_bound() {
 #[test]
 fn everything_else_is_on_disk_when_answered() {
     let dir = TempDir::new("durable");
-    let mut store = store(&dir);
+    let (mut store, disk) = mirrored(&dir);
     store.put(vec![set("cache/direct", "1")]).expect("puts");
     assert_eq!(
-        value(&dir.after_a_power_cut(), "cache/direct"),
+        value(&disk.after_a_power_cut(&dir), "cache/direct"),
         Some("1".to_owned())
     );
     let committer = Committer::start(store);
@@ -224,7 +290,7 @@ fn everything_else_is_on_disk_when_answered() {
         .wait()
         .expect("puts");
 
-    let left = dir.after_a_power_cut();
+    let left = disk.after_a_power_cut(&dir);
     assert!(value(&left, "session/1/token").is_some());
     assert!(value(&left, "session/2/token").is_some());
     assert!(value(&left, "cache/mixed").is_some());
