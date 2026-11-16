@@ -44,6 +44,7 @@ mod export;
 mod inspect;
 mod latest;
 mod merge;
+mod plain;
 mod replica;
 mod seal;
 mod tables;
@@ -409,7 +410,7 @@ pub struct Store<S: Storage, C: Clock> {
     spike_nowait: Option<std::time::Duration>,
     spike_last_sync: std::time::Instant,
     /// SPIKE: the current values of those keys, one map for every branch.
-    plain: Hamt,
+    plain: Arc<plain::PlainMap>,
     /// SPIKE: the commits answered but not yet written.
     spike_unsynced: Vec<Commit>,
 }
@@ -484,7 +485,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 .ok()
                 .map(|ms| std::time::Duration::from_millis(ms.parse().unwrap_or(10))),
             spike_last_sync: std::time::Instant::now(),
-            plain: Hamt::empty(),
+            plain: Arc::new(plain::PlainMap::new()),
             spike_unsynced: Vec::new(),
         };
         let mut replayed = Vec::new();
@@ -584,15 +585,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
             commits.push(new_commit(request, time, None));
         }
         let count = commits.len();
-        let mut plain = self.plain.clone();
         for edit in commits.iter().flat_map(|commit| &commit.changes) {
-            plain = match &edit.value {
-                Some(value) => plain.insert(
-                    Arc::from(edit.key.as_slice()),
-                    encode_cell(&[0; COMMIT_ID_LEN], Some(value)),
-                ),
-                None => plain.remove(&edit.key),
-            };
+            match &edit.value {
+                Some(value) => self
+                    .plain
+                    .insert(&edit.key, encode_cell(&[0; COMMIT_ID_LEN], Some(value))),
+                None => self.plain.remove(&edit.key),
+            }
         }
         if self.spike_nowait.is_some() {
             self.spike_unsynced.append(&mut commits);
@@ -603,7 +602,6 @@ impl<S: Storage, C: Clock> Store<S, C> {
             };
             self.log.append(&record)?;
         }
-        self.plain = plain;
         self.last_time = self.last_time.max(time);
         Ok((0..count).map(|_| Ok([0; COMMIT_ID_LEN])).collect())
     }

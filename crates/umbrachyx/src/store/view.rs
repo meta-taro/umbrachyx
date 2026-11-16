@@ -20,14 +20,14 @@ pub struct View {
     /// subject erased after the view was taken is unreadable through it too.
     ring: Option<Ring>,
     /// SPIKE: keys without history, the same on every branch.
-    plain: Hamt,
+    plain: std::sync::Arc<super::plain::PlainMap>,
 }
 
 impl View {
     pub(super) fn new(
         states: BTreeMap<String, (Tree, Hamt)>,
         ring: Option<Ring>,
-        plain: Hamt,
+        plain: std::sync::Arc<super::plain::PlainMap>,
     ) -> Self {
         Self {
             states,
@@ -44,6 +44,7 @@ impl View {
     pub fn contains(&self, branch: &str, key: &[u8]) -> bool {
         self.cell(branch, key)
             .is_some_and(|bytes| decode_cell(bytes).value.is_some())
+            || self.plain.get(key).is_some()
     }
 
     /// A latest-value map holds only live keys, and no key is in both.
@@ -51,7 +52,6 @@ impl View {
         let (tree, latest) = self.states.get(branch)?;
         tree.get(key)
             .or_else(|| latest.get(key).map(|cell| &**cell))
-            .or_else(|| self.plain.get(key).map(|cell| &**cell))
     }
 
     /// The keys holding a value on `branch`, readable or erased, among the
@@ -79,7 +79,10 @@ impl View {
 
     /// The live value of `key` on `branch` at this moment.
     pub fn get(&self, branch: &str, key: &[u8]) -> Option<Bytes> {
-        let value = decode_cell(self.cell(branch, key)?).value;
+        let value = match self.cell(branch, key) {
+            Some(cell) => decode_cell(cell).value,
+            None => decode_cell(&self.plain.get(key)?).value,
+        };
         reveal(self.ring.as_ref(), key, value)
     }
 }
