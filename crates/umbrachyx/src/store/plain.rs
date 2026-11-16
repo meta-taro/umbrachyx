@@ -70,6 +70,34 @@ impl PlainMap {
         self.parts.iter().all(|part| read(part).is_empty())
     }
 
+    /// The `count` keys after the first `skip`, and whether more follow.
+    /// The order means nothing: it changes when a key is added or removed
+    /// and when the process restarts, so a place named before either may
+    /// skip or repeat keys. Each part is read at a moment of its own.
+    /// Finding the place counts whole parts, and walks only the one the
+    /// place falls in.
+    pub fn keys(&self, skip: usize, count: usize) -> (Vec<Bytes>, bool) {
+        let mut skip = skip;
+        let mut keys = Vec::new();
+        for part in &self.parts {
+            let part = read(part);
+            if skip >= part.len() {
+                skip -= part.len();
+                continue;
+            }
+            let wanted = count - keys.len();
+            if wanted == 0 {
+                return (keys, true);
+            }
+            keys.extend(part.keys().skip(skip).take(wanted).cloned());
+            if part.len() - skip > wanted {
+                return (keys, true);
+            }
+            skip = 0;
+        }
+        (keys, false)
+    }
+
     /// Every key and what it holds, in key order. Each part is read at a
     /// moment of its own, so writes made meanwhile may or may not show.
     pub fn sorted_entries(&self) -> Vec<(Bytes, Bytes)> {

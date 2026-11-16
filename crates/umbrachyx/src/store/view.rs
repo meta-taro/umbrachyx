@@ -71,25 +71,36 @@ impl View {
 
     /// The keys holding a value on `branch`, readable or erased, among the
     /// `count` entries after the first `skip`; and whether more follow. The
-    /// tree comes first, in key order, then the latest-value tables, in an
-    /// order that means nothing and changes when the process restarts, so a
-    /// place named before a restart may skip or repeat their keys. Removed keys are passed over but counted,
-    /// so the same `skip` names the same place as long as no key is added
-    /// or removed before it. Finding that place reads the entries before
-    /// it.
+    /// tree comes first, in key order, then the latest-value tables, then
+    /// the tables that keep no history: both in an order that means
+    /// nothing and changes when the process restarts, and for the last
+    /// also when one of their keys is added or removed, so a place named
+    /// before that may skip or repeat their keys. Removed keys of the tree
+    /// are passed over but counted, so the same `skip` names the same
+    /// place as long as no key is added or removed before it. Finding
+    /// that place reads the tree's and the latest-value entries before it.
     pub fn keys(&self, branch: &str, skip: usize, count: usize) -> (Vec<Bytes>, bool) {
         let Some((tree, latest)) = self.states.get(branch) else {
             return (Vec::new(), false);
         };
         let latest = latest.iter().map(|(key, cell)| (key, &**cell));
-        let mut entries = tree.iter().chain(latest).skip(skip);
-        let keys = entries
+        let mut entries = tree.iter().chain(latest);
+        let passed = entries.by_ref().take(skip).count();
+        let mut read = 0;
+        let mut keys: Vec<Bytes> = entries
             .by_ref()
             .take(count)
+            .inspect(|_| read += 1)
             .filter(|(_, bytes)| decode_cell(bytes).value.is_some())
             .map(|(key, _)| key.clone())
             .collect();
-        (keys, entries.next().is_some())
+        if read == count {
+            let has_more = entries.next().is_some() || !self.plain.is_empty();
+            return (keys, has_more);
+        }
+        let (plain, has_more) = self.plain.keys(skip - passed, count - read);
+        keys.extend(plain);
+        (keys, has_more)
     }
 
     /// The live value of `key` on `branch` at this moment.

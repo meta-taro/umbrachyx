@@ -180,3 +180,31 @@ fn pipelined_sets_to_both_kinds_of_table_all_land_and_survive_a_restart() {
         assert_eq!(token, Some(format!("t{n}")));
     }
 }
+
+/// A viewer lists and opens a plain table's keys like any other: `TYPE`
+/// and `TTL` answer as for a string that never expires, and `SCAN`
+/// returns them.
+#[test]
+fn a_viewer_sees_the_keys_of_a_plain_table() {
+    let dir = TempDir::new("viewer");
+    let (_committer, mut client) = serve(store(&dir));
+    assert_eq!(ask_line(&mut client, &["SET", "player/1/gold", "5"]), "+OK");
+    assert_eq!(
+        ask_line(&mut client, &["SET", "session/1/token", "a"]),
+        "+OK"
+    );
+
+    assert_eq!(
+        ask_line(&mut client, &["TYPE", "session/1/token"]),
+        "+string"
+    );
+    assert_eq!(ask_line(&mut client, &["TTL", "session/1/token"]), ":-1");
+    assert_eq!(ask_line(&mut client, &["TYPE", "session/2/token"]), "+none");
+    assert_eq!(ask_line(&mut client, &["TTL", "session/2/token"]), ":-2");
+
+    client
+        .write_all(&command(&["SCAN", "0", "MATCH", "session/*"]))
+        .expect("sends");
+    let lines: Vec<String> = (0..6).map(|_| read_line(&mut client)).collect();
+    assert_eq!(lines, ["*2", "$1", "0", "*1", "$15", "session/1/token"]);
+}

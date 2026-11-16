@@ -253,3 +253,57 @@ fn the_keys_of_a_plain_table_are_listed_with_the_others() {
         ["player/1/gold", "session/1/token", "session/2/token"]
     );
 }
+
+/// A view lists a branch a page at a time: the keys with a history
+/// first, then the plain tables' keys, in an order that means nothing.
+/// Walked to the end with nothing written meanwhile, every key comes
+/// back once.
+#[test]
+fn a_view_walks_plain_keys_after_the_others_a_page_at_a_time() {
+    const SESSIONS: usize = 200;
+    let dir = TempDir::new("walk");
+    let mut store = with_session(&dir);
+    store
+        .commit(
+            MAIN_BRANCH,
+            vec![set("player/1/gold", "5"), set("player/2/gold", "6")],
+            by("game"),
+        )
+        .expect("commits");
+    let sessions: Vec<Edit> = (0..SESSIONS)
+        .map(|n| set(&format!("session/{n}/token"), "t"))
+        .collect();
+    store.put(sessions).expect("puts");
+    store.put(vec![remove("session/7/token")]).expect("puts");
+    let view = store.view();
+
+    for page in [1, 3, 64, 1000] {
+        let mut walked = Vec::new();
+        let mut skip = 0;
+        loop {
+            let (keys, has_more) = view.keys(MAIN_BRANCH, skip, page);
+            assert!(keys.len() <= page);
+            walked.extend(
+                keys.into_iter()
+                    .map(|key| String::from_utf8(key.to_vec()).expect("utf-8")),
+            );
+            if !has_more {
+                break;
+            }
+            skip += page;
+        }
+
+        assert_eq!(&walked[..2], ["player/1/gold", "player/2/gold"]);
+        let mut sessions = walked.split_off(2);
+        sessions.sort();
+        let mut expected: Vec<String> = (0..SESSIONS)
+            .filter(|n| *n != 7)
+            .map(|n| format!("session/{n}/token"))
+            .collect();
+        expected.sort();
+        assert_eq!(sessions, expected, "pages of {page}");
+    }
+    let (keys, has_more) = view.keys("agent", 0, 1000);
+    assert_eq!((keys.len(), has_more), (SESSIONS - 1, false));
+    assert_eq!(view.keys("nowhere", 0, 10), (Vec::new(), false));
+}

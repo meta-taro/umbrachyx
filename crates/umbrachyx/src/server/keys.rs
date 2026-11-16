@@ -10,7 +10,8 @@
 //! A key added or removed before the cursor between two calls moves the
 //! rest by one, so a walk may then return a key twice or miss one, which
 //! Redis also allows for keys changed during a walk. Finding where a cursor
-//! points reads the entries before it.
+//! points reads the entries before it. The keys of tables that keep no
+//! history come last, in no order, the same on every branch.
 
 use super::resp::Reply;
 use crate::store::View;
