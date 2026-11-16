@@ -59,3 +59,33 @@ minutes after it was up.
   98 to 99% and the writing thread at 46%. 77% of a serving thread is
   checking the token, and nearly half of that is building the
   authorizer again for each write.
+
+## Overwritten in place (`spike-in-place.csv`)
+
+The same script at 2684193, where the spike's keys live in a sharded
+hash map that a write changes in place and a read locks for one lookup,
+on a third instance of the machine (07:16 to 07:41 UTC of an instance
+up from 06:53; a person's confirmation took 23 minutes). Means of two
+rounds:
+
+| A second | Plain, synced | Plain, answered first (sync every 10 ms) | Valkey `always` | Valkey `everysec` | Valkey, no file |
+|---|---|---|---|---|---|
+| Writes, 1 client | 10,813 | 29,645 | 6,183 | 33,531 | 36,246 |
+| Writes, 8 clients | 46,439 | 103,987 | 23,886 | 113,840 | 166,599 |
+| Writes, 64 clients | 91,854 | 104,298 | 94,143 | 163,935 | 158,495 |
+| Writes, 256 clients | 110,589 | 104,441 | 124,150 | 157,361 | 154,099 |
+| Writes, 50 clients, 64 at a time | 499,506 | 536,772 | 606,793 | 664,719 | 1,112,496 |
+| `GET`s, 50 clients, 16 at a time | 1,245,849 | 1,227,060 | 999,753 | 1,120,828 | 1,161,497 |
+| `GET`s, 1 client | 60,122 | 61,520 | 38,053 | 37,867 | 39,098 |
+| `GET`s while 50 clients write | 20,434 | 32,001 | 1,753 | 9,034 | 24,271 |
+| Writes with fewer keys, no token / with a token | 389,371 / 53,060 | 398,830 / 66,918 | | | |
+
+Writes sent 64 at a time went from about 113,000 a second to 500,000
+with the sync waited for and 537,000 without, against Valkey's 607,000
+and 665,000: 1.2 times behind where it was 5 to 6. `GET`s sent 16 at a
+time are ahead of Valkey's on every setting. With the sync waited for,
+separate clients are ahead at 1 and 8 clients, level at 64 and 1.1
+times behind at 256. Answered first, separate clients still stop near
+104,000 a second, 1.5 times behind `everysec` at 64 clients: the
+serving threads and their system calls, as the profile above said. A
+token still bounds an agent's writes near 53,000 to 67,000.
