@@ -43,7 +43,7 @@ The agent's host starts the session. For Claude Code, in `.mcp.json`:
 }
 ```
 
-The agent then has four tools:
+The agent then has five tools:
 
 | Tool | Does |
 |---|---|
@@ -51,9 +51,16 @@ The agent then has four tools:
 | `history` | Every change to one key: value, commit, who, why, who approved |
 | `diff` | What differs between two branches or commits, leaving out keys outside the token |
 | `commit` | Sets and removes keys as one commit, with a reason, on the agent's branch |
+| `put` | Sets and removes keys of tables declared to keep no history. Not reviewed and not undone: see below |
 
 A value whose subject was erased comes back as `null` with
 `"erased": true`, so an agent can tell it from a value that was removed.
+
+`put` is the one write that does not wait for a person. It reaches only
+tables that someone declared `plain` or `plain-async` (sessions, caches,
+counters), which have no branches to hold a write for review; the token
+still decides which keys. A store with no such table gives `put` nothing
+to write.
 
 There is no tool to merge or to erase. A person reviews the agent's branch
 and merges it, naming who approved it:
@@ -81,6 +88,8 @@ every branch, key and value with what was there before.
 | Write to `main`, by naming it as the branch | Refused: `commit` takes no branch | `writing_to_main_is_refused` |
 | Write to another agent's branch | Refused: `commit` takes no branch | `writing_to_another_agents_branch_is_refused` |
 | Write another player's row or a column outside the token, alone or mixed with an allowed key | Refused: nothing written, not even the branch | `writing_outside_the_token_writes_nothing_at_all` |
+| Use `put` to write a table that keeps its history, skipping the branch and the review | Refused: the table keeps its history, and the token is asked first | `put_cannot_write_a_table_that_keeps_its_history` |
+| Use `put` on a table that keeps no history but lies outside the token, alone or mixed with an allowed key | Refused: nothing written | `put_cannot_write_a_plain_table_outside_the_token` |
 | Merge, revert, branch, erase, issue tokens or approve: any tool not offered | Protocol error: no such tool | `merging_or_any_tool_not_offered_is_refused` |
 | Send malformed messages | Protocol errors; the session goes on | `malformed_messages_change_nothing_and_the_session_goes_on` |
 | Send a message over 1 MiB | Refused without being held whole; the session goes on | `a_line_past_the_size_limit_is_refused_and_the_session_goes_on` in [`tests/mcp.rs`](../crates/umbrachyx/tests/mcp.rs) |
@@ -96,6 +105,10 @@ In every case, `main` and the other agent's branch are unchanged.
   is inside a token for `player/42/`: it names a key nobody wrote, not
   player 7's gems. Prefixes should end with the separator, as `player/42/`
   does; `player/42` would also match `player/420`.
+- **A table declared to keep no history is written without review.** An
+  agent whose token reaches its keys changes them for every reader at
+  once, and nothing records that it did. Declare a table that way only
+  when that is acceptable for everything in it.
 - **What an agent may write within its scope is not checked.** A token for
   player 42's gems lets the agent set them to any value on its branch. The
   review before a merge is what catches that.

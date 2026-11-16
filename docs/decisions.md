@@ -20,7 +20,13 @@ without an entry here is not adopted.
 ## The log
 
 - **A write is acknowledged only after its record is synced.** The log is the
-  source of truth; the tree and the history are rebuilt from it.
+  source of truth; the tree and the history are rebuilt from it. One kind
+  of table is declared out of this, by name and by whoever declares it: a
+  `plain-async` table, whose writes are answered first and synced within
+  a stated time ([Tables that keep no
+  history](#tables-that-keep-no-history-plain-and-plain-async)). Nothing
+  else is ever answered first, and a table is never moved into that kind
+  once it holds a key.
 - **Syncing uses `File::sync_data`**, which is `fdatasync` on Linux,
   `fcntl(F_FULLFSYNC)` on macOS and `FlushFileBuffers` on Windows. A plain
   `fsync` on macOS does not reach the disk.
@@ -231,6 +237,16 @@ memory speed for writes will need group commit: one sync for many writes.
   branches, values and decisions. Giving a record its number before its
   sync succeeded is caught at the second seed. CI runs 10,000 seeds of
   each, in release mode; the results are the same as in debug mode.
+- **Tables that keep no history have a run of their own.** Puts answered
+  before they are on disk, commits and puts that wait for it, new
+  branches, failed syncs, process crashes and power cuts. At every step a
+  read must see every write answered. After every restart the store must
+  hold everything answered up to some moment, no earlier than the last
+  write that waited for the disk; a write whose sync was interrupted must
+  be there whole, with every put answered before it, or not at all; once
+  the log has refused a write no put may be answered; and a replica must
+  never be handed a put that is not on disk. Leaving the held puts out of
+  the frame that carries them is caught at the first seed.
 - **The encrypted store has a run of its own**, with a simulated key file
   next to the simulated log: commits to the keys of a few subjects,
   erasures, appends to the key file torn part way, rewrites of it that
@@ -704,7 +720,11 @@ checker to hold the shared secret that mints tokens.
   during a walk.
 - **It serves one branch, never main.** Writes from a client are not
   trusted, so they land where a person can review the diff before merging
-  it. Each `SET` is one commit, acknowledged once durable.
+  it. Each `SET` is one commit, acknowledged once durable. A `SET` to a
+  key of a table declared to keep no history is a put instead, checked
+  against the token in the same way: it makes no commit and is read on
+  every branch ([Tables that keep no
+  history](#tables-that-keep-no-history-plain-and-plain-async)).
 - **`AUTH <token>` (or `AUTH <user> <token>`, as Redis takes a password)
   names who writes.** Started with the database's public key, the server
   checks a capability token as the MCP session does: its holder becomes
@@ -910,6 +930,14 @@ checker to hold the shared secret that mints tokens.
   branch. A reason is required, since it is the history's answer to
   "why". Merging into `main` is not a tool: a person reviews the branch
   and merges it with the command-line tool, naming who approved it.
+- **A second tool, `put`, writes tables declared to keep no history**,
+  and only those. It takes the values to set and the keys to remove, no
+  branch and no reason, since nothing would keep one. Every key is
+  checked against the token first, so one key outside it, or one in a
+  table that keeps its history, writes nothing. A `commit` to such a
+  table is refused before the agent's branch is made. Why an agent is
+  allowed this write at all is under [Tables that keep no
+  history](#tables-that-keep-no-history-plain-and-plain-async).
 - **A message is at most 1 MiB**, as a command to the Redis server is. A
   longer line is answered with an error and skipped without being held
   whole, and the session goes on.
@@ -1177,9 +1205,9 @@ choose its storage engine.
 
 - **What differs is only how a table is held in memory. The log stays one
   log.** Every engine writes through it, and no write is acknowledged
-  before it is synced, whatever the engine. One log also keeps a commit
-  that touches tables of different engines atomic, and keeps the crash
-  tests one set.
+  before it is synced, except to a table declared `plain-async` (below).
+  One log also keeps a commit that touches tables of different engines
+  atomic, and keeps the crash tests one set.
 - **The log still holds everything**, whatever a table's engine drops
   from memory. Disk use and restart time do not change; reducing those is
   compaction (below), a separate step.
@@ -1193,7 +1221,8 @@ choose its storage engine.
 - **Which engine a table uses is a record in the log**, so replaying the
   log gives the same tables every time. A table never declared keeps its
   history, as every table does today.
-- **Two engines to begin with**:
+- **Two engines that keep commits** (two more keep none; see [Tables
+  that keep no history](#tables-that-keep-no-history-plain-and-plain-async)):
 
   | | History (today's) | Latest |
   |---|---|---|
@@ -1228,10 +1257,11 @@ choose its storage engine.
   listing and diff is sorted by key. Proofs over a latest table would need
   the hashes back.
 - **A table is declared from the command line**, `umbrachyx table pos
-  latest --who W --why Y`, with who and why kept in the log like a commit.
-  Not from the Redis server or MCP: what a table keeps is a decision for
-  the people who run the store, and an agent's token reaches keys, not
-  tables.
+  latest --who W --why Y`, with who and why kept in the log like a commit,
+  by whoever runs the store, a person or an agent working for one. Not
+  from the Redis server or the MCP session: a token reaches keys, not
+  tables, so a session bound by a token cannot change what a table
+  keeps.
 - **Tools can tell the tables apart.** `UMBRA.TABLES` answers
   `{"default":"history","tables":[{"name":"pos","engine":"latest"}]}`; a
   table not listed keeps its history. `UMBRA.HISTORY` on a key of a latest
@@ -1283,6 +1313,123 @@ choose its storage engine.
   the same day: they followed a long run of `SET`s, and run in the
   history's order they are 3% faster with about the same slowest reads
   ([`bench/results/2026-11-10-laptop-read-order`](../bench/results/2026-11-10-laptop-read-order/)).
+
+### Tables that keep no history (plain and plain-async)
+
+The history is what Umbrachyx is for, and it is also what a write pays
+for. Beside Valkey on the release machine, writes that keep their history
+lose wherever many arrive at once: about half its rate from 64 and 256
+clients, and a sixth of it when 50 clients send 64 at a time
+([`bench/results/2026-11-16-aws-m6id.xlarge`](../bench/results/2026-11-16-aws-m6id.xlarge/)).
+A session, a cache, a counter or a log line nobody edits has no use for a
+past, and someone choosing a store for those reads only the write rate.
+So a table can be declared to keep no history at all.
+
+- **A plain table keeps the current value of each key and nothing else.**
+  No commit, no branch, no author, no reason, no undo. A write to it is a
+  *put*: it replaces the value, and every branch reads the new one at
+  once, because there is one map and not one per branch.
+- **Why not make the latest engine faster instead.** A profile of the
+  release machine under writes sent 64 at a time showed the one thread
+  that writes at 98% of a processor, three quarters of it in the
+  persistent map: copying the path to a key and freeing the old one, so
+  that readers and branches keep theirs
+  ([`profile.txt`](../bench/results/2026-11-16-aws-m6id.xlarge-plain-spike/profile.txt)).
+  That copying is what a branch is made of. Taking away the history but
+  keeping branches gained a third to three quarters and stopped near
+  115,000 writes a second; changing a hash map in place reached about
+  500,000, against Valkey's 607,000 with every write synced
+  ([`spike-in-place.csv`](../bench/results/2026-11-16-aws-m6id.xlarge-plain-spike/spike-in-place.csv),
+  a prototype; the release rows are in `docs/comparison.md`). The latest
+  engine stays for what it is: a table that needs no past but whose
+  writes are still reviewed on a branch before they reach `main`.
+- **What it gives up is said by the tools, not left to be found out.**
+  A commit that names a key of a plain table is refused, and so is a put
+  to any other table. `UMBRA.HISTORY`, the `history` command and the MCP
+  `history` tool answer that the table keeps only the latest value;
+  `UMBRA.CELLS` leaves the table out; every diff names it in
+  `omitted_tables`, between branch heads too, since no commit holds its
+  writes; a read at a past commit is refused. Merge, approve and revert
+  never see it. `GET`, `SCAN`, `TYPE` and `TTL` read it like any other.
+- **An agent may write a plain table directly: this is the one write no
+  branch holds for review.** Everywhere else an agent's write lands on
+  its branch and a person merges it. A plain table has no branches, so
+  that rule cannot hold there, and declaring a table plain is choosing
+  that. What still bounds the agent is its token, asked for every key as
+  for a commit; and only tables someone declared plain can be written
+  this way, so a hijacked agent cannot reach a table that keeps its
+  history by calling the other tool
+  ([`agents.md`](agents.md)). The MCP session has a `put` tool for it,
+  separate from `commit`, whose description says there is no review and
+  no undo; the Redis server sends a `SET` whichever way the key's table
+  is held. Nothing records who wrote a value: if that matters, the table
+  should keep its history.
+- **A put goes through the same log.** Two record kinds were added: puts
+  alone, and commits and puts together, so writes of both kinds that
+  arrive together still share one sync and one frame, and a crash keeps
+  all of them or none. Replaying the log gives the same values, and a
+  replica gets puts as it gets commits.
+- **The map is a hash map in 64 parts, each behind a reader-writer
+  lock**, shared by the thread that writes and the threads that read. A
+  read holds one part for one lookup, so it can wait for a write to that
+  part for as long as an insert takes, never for a sync. The history's
+  tree and the latest engine's map never make a reader wait at all; that
+  was traded for the write rate. Keys are placed by a hash keyed once per
+  process, so keys chosen to collide cannot pile into one part.
+- **`SCAN` lists a plain table's keys last, in no order**, a page at a
+  time. A walk with nothing written to those tables meanwhile returns
+  each key once. A key added or removed during the walk can reorder the
+  others, so a key that never changed may be returned twice or missed,
+  which is less than Redis promises.
+- **The log still holds every put**, also the values since overwritten:
+  there is no compaction yet (below). A plain table saves memory and
+  time per write, not disk, and a restart reads every put ever made.
+  `bench/restart.sh` measures that.
+- **Nothing expires.** There is no `EXPIRE` and `TTL` always answers -1,
+  so a plain table is not yet a cache that empties itself.
+- **`plain-async` is a plain table whose `SET` is answered before it is
+  on disk.** That is how Redis and Valkey are mostly run
+  (`appendfsync everysec`), and a store that cannot be run that way is
+  not compared with them at all by someone who wants it. It is a
+  separate engine, named in the declaration and in `UMBRA.TABLES`, so
+  the promise is read off the table and cannot be changed under it by a
+  server flag.
+- **What a `plain-async` table promises:** a `SET` is read by every
+  client from the moment it is answered; it is on disk within the
+  server's `--sync-every` (one second unless told otherwise, the same as
+  `everysec`); if the process or the machine stops first, the last
+  writes answered are lost and nothing else. What comes back is
+  everything answered up to some moment, never a later write without an
+  earlier one.
+- **How.** The thread that writes applies such a put and answers it,
+  and holds it in memory. The next record written for any reason, a
+  commit, a put that waits, a new branch, carries the held puts first,
+  in the same frame when it fits; otherwise a timer writes them. So the
+  log keeps the order things were answered in, and a write that waited
+  for the disk never survives without the puts answered before it. The
+  log still has at most one unsynced frame, so recovery is unchanged.
+  What is held is bounded at 4 MiB: past it a put waits for the disk
+  like any other.
+- **Only the server's path answers first.** A put made with the
+  command-line tool or the MCP tool is on disk when answered, whatever
+  the table: there the caller waits anyway, and one promise fewer has to
+  be explained.
+- **If the disk refuses the held puts, the server stops and says why.**
+  Memory then holds values no restart will bring back, and serving them
+  would show a state that was never kept. Stopping loses exactly what
+  the table says a failure may lose. Until it stops, no further put is
+  answered.
+- **Checked by a simulation of its own** (see [Deterministic
+  simulation](#deterministic-simulation)): over 10,000 seeds and 180,718
+  restarts, 78,351 lost the last puts answered first and none lost
+  anything else.
+- **Not built**: declaring a table from a token-bound session, expiry,
+  compaction, and a way to move the server between in-place and
+  copying maps as the load changes (a batch at night, a burst of
+  writes), which is the direction this is meant to go.
+- **Stop if** the release measurement shows a plain table's writes at
+  less than twice the history's from 64 clients or sent 64 at a time, or
+  its simulation or the hijacked-agent tests fail.
 
 ## Retention per column (not built yet)
 

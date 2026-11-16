@@ -3,7 +3,7 @@
 # a release. Installs what it needs, builds Valkey from its release tag,
 # downloads Dolt's release, installs Ubuntu's PostgreSQL, runs
 # bench/umbrachyx.sh, bench/valkey.sh, bench/postgres.sh,
-# bench/connections.sh, bench/memory.sh and the diff and load comparison
+# bench/connections.sh, bench/memory.sh, bench/mixed.sh and the diff and load comparison
 # with Dolt (the compare example and bench/dolt.sh, over
 # a million records) several times, then the robustness tests and the
 # server next to noisy neighbours (bench/colocated.sh), and writes
@@ -88,6 +88,7 @@ for run in $(seq 1 "$runs"); do
   bench/postgres.sh >"$out/run-$run/postgres.csv" 2>"$out/run-$run/postgres.stderr.txt" || true
   bench/connections.sh >"$out/run-$run/connections.csv" 2>"$out/run-$run/connections.stderr.txt"
   bench/memory.sh >"$out/run-$run/memory.csv"
+  bench/mixed.sh >"$out/run-$run/mixed.csv"
   rm -rf "$scratch/dolt-input"
   cargo run -q --release -p umbrachyx --example compare -- "$dolt_records" "$scratch/dolt-input" \
     >"$out/run-$run/compare.md"
@@ -99,6 +100,9 @@ done
   cargo test -q -p umbrachyx --test crash -- --ignored --nocapture
   cargo test -q -p umbrachyx --lib --release ten_thousand_seeds -- --ignored --nocapture
 } >"$out/robustness.txt" 2>&1
+
+# Once: how long a restart takes after five million writes.
+bench/restart.sh >"$out/restart.csv" 2>"$out/restart.stderr.txt" || true
 
 # Last, so a neighbour left running by a failure cannot disturb a
 # benchmark. A failure is kept in the file with what ran before it.

@@ -14,7 +14,15 @@
 # others. The keys share one subject (`pos/bench`), as `key:<n>` do, so
 # both runs make one encryption key, not one per key.
 #
-# Last, on a third server started with a public key: SETs from 50 clients,
+# Then the runs that write, and the reads beside them, on two more fresh
+# servers whose keys are in a table that keeps no history at all
+# (`kv/bench/key:<n>`): first declared `plain`, where every SET is still
+# on disk before it is answered, then `plain-async`, where a SET is
+# answered at once and on disk within a second, as Valkey's
+# `appendfsync everysec` is. The label of each row says which, since the
+# two promise different things after a power cut.
+#
+# Last, on another server started with a public key: SETs from 50 clients,
 # 64 at a time, from connections that sent AUTH with a capability token and
 # from connections that did not, to the same keys (`auth/<n>/v`, a subject
 # each, written once before so that no row measures making their keys).
@@ -41,12 +49,12 @@ cargo build --quiet --release -p umbrachyx
 bin="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/umbrachyx"
 
 # Starts a server on a fresh log named <name>; with a table, declared
-# latest before anything is written.
+# with <engine> (latest unless given) before anything is written.
 start() {
-  local name="$1" table="${2:-}"
+  local name="$1" table="${2:-}" engine="${3:-latest}"
   export UMBRACHYX_DB="$dir/$name.log"
   if [ -n "$table" ]; then
-    "$bin" table "$table" latest --who bench --why "bench/umbrachyx.sh" >/dev/null
+    "$bin" table "$table" "$engine" --who bench --why "bench/umbrachyx.sh" >/dev/null
   fi
   "$bin" branch "$branch" --from main >/dev/null
   # shellcheck disable=SC2086
@@ -120,6 +128,34 @@ reap "$writers"
 writers=
 reap "$server"
 server=
+
+# Every run above that writes, and the reads beside them, on a table
+# that keeps no history, held by <engine>.
+plain_rows() {
+  local engine="$1" label="$2"
+  start "$engine" kv "$engine"
+  valkey-benchmark -p "$port" -n "$keys" -r "$keys" -c 50 -P 64 -q \
+    SET "kv/bench/key:__rand_int__" "$value" >/dev/null 2>&1
+  bench "$label" kv SET -n "$requests" -c 1
+  bench "$label" kv GET -n "$requests" -c 1
+  bench "$label, 50 clients" kv GET -n "$requests" -c 50
+  valkey-benchmark -p "$port" -n 100000000 -r "$keys" -c 50 -q \
+    SET "kv/bench/key:__rand_int__" "$value" >/dev/null 2>&1 &
+  writers=$!
+  sleep 1
+  bench "$label, GET while 50 clients SET" kv GET -n "$requests" -c 1
+  reap "$writers"
+  writers=
+  for clients in 8 64 256; do
+    bench "$label, $clients clients" kv SET -n "$concurrent_requests" -c "$clients"
+  done
+  bench "$label, 50 clients, 16 at a time" kv GET -n "$pipelined_requests" -c 50 -P 16
+  bench "$label, 50 clients, 64 at a time" kv SET -n "$pipelined_requests" -c 50 -P 64
+  reap "$server"
+  server=
+}
+plain_rows plain "plain table, every put synced"
+plain_rows plain-async "plain-async table, synced within 1 s"
 
 # The key and token are made here and removed with the directory.
 public_key="$("$bin" keygen "$dir/root.key")"

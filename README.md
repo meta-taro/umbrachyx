@@ -103,6 +103,14 @@ $ umbrachyx history agent/support player/42/gems
 - **Declare a table before its first write.** `pos` keeps only its latest
   values; once a table has keys, its engine can no longer be declared
   and `table` refuses. Undeclared tables keep their history.
+- **Not every table needs a past.** `umbrachyx table session plain --who
+  you --why "sessions need no past"` declares one that keeps none: no
+  commits, no branches, no review, each key just holds its current value,
+  written with `SET` or `umbrachyx put session/1/token=abc`. Declared
+  `plain-async` instead, a `SET` is also answered before it is on disk
+  and written within a second, as Valkey does with `appendfsync
+  everysec`. What each kind of table keeps and gives up is in
+  [`docs/decisions.md`](docs/decisions.md#tables-that-keep-no-history-plain-and-plain-async).
 - **`umbrachyx export` prints the whole log as JSON Lines**, one record a
   line, to search with `jq` or `grep`:
   `umbrachyx export | jq 'select(.who == "agent:support")'`.

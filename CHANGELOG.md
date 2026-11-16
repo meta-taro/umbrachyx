@@ -15,6 +15,14 @@ extensions; a later version may not open what this one wrote.
 - **Engines per table.** A table can be declared to keep only its latest
   values, held in a HAMT, for about a fifth of the memory per write.
   Tables without a declaration keep their full history.
+- **Tables that keep no history.** A table declared `plain` holds the
+  current value of each key and nothing else: no commits, no branches, no
+  review, one value read on every branch, changed in place. Declared
+  `plain-async`, a `SET` is answered before it is on disk and written
+  within `--sync-every` milliseconds (a second by default); a power cut
+  loses the last writes answered and nothing else. An agent's token still
+  decides which keys it may write there, through the MCP `put` tool or
+  the server's `SET`.
 - **Erasure.** Values are encrypted per subject (AES-SIV); destroying a
   subject's key makes its values unreadable while the shape of the history
   stays.

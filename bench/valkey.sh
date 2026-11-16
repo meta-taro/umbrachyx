@@ -7,7 +7,9 @@
 # waiting for its reply before the next request, GET from 50 clients, GET
 # from one client while 50 others keep sending SETs, and GET and SET from
 # 50 clients that send 16 and 64 commands at a time without waiting for
-# each reply.
+# each reply. Last, the runs that write, and the pipelined reads, with
+# appendfsync everysec, where a write is answered before it is on disk and
+# synced within a second: the setting to compare a plain-async table with.
 #
 # Usage: bench/valkey.sh [requests] [concurrent-requests]
 set -euo pipefail
@@ -23,11 +25,11 @@ writers=
 trap '[ -n "$writers" ] && kill "$writers" 2>/dev/null; valkey-cli -p "$port" shutdown nosave >/dev/null 2>&1 || true; rm -rf "$dir"' EXIT
 
 start() {
-  local appendonly="$1" data
+  local appendonly="$1" appendfsync="${2:-always}" data
   # A fresh directory each time, so no earlier append-only file is loaded.
   data="$(mktemp -d "$dir/run.XXXX")"
   valkey-server --port "$port" --dir "$data" --save '' \
-    --appendonly "$appendonly" --appendfsync always \
+    --appendonly "$appendonly" --appendfsync "$appendfsync" \
     --daemonize yes --pidfile "$dir/valkey.pid" --logfile "$dir/valkey.log"
   until valkey-cli -p "$port" ping >/dev/null 2>&1; do sleep 0.1; done
   # Fill the key space first, so GET finds values.
@@ -70,7 +72,23 @@ concurrent() {
   stop
 }
 
+everysec() {
+  start yes everysec
+  valkey-benchmark -p "$port" -t set,get -n "$requests" -r "$keys" -d 32 -c 1 --csv \
+    | grep -v '"test"' | sed 's/^/"appendfsync everysec",/'
+  for clients in 8 64 256; do
+    valkey-benchmark -p "$port" -t set -n "$concurrent_requests" -r "$keys" -d 32 -c "$clients" --csv \
+      | grep -v '"test"' | sed "s/^/\"appendfsync everysec, $clients clients\",/"
+  done
+  valkey-benchmark -p "$port" -t get -n "$pipelined_requests" -r "$keys" -d 32 -c 50 -P 16 --csv \
+    | grep -v '"test"' | sed 's/^/"appendfsync everysec, 50 clients, 16 at a time",/'
+  valkey-benchmark -p "$port" -t set -n "$pipelined_requests" -r "$keys" -d 32 -c 50 -P 64 --csv \
+    | grep -v '"test"' | sed 's/^/"appendfsync everysec, 50 clients, 64 at a time",/'
+  stop
+}
+
 echo '"persistence","test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"'
 run "none" no
 run "appendfsync always" yes
 concurrent
+everysec
