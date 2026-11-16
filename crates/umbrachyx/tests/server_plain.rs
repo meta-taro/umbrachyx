@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use umbrachyx::log::{Engine, FileStorage};
@@ -60,9 +61,18 @@ fn store(dir: &TempDir) -> FileStore {
 
 /// Serves `BRANCH` of `store` on a free port of this machine.
 fn serve(store: FileStore) -> (Committer<FileStorage, SystemClock>, TcpStream) {
+    serve_syncing_every(store, Duration::from_secs(3600))
+}
+
+/// As `serve`, writing puts answered before the disk within `sync_every`.
+fn serve_syncing_every(
+    store: FileStore,
+    sync_every: Duration,
+) -> (Committer<FileStorage, SystemClock>, TcpStream) {
     let committer = Committer::start(store);
-    let server =
-        Server::new(BRANCH, committer.writer(), committer.reader()).expect("serves a branch");
+    let server = Server::new(BRANCH, committer.writer(), committer.reader())
+        .expect("serves a branch")
+        .sync_every(sync_every);
     let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
     let address = listener.local_addr().expect("has an address");
     thread::spawn(move || server.serve(listener));
@@ -257,4 +267,48 @@ fn history_cells_and_diffs_say_a_plain_table_has_no_past() {
     let diff = ask_json(&mut client, &["UMBRA.DIFF", MAIN_BRANCH, BRANCH]);
     assert_eq!(diff["changes"].as_array().map(Vec::len), Some(1));
     assert_eq!(diff["omitted_tables"], json!(["session"]));
+}
+
+/// What a power cut now would leave of `key`: read from a copy of the
+/// log file, opened on its own.
+fn on_disk(dir: &TempDir, key: &str) -> Option<String> {
+    let copy = dir.0.join("copy");
+    std::fs::copy(dir.0.join("log"), &copy).expect("copies the log");
+    let storage = FileStorage::open(&copy).expect("opens file");
+    let store: FileStore = Store::open(storage, SystemClock).expect("opens store");
+    text(store.get(MAIN_BRANCH, key.as_bytes()))
+}
+
+/// A `SET` to a plain-async table is answered and read back before it is
+/// on disk, and is on disk within the time the server was given, with no
+/// other write to carry it.
+#[test]
+fn a_set_to_a_plain_async_table_reaches_the_disk_within_the_time_given() {
+    let dir = TempDir::new("async");
+    let mut store = store(&dir);
+    let provenance = Provenance {
+        who: "test".to_owned(),
+        why: "a cache may lose its last second".to_owned(),
+        approved_by: None,
+    };
+    store
+        .declare_table(b"cache", Engine::PlainAsync, provenance)
+        .expect("declares");
+    let (_committer, mut client) = serve_syncing_every(store, Duration::from_millis(300));
+
+    assert_eq!(ask_line(&mut client, &["SET", "cache/top", "1"]), "+OK");
+    let answered = Instant::now();
+    assert_eq!(get(&mut client, "cache/top"), Some("1".to_owned()));
+    let early = on_disk(&dir, "cache/top");
+    if answered.elapsed() < Duration::from_millis(200) {
+        assert_eq!(early, None, "answered before it was on disk");
+    }
+
+    while on_disk(&dir, "cache/top").is_none() {
+        assert!(
+            answered.elapsed() < Duration::from_secs(10),
+            "never reached the disk"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }

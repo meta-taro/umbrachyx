@@ -21,9 +21,16 @@
 //!
 //! A commit sent and never waited for is written by the next writer, the
 //! next question, or the stop.
+//!
+//! Puts to plain-async tables are the one exception to "answered once
+//! durable": a group made only of them is applied and answered without a
+//! sync, and the store holds them until the next record it writes, a call
+//! to [`Writer::sync_puts`], or the stop. Nothing here keeps time: whoever
+//! runs the committer calls `sync_puts` as often as it promises to.
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 
 use super::{
@@ -136,6 +143,12 @@ trait Engine: Send + Sync {
     fn inspect(&self, question: Question<'_>) -> bool;
     /// As `inspect`, and publishes the view after it.
     fn review(&self, decision: Decision<'_>) -> bool;
+    /// Whether puts were answered that the log does not hold yet, as of
+    /// the last group written.
+    fn has_unsynced_puts(&self) -> bool;
+    /// Writes the queue, then the puts the log does not hold yet. The
+    /// caller holds the turn.
+    fn sync_puts(&self) -> Result<(), StoreError>;
 }
 
 struct Core<S: Storage, C: Clock> {
@@ -143,12 +156,18 @@ struct Core<S: Storage, C: Clock> {
     /// `None` once stopped.
     store: Mutex<Option<Store<S, C>>>,
     published: Published,
+    /// Whether the store holds puts the log does not, kept here so that
+    /// asking does not wait for the store.
+    has_unsynced_puts: AtomicBool,
 }
 
 impl<S: Storage, C: Clock> Core<S, C> {
     fn write(&self, group: Vec<Job>) {
         match lock(&self.store).as_mut() {
-            Some(store) => write_group(store, group, &self.published),
+            Some(store) => {
+                write_group(store, group, &self.published);
+                self.note_unsynced(store);
+            }
             None => {
                 for job in group {
                     job.answer.fill(Err(StoreError::Stopped));
@@ -176,10 +195,27 @@ impl<S: Storage, C: Clock> Core<S, C> {
             .unwrap_or_else(PoisonError::into_inner) = view;
     }
 
-    /// Writes what is queued and takes the store out.
+    fn note_unsynced(&self, store: &Store<S, C>) {
+        self.has_unsynced_puts
+            .store(store.has_unsynced_puts(), Ordering::Release);
+    }
+
+    fn sync_puts(&self) -> Result<(), StoreError> {
+        self.write_queue();
+        let mut store = lock(&self.store);
+        let store = store.as_mut().ok_or(StoreError::Stopped)?;
+        let synced = store.sync_puts();
+        self.note_unsynced(store);
+        synced
+    }
+
+    /// Writes what is queued, and the puts answered before they were on
+    /// disk, and takes the store out.
     fn stop(&self) -> Option<Store<S, C>> {
         let _turn = self.turns.take();
-        self.write_queue();
+        // If the log refuses them, it refuses every write from then on:
+        // whoever takes the store finds that out from the store itself.
+        let _ = self.sync_puts();
         lock(&self.store).take()
     }
 }
@@ -219,10 +255,19 @@ where
                 decision(store);
                 // An approval moves main; readers see it from here on.
                 self.publish(store);
+                self.note_unsynced(store);
                 true
             }
             None => false,
         }
+    }
+
+    fn has_unsynced_puts(&self) -> bool {
+        self.has_unsynced_puts.load(Ordering::Acquire)
+    }
+
+    fn sync_puts(&self) -> Result<(), StoreError> {
+        Core::sync_puts(self)
     }
 }
 
@@ -260,6 +305,7 @@ where
                 turns: Turns::default(),
                 store: Mutex::new(Some(store)),
                 published,
+                has_unsynced_puts: AtomicBool::new(false),
             }),
         }
     }
@@ -351,6 +397,21 @@ impl Writer {
     pub fn write_queued(&self) {
         let _turn = self.engine.turns().take();
         self.engine.write_queue();
+    }
+
+    /// Whether puts to plain-async tables were answered that are not on
+    /// disk yet, as of the last group written.
+    pub fn has_unsynced_puts(&self) -> bool {
+        self.engine.has_unsynced_puts()
+    }
+
+    /// Writes everything queued, then the puts answered before they were
+    /// on disk, and returns once they are durable. An error means memory
+    /// is ahead of the disk for good: the log takes no more writes, and
+    /// what was answered and not written is lost when the process ends.
+    pub fn sync_puts(&self) -> Result<(), StoreError> {
+        let _turn = self.engine.turns().take();
+        self.engine.sync_puts()
     }
 
     /// Answers `question` from the store once the commits sent before it
@@ -462,7 +523,7 @@ fn write_group<S: Storage, C: Clock>(
         .into_iter()
         .map(|job| (job.request, job.answer))
         .unzip();
-    match store.write_requests(requests) {
+    match store.write_requests(requests, true) {
         Ok(answers) => {
             // Published before any answer is left: a writer that finds its
             // answer must be able to read its write.

@@ -111,7 +111,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             why: provenance.why,
             time,
         });
-        self.log.append(&record)?;
+        self.append(&record)?;
         self.apply(&record).map(drop)
     }
 

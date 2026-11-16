@@ -61,6 +61,11 @@ const MAX_NAME_SHOWN: usize = 64;
 /// the wait before trying again.
 const ACCEPT_RETRY: Duration = Duration::from_millis(10);
 
+/// How long a put to a plain-async table may wait for the disk unless
+/// the server is told otherwise: a second, what Redis and Valkey call
+/// `appendfsync everysec`, so the two promise the same.
+pub const DEFAULT_SYNC_EVERY: Duration = Duration::from_secs(1);
+
 #[derive(Debug)]
 pub enum ServerError {
     /// Clients may not write to main.
@@ -95,6 +100,9 @@ pub struct Server {
     loops: usize,
     /// Tells the thread that writes commits that some are queued.
     queued: Arc<event::Queued>,
+    /// The longest a put to a plain-async table is answered before it is
+    /// on disk.
+    sync_every: Duration,
 }
 
 impl Server {
@@ -115,6 +123,7 @@ impl Server {
             require_auth: false,
             loops: default_loops(),
             queued: Arc::default(),
+            sync_every: DEFAULT_SYNC_EVERY,
         })
     }
 
@@ -142,6 +151,13 @@ impl Server {
         }
     }
 
+    /// The longest a `SET` to a plain-async table may be answered before
+    /// it is on disk: what a power cut can lose of such a table. Other
+    /// tables are never answered first, whatever this is.
+    pub fn sync_every(self, sync_every: Duration) -> Self {
+        Self { sync_every, ..self }
+    }
+
     pub fn max_connections(self, max_connections: usize) -> Self {
         Self {
             max_connections,
@@ -163,7 +179,8 @@ impl Server {
             .collect();
         assert!(!loops.is_empty(), "no serving thread could start");
         let wakers = loops.iter().map(event::Handle::waker).collect();
-        event::spawn_writer(self.writer.clone(), Arc::clone(&self.queued), wakers)
+        let queued = Arc::clone(&self.queued);
+        event::spawn_writer(self.writer.clone(), queued, wakers, self.sync_every)
             .expect("the thread that writes commits starts");
         let mut next = 0;
         loop {

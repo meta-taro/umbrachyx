@@ -202,6 +202,11 @@ impl<S: Storage> Log<S> {
         self.header.created
     }
 
+    /// Whether a write failed, after which the log takes no more.
+    pub fn is_poisoned(&self) -> bool {
+        self.is_poisoned
+    }
+
     /// Append one record and return only once it is durable.
     pub fn append(&mut self, record: &Record) -> Result<(), LogError> {
         if self.is_poisoned {

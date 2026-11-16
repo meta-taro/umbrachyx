@@ -13,10 +13,11 @@ use std::collections::HashMap;
 use std::io::{BufWriter, ErrorKind, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
 use umbrachyx::log::{Edit, Engine, FileStorage};
-use umbrachyx::server::{MAX_CONNECTIONS, Server};
+use umbrachyx::server::{DEFAULT_SYNC_EVERY, MAX_CONNECTIONS, Server};
 use umbrachyx::store::{
     CommitId, Committer, Conflict, MAIN_BRANCH, Merged, Provenance, Reverted, Store, SystemClock,
     short,
@@ -61,7 +62,7 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               jq and grep: commits with their changes,
                               branches, tables, rejections and erasures
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
-        [--public-key K [--require-auth]]
+        [--sync-every MS] [--public-key K [--require-auth]]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history.
                               --bind listens on another address of this
@@ -72,7 +73,12 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               writes; --require-auth refuses writes without it.
                               --threads is how many threads serve connections
                               (one more writes); by default one for every two
-                              processors, four at most
+                              processors, four at most.
+                              --sync-every is the longest a SET to a
+                              plain-async table is answered before it is on
+                              disk, in milliseconds (default 1000): what a
+                              power cut can lose of such a table. Every other
+                              SET is on disk before its answer
   mcp --public-key K --token-file F
                               MCP over stdin and stdout, for one agent's token
 
@@ -142,9 +148,9 @@ impl Args {
             match name {
                 "remove" => parsed.removes.push(value),
                 "who" | "why" | "approved-by" | "from" | "limit" | "port" | "bind"
-                | "max-connections" | "threads" | "key" | "subject" | "branch" | "prefix"
-                | "columns" | "column" | "operations" | "operation" | "purpose" | "expires-in"
-                | "public-key" | "token-file" => {
+                | "max-connections" | "threads" | "sync-every" | "key" | "subject" | "branch"
+                | "prefix" | "columns" | "column" | "operations" | "operation" | "purpose"
+                | "expires-in" | "public-key" | "token-file" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -522,6 +528,15 @@ fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
         ),
         None => None,
     };
+    let sync_every = match args.options.get("sync-every") {
+        Some(millis) => millis
+            .parse()
+            .ok()
+            .filter(|&millis: &u64| millis > 0)
+            .map(Duration::from_millis)
+            .ok_or_else(|| format!("--sync-every {millis:?} is not a number of milliseconds"))?,
+        None => DEFAULT_SYNC_EVERY,
+    };
     let public_key = match args.options.get("public-key") {
         Some(_) => Some(tokens::public_key(args)?),
         None => None,
@@ -534,6 +549,7 @@ fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
     let mut server = Server::new(branch, committer.writer(), committer.reader())
         .map_err(|e| e.to_string())?
         .max_connections(max_connections)
+        .sync_every(sync_every)
         .require_auth(require_auth);
     if let Some(public_key) = public_key {
         server = server.public_key(public_key);

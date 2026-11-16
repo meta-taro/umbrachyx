@@ -59,7 +59,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             check_sealed(&scan.records, &sealer.ring())?;
         }
         for record in &scan.records {
-            self.log.append(record)?;
+            self.append(record)?;
             self.apply(record)
                 .map_err(|error| StoreError::Inconsistent(error.to_string()))?;
             if let (Record::Erase(erase), Some(sealer)) = (record, &mut self.sealer) {

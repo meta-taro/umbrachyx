@@ -38,7 +38,7 @@ use mio::{Events, Interest, Poll, Token, Waker};
 use super::resp::{self, Reply};
 use super::session::Session;
 use super::{MAX_PENDING_OUT, READ_CHUNK, Server, Slot, Step, is_set, set_reply};
-use crate::store::{Pending, PendingPut, Writer};
+use crate::store::{Pending, PendingPut, StoreError, Writer};
 
 /// The token of the waker that announces new connections.
 const WAKE: Token = Token(usize::MAX);
@@ -89,36 +89,82 @@ impl Queued {
         self.told.notify_one();
     }
 
-    /// Sleeps until told.
-    fn wait(&self) {
+    /// Sleeps until told, or until `deadline` if there is one.
+    fn wait(&self, deadline: Option<Instant>) {
         let mut some = self.some.lock().unwrap_or_else(PoisonError::into_inner);
         while !*some {
-            some = self.told.wait(some).unwrap_or_else(PoisonError::into_inner);
+            let Some(deadline) = deadline else {
+                some = self.told.wait(some).unwrap_or_else(PoisonError::into_inner);
+                continue;
+            };
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            some = self
+                .told
+                .wait_timeout(some, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
         *some = false;
     }
 }
 
 /// Starts the thread that writes the commits the serving threads queue,
-/// and wakes them once each group is durable.
+/// and wakes them once each group is durable. It also keeps the promise
+/// of plain-async tables: a put answered before it was on disk is written
+/// within `sync_every` of the oldest one waiting.
 pub(super) fn spawn_writer(
     writer: Writer,
     queued: Arc<Queued>,
     wakers: Vec<Arc<Waker>>,
+    sync_every: Duration,
 ) -> io::Result<()> {
     thread::Builder::new()
         .name("resp commits".to_owned())
         .spawn(move || {
+            // When the oldest put not yet on disk must be.
+            let mut due: Option<Instant> = None;
             loop {
-                queued.wait();
+                queued.wait(due);
                 writer.write_queued();
                 for waker in &wakers {
                     // A failed wake leaves the replies for the next one.
                     let _ = waker.wake();
                 }
+                due = sync_when_due(&writer, due, sync_every);
             }
         })
         .map(drop)
+}
+
+/// Writes the puts answered before they were on disk once `due` has come,
+/// and returns when the ones still waiting must be written.
+fn sync_when_due(writer: &Writer, due: Option<Instant>, sync_every: Duration) -> Option<Instant> {
+    if !writer.has_unsynced_puts() {
+        return None;
+    }
+    let due = due.unwrap_or_else(|| Instant::now() + sync_every);
+    if Instant::now() < due {
+        return Some(due);
+    }
+    if let Err(error) = writer.sync_puts() {
+        stop_ahead_of_the_disk(&error);
+    }
+    None
+}
+
+/// Ends the process: writes were answered that the disk refused, so
+/// memory holds values no restart will bring back. Serving them on would
+/// show readers a state that was never kept; stopping loses exactly what
+/// a plain-async table says a failure may lose.
+fn stop_ahead_of_the_disk(error: &StoreError) -> ! {
+    eprintln!(
+        "umbrachyx: stopping: puts to plain-async tables were answered and could not be \
+         written to the log ({error}); they are lost"
+    );
+    std::process::exit(1)
 }
 
 /// One thread's end of the server: where new connections are handed to it.

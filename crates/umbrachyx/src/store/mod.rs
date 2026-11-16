@@ -35,7 +35,10 @@ use std::time::SystemTime;
 
 use crate::hamt::Hamt;
 use crate::keys::{Fingerprint, KeyError, KeyStorage, Keys};
-use crate::log::{Branch, Commit, Edit, Engine, Erase, Log, LogError, Record, Storage, Table};
+use crate::log::record::{BATCH_OVERHEAD, commit_len, edits_len};
+use crate::log::{
+    Branch, Commit, Edit, Engine, Erase, Log, LogError, MAX_PAYLOAD_LEN, Record, Storage, Table,
+};
 use crate::tree::{Bytes, Tree};
 
 mod approvals;
@@ -48,6 +51,7 @@ mod plain;
 mod replica;
 mod seal;
 mod tables;
+mod unsynced;
 mod view;
 
 use seal::{Ring, Sealer};
@@ -449,6 +453,8 @@ pub struct Store<S: Storage, C: Clock> {
     /// The values of tables that keep no history: one map, the same for
     /// every branch, shared with the views that read it.
     plain: Arc<plain::PlainMap>,
+    /// Puts answered before they are on disk, until the log has them.
+    unsynced: unsynced::Unsynced,
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
@@ -511,6 +517,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             rejections: BTreeMap::new(),
             decisions: Vec::new(),
             plain: Arc::new(plain::PlainMap::new()),
+            unsynced: unsynced::Unsynced::default(),
         };
         let mut replayed = Vec::new();
         for record in records {
@@ -554,7 +561,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         &mut self,
         requests: Vec<CommitRequest>,
     ) -> Result<Vec<Result<CommitId, StoreError>>, StoreError> {
-        self.write_requests(requests.into_iter().map(Request::Commit).collect())
+        self.write_requests(requests.into_iter().map(Request::Commit).collect(), false)
     }
 
     /// Writes commits and puts with one sync, as one record, and returns
@@ -562,9 +569,14 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// that cannot be written is refused on its own; the result for each
     /// request is in its place, a put's being an id that names nothing.
     /// If the log fails, none is written.
+    ///
+    /// With `may_answer_early`, requests that are all puts to plain-async
+    /// tables are answered once applied, and written with the next
+    /// record: see [`Store::sync_puts`].
     pub(crate) fn write_requests(
         &mut self,
         requests: Vec<Request>,
+        may_answer_early: bool,
     ) -> Result<Vec<Result<CommitId, StoreError>>, StoreError> {
         let time = self.next_time();
         if let Some(sealer) = &mut self.sealer {
@@ -576,6 +588,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         }
         let mut commits = Vec::new();
         let mut puts = Vec::new();
+        let mut is_early = may_answer_early;
         let mut outcomes = Vec::with_capacity(requests.len());
         for request in requests {
             outcomes.push(match request {
@@ -586,6 +599,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                         .and_then(|()| self.refuse_plain(&request.edits));
                     match refusal {
                         Ok(()) => {
+                            is_early = false;
                             commits.push(new_commit(request, time, None));
                             Outcome::Commit
                         }
@@ -594,12 +608,17 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 }
                 Request::Put(edits) => match self.refuse_not_plain(&edits) {
                     Ok(()) => {
+                        is_early &= self.may_answer_early(&edits);
                         puts.extend(self.seal(edits)?);
                         Outcome::Put
                     }
                     Err(error) => Outcome::Refused(error),
                 },
             });
+        }
+        if is_early {
+            // What does not fit under the bound is written like any other.
+            puts = self.hold(puts)?.unwrap_or_default();
         }
         let mut ids = self.write_both(commits, puts)?.into_iter();
         Ok(outcomes
@@ -648,7 +667,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// before. Refused, with nothing written, if any key is in a table
     /// that keeps its history. No edits write nothing.
     pub fn put(&mut self, edits: Vec<Edit>) -> Result<(), StoreError> {
-        let mut answers = self.write_requests(vec![Request::Put(edits)])?;
+        let mut answers = self.write_requests(vec![Request::Put(edits)], false)?;
         answers.pop().expect("one answer per request").map(drop)
     }
 
@@ -709,7 +728,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             approved_by: provenance.approved_by,
             time,
         });
-        self.log.append(&record)?;
+        self.append(&record)?;
         self.apply(&record)?;
         let sealer = self.sealer.as_mut().ok_or(StoreError::NoKeys)?;
         sealer.erase(subject, &key_fingerprint)?;
@@ -738,7 +757,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             approved_by: provenance.approved_by,
             time,
         });
-        self.log.append(&record)?;
+        self.append(&record)?;
         self.apply(&record).map(drop)
     }
 
@@ -770,21 +789,54 @@ impl<S: Storage, C: Clock> Store<S, C> {
 
     /// Appends the commits and the puts as one record, then applies them:
     /// the commits in order, then the puts in order. Nothing to write is
-    /// no record.
+    /// no record. Puts answered earlier and not yet in the log go first
+    /// in the same record when it has room, in one of their own before it
+    /// otherwise.
     fn write_both(
         &mut self,
         mut commits: Vec<Commit>,
-        puts: Vec<Edit>,
+        mut puts: Vec<Edit>,
     ) -> Result<Vec<CommitId>, StoreError> {
+        if commits.is_empty() && puts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let len: usize =
+            BATCH_OVERHEAD + edits_len(&puts) + commits.iter().map(written_len).sum::<usize>();
+        if self.unsynced.len + len > MAX_PAYLOAD_LEN {
+            self.sync_puts()?;
+        }
+        // Already applied when they were answered.
+        let held = std::mem::take(&mut self.unsynced).edits;
+        let applied_before = held.len();
+        if applied_before > 0 {
+            puts.splice(0..0, held);
+        }
         let record = match (commits.len(), puts.is_empty()) {
-            (0, true) => return Ok(Vec::new()),
             (1, true) => Record::Commit(commits.pop().expect("one commit")),
             (_, true) => Record::Group(commits),
             (0, false) => Record::Puts(puts),
             (_, false) => Record::Batch { commits, puts },
         };
         self.log.append(&record)?;
-        self.apply(&record)
+        match &record {
+            Record::Puts(puts) => {
+                self.apply_puts(&puts[applied_before..]);
+                Ok(Vec::new())
+            }
+            Record::Batch { commits, puts } => {
+                let ids = self.apply(&Record::Group(commits.clone()));
+                self.apply_puts(&puts[applied_before..]);
+                ids
+            }
+            _ => self.apply(&record),
+        }
+    }
+
+    /// Appends a record of any other kind, after the puts answered
+    /// before it, so the log keeps the order things were answered in.
+    fn append(&mut self, record: &Record) -> Result<(), StoreError> {
+        self.sync_puts()?;
+        Ok(self.log.append(record)?)
     }
 
     /// Makes a branch that starts where `from` is now.
@@ -800,7 +852,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             name: name.to_owned(),
             from: from.to_owned(),
         });
-        self.log.append(&record)?;
+        self.append(&record)?;
         self.apply(&record).map(drop)
     }
 
@@ -1493,6 +1545,18 @@ pub fn hex(id: &CommitId) -> String {
 /// Opens `value` for `key` with the keys in `ring`, or passes it through
 /// when values are not encrypted. A value whose key is gone reads as
 /// absent.
+/// What `commit` adds to a record's payload, in bytes.
+fn written_len(commit: &Commit) -> usize {
+    commit_len(
+        &commit.branch,
+        &commit.who,
+        &commit.why,
+        commit.approved_by.as_deref(),
+        commit.merged.is_some(),
+        &commit.changes,
+    )
+}
+
 fn reveal(ring: Option<&Ring>, key: &[u8], value: Option<Bytes>) -> Option<Bytes> {
     match ring {
         None => value,
