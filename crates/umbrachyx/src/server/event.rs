@@ -38,7 +38,7 @@ use mio::{Events, Interest, Poll, Token, Waker};
 use super::resp::{self, Reply};
 use super::session::Session;
 use super::{MAX_PENDING_OUT, READ_CHUNK, Server, Slot, Step, is_set, set_reply};
-use crate::store::{Pending, PendingPut, StoreError, Writer};
+use crate::store::{Pending, PendingPut, Writer};
 
 /// The token of the waker that announces new connections.
 const WAKE: Token = Token(usize::MAX);
@@ -142,6 +142,10 @@ pub(super) fn spawn_writer(
 /// Writes the puts answered before they were on disk once `due` has come,
 /// and returns when the ones still waiting must be written.
 fn sync_when_due(writer: &Writer, due: Option<Instant>, sync_every: Duration) -> Option<Instant> {
+    if writer.lost_answered_puts() {
+        // A commit or a put that carried them found the disk gone.
+        stop_ahead_of_the_disk("a write that carried them failed");
+    }
     if !writer.has_unsynced_puts() {
         return None;
     }
@@ -150,7 +154,7 @@ fn sync_when_due(writer: &Writer, due: Option<Instant>, sync_every: Duration) ->
         return Some(due);
     }
     if let Err(error) = writer.sync_puts() {
-        stop_ahead_of_the_disk(&error);
+        stop_ahead_of_the_disk(&error.to_string());
     }
     None
 }
@@ -159,7 +163,7 @@ fn sync_when_due(writer: &Writer, due: Option<Instant>, sync_every: Duration) ->
 /// memory holds values no restart will bring back. Serving them on would
 /// show readers a state that was never kept; stopping loses exactly what
 /// a plain-async table says a failure may lose.
-fn stop_ahead_of_the_disk(error: &StoreError) -> ! {
+fn stop_ahead_of_the_disk(error: &str) -> ! {
     eprintln!(
         "umbrachyx: stopping: puts to plain-async tables were answered and could not be \
          written to the log ({error}); they are lost"

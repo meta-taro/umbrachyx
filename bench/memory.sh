@@ -4,10 +4,12 @@
 # then after the same number again over the same space. Valkey keeps the
 # latest value of each key, so the second pass adds little. Umbrachyx keeps
 # every SET as a commit, so it grows with every SET; the last column is that
-# growth per SET. It is measured twice: with keys in no table, which keep
-# their history, and with keys in a table declared to keep only its latest
-# values (`pos/bench/key:<n>`). Those keys share one subject, as `key:<n>`
-# do, so neither run makes an encryption key per key.
+# growth per SET. It is measured three times: with keys in no table, which
+# keep their history, with keys in a table declared to keep only its latest
+# values (`pos/bench/key:<n>`), and with keys in a table declared plain,
+# which keeps no history and changes its values in place
+# (`kv/bench/key:<n>`). Those keys share one subject, as `key:<n>` do, so
+# no run makes an encryption key per key.
 #
 # The default is smaller than the other scripts' 1,000,000: two passes of a
 # million would need about 16 GB for Umbrachyx, as much as the machines
@@ -60,12 +62,13 @@ echo '"server","sets","rss_kib_empty","rss_kib","sets_twice","rss_kib_twice","se
 cargo build --quiet --release -p umbrachyx
 bin="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/umbrachyx"
 
-# One Umbrachyx server on a fresh log; with a table, declared latest first.
+# One Umbrachyx server on a fresh log; with a table, declared with
+# <engine> (latest unless given) first.
 umbrachyx() {
-  local name="$1" table="${2:-}"
+  local name="$1" table="${2:-}" engine="${3:-latest}"
   export UMBRACHYX_DB="$dir/$name.log"
   if [ -n "$table" ]; then
-    "$bin" table "$table" latest --who bench --why "bench/memory.sh" >/dev/null
+    "$bin" table "$table" "$engine" --who bench --why "bench/memory.sh" >/dev/null
   fi
   "$bin" branch "$branch" --from main >/dev/null
   "$bin" serve "$branch" --port "$umbrachyx_port" 2>"$dir/$name.serve.log" &
@@ -80,6 +83,7 @@ umbrachyx() {
 
 umbrachyx umbrachyx
 umbrachyx "umbrachyx (latest table)" pos
+umbrachyx "umbrachyx (plain table)" kv plain
 
 mkdir "$dir/valkey"
 valkey-server --port "$valkey_port" --dir "$dir/valkey" --save '' \

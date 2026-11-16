@@ -758,7 +758,9 @@ checker to hold the shared secret that mints tokens.
   handles no signals and the kernel gives process 1 no default action for
   them: without it `docker stop` would wait ten seconds and then kill.
   Stopping by signal loses nothing, as every acknowledged write is
-  already synced. Each change builds the image for x86-64 and for ARM
+  already synced; except that a `plain-async` table loses the writes
+  answered since its last sync, at most `--sync-every`, as it would to a
+  power cut. Each change builds the image for x86-64 and for ARM
   and tries it (write, kill the container, read the write back from a
   new one on the same volume, [`docker/smoke.sh`](../docker/smoke.sh));
   only a version's tag publishes it, after every other check on that
@@ -1364,6 +1366,12 @@ So a table can be declared to keep no history at all.
   no undo; the Redis server sends a `SET` whichever way the key's table
   is held. Nothing records who wrote a value: if that matters, the table
   should keep its history.
+- **Without `--require-auth`, any client that reaches the server writes
+  a plain table for every reader.** A `SET` to a table that keeps its
+  history from such a client lands on the served branch, where a person
+  still reviews it; a `SET` to a plain table has no branch to land on.
+  A server that takes writes from clients it does not trust should
+  require tokens, or have no plain table those clients' keys can reach.
 - **A put goes through the same log.** Two record kinds were added: puts
   alone, and commits and puts together, so writes of both kinds that
   arrive together still share one sync and one frame, and a crash keeps
@@ -1414,7 +1422,8 @@ So a table can be declared to keep no history at all.
   command-line tool or the MCP tool is on disk when answered, whatever
   the table: there the caller waits anyway, and one promise fewer has to
   be explained.
-- **If the disk refuses the held puts, the server stops and says why.**
+- **If the disk refuses the held puts, the server stops and says why**,
+  whether the timer's write found out or a commit that carried them.
   Memory then holds values no restart will bring back, and serving them
   would show a state that was never kept. Stopping loses exactly what
   the table says a failure may lose. Until it stops, no further put is
@@ -1428,8 +1437,9 @@ So a table can be declared to keep no history at all.
   copying maps as the load changes (a batch at night, a burst of
   writes), which is the direction this is meant to go.
 - **Stop if** the release measurement shows a plain table's writes at
-  less than twice the history's from 64 clients or sent 64 at a time, or
-  its simulation or the hijacked-agent tests fail.
+  less than one and a half times the history's from 64 clients, or less
+  than three times when sent 64 at a time (the prototype gave 1.8 and
+  4.5), or its simulation or the hijacked-agent tests fail.
 
 ## Retention per column (not built yet)
 

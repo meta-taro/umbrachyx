@@ -32,6 +32,9 @@ pub(super) struct Unsynced {
     pub(super) edits: Vec<Edit>,
     /// What the edits add to a record's payload, in bytes.
     pub(super) len: usize,
+    /// Whether the log refused a record that held answered puts: they
+    /// are in memory and will never be on disk.
+    pub(super) is_lost: bool,
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
@@ -40,15 +43,31 @@ impl<S: Storage, C: Clock> Store<S, C> {
         !self.unsynced.edits.is_empty()
     }
 
+    /// Whether puts were answered that the log then refused. Readers
+    /// see them, and no restart will bring them back: whoever serves
+    /// this store should stop.
+    pub fn lost_answered_puts(&self) -> bool {
+        self.unsynced.is_lost
+    }
+
     /// Writes the puts answered and not yet in the log, as one record,
     /// and returns once they are durable. Nothing held writes nothing.
     pub fn sync_puts(&mut self) -> Result<(), StoreError> {
         if self.unsynced.edits.is_empty() {
             return Ok(());
         }
-        let held = std::mem::take(&mut self.unsynced);
-        self.log.append(&Record::Puts(held.edits))?;
+        let held = self.take_held();
+        if let Err(error) = self.log.append(&Record::Puts(held)) {
+            self.unsynced.is_lost = true;
+            return Err(error.into());
+        }
         Ok(())
+    }
+
+    /// The held puts, to be written now; none is held afterwards.
+    pub(super) fn take_held(&mut self) -> Vec<Edit> {
+        self.unsynced.len = 0;
+        std::mem::take(&mut self.unsynced.edits)
     }
 
     /// Applies `puts`, already sealed, and holds them for the log, if

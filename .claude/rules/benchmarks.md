@@ -47,6 +47,8 @@ bench/valkey.sh
 bench/postgres.sh             # PostgreSQL の主キーでの読み取りと更新（Ubuntu の版）
 bench/connections.sh          # 先に ulimit -n 65536
 bench/memory.sh               # 同じ SET を2回流したときのメモリ（RSS）
+bench/mixed.sh                # 読みと書きを 95:5・80:20・50:50 で混ぜた負荷（同じクライアントで全サーバーを測る）
+bench/restart.sh              # 500万回書いたあとの再起動の時間とログの大きさ（1回）
 cargo run --release -p umbrachyx --example compare -- 1000000 <dir>   # 差分と読み込み（Dolt と同じデータ）
 bench/dolt.sh <dir>           # Dolt の差分と読み込み（Dolt 2.6.2 のリリース版）
 cargo test -p umbrachyx --release --test server_crash -- --ignored --nocapture

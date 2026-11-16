@@ -37,6 +37,9 @@ rows() {
   local label="$1" port="$2" prefix="$3"
   valkey-benchmark -p "$port" -n "$keys" -r "$keys" -c 50 -P 64 -q \
     SET "${prefix}__rand_int__" "$value" >/dev/null 2>&1
+  # Not recorded: the first run after the fill, which was sent 64 at a
+  # time, was slower and less even than the same run repeated.
+  "$load" warm-up "$port" "$clients" 3 80 "$prefix" >/dev/null
   for reads in 95 80 50; do
     "$load" "$label" "$port" "$clients" "$seconds" "$reads" "$prefix"
   done

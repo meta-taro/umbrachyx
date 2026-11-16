@@ -12,14 +12,19 @@ agent's writes wait on a branch until a person approves them.**
 - **Agents write only to their own branch.** An agent's capability token
   names its branch; nothing it holds can write to `main` or approve a
   change. [`docs/agents.md`](docs/agents.md) lists what a hijacked agent
-  was tested not to be able to do.
+  was tested not to be able to do. The one exception is chosen table by
+  table: a table declared to keep no history has no branches, and there
+  the token decides only which keys.
 - **A person sees a list of changes waiting, reads the diff, and approves
   or rejects.** What is approved is the diff that person saw: anything
   the agent wrote after it is refused, not merged unseen.
 - **Nothing acknowledged is lost.** Killed mid-write 1,100 times with
   2,333,963 writes acknowledged on the release machine, and put through
   more than 400,000 simulated restarts after power cuts and disk faults:
-  not one acknowledged write went missing.
+  not one acknowledged write went missing. A table can be declared to
+  answer before the disk instead (`plain-async`); then a failure loses
+  its last second of writes and nothing else, and no other table is
+  affected.
 
 It is not a faster Valkey. In three runs on the release machine, with
 the history kept, one client reads about 1.5 times as many values a

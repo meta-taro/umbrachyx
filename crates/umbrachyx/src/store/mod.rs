@@ -806,7 +806,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             self.sync_puts()?;
         }
         // Already applied when they were answered.
-        let held = std::mem::take(&mut self.unsynced).edits;
+        let held = self.take_held();
         let applied_before = held.len();
         if applied_before > 0 {
             puts.splice(0..0, held);
@@ -817,7 +817,12 @@ impl<S: Storage, C: Clock> Store<S, C> {
             (0, false) => Record::Puts(puts),
             (_, false) => Record::Batch { commits, puts },
         };
-        self.log.append(&record)?;
+        if let Err(error) = self.log.append(&record) {
+            // The puts it carried were answered, and are now nowhere
+            // but in memory.
+            self.unsynced.is_lost |= applied_before > 0;
+            return Err(error.into());
+        }
         match &record {
             Record::Puts(puts) => {
                 self.apply_puts(&puts[applied_before..]);

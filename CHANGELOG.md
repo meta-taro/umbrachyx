@@ -7,7 +7,8 @@ No format is stable yet, neither the log, the key file nor the protocol
 extensions; a later version may not open what this one wrote.
 
 - **A durable log is the truth.** A write is acknowledged only once it is
-  synced to an append-only log; the tree and the history are rebuilt from
+  synced to an append-only log (except to a table declared `plain-async`,
+  below); the tree and the history are rebuilt from
   it on open. Group commit puts many writers into one sync.
 - **History for every value.** Commits record who, why and who approved;
   branches, diffs, three-way merges (conflicts are detected, not resolved)

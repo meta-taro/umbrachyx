@@ -149,6 +149,8 @@ trait Engine: Send + Sync {
     /// Writes the queue, then the puts the log does not hold yet. The
     /// caller holds the turn.
     fn sync_puts(&self) -> Result<(), StoreError>;
+    /// Whether the log refused puts that were already answered.
+    fn lost_answered_puts(&self) -> bool;
 }
 
 struct Core<S: Storage, C: Clock> {
@@ -159,6 +161,8 @@ struct Core<S: Storage, C: Clock> {
     /// Whether the store holds puts the log does not, kept here so that
     /// asking does not wait for the store.
     has_unsynced_puts: AtomicBool,
+    /// Whether the log refused puts that were already answered.
+    lost_answered_puts: AtomicBool,
 }
 
 impl<S: Storage, C: Clock> Core<S, C> {
@@ -198,6 +202,8 @@ impl<S: Storage, C: Clock> Core<S, C> {
     fn note_unsynced(&self, store: &Store<S, C>) {
         self.has_unsynced_puts
             .store(store.has_unsynced_puts(), Ordering::Release);
+        self.lost_answered_puts
+            .store(store.lost_answered_puts(), Ordering::Release);
     }
 
     fn sync_puts(&self) -> Result<(), StoreError> {
@@ -269,6 +275,10 @@ where
     fn sync_puts(&self) -> Result<(), StoreError> {
         Core::sync_puts(self)
     }
+
+    fn lost_answered_puts(&self) -> bool {
+        self.lost_answered_puts.load(Ordering::Acquire)
+    }
 }
 
 /// Holds a store that many threads write to, grouping their commits.
@@ -306,6 +316,7 @@ where
                 store: Mutex::new(Some(store)),
                 published,
                 has_unsynced_puts: AtomicBool::new(false),
+                lost_answered_puts: AtomicBool::new(false),
             }),
         }
     }
@@ -403,6 +414,14 @@ impl Writer {
     /// disk yet, as of the last group written.
     pub fn has_unsynced_puts(&self) -> bool {
         self.engine.has_unsynced_puts()
+    }
+
+    /// Whether the log refused puts that were already answered: by a
+    /// call to [`Writer::sync_puts`], or by any write that carried them.
+    /// Readers see those values and no restart will bring them back, so
+    /// whoever serves should say so and stop.
+    pub fn lost_answered_puts(&self) -> bool {
+        self.engine.lost_answered_puts()
     }
 
     /// Writes everything queued, then the puts answered before they were

@@ -9,9 +9,12 @@
 //!
 //! The data is synthetic: cached leaderboards and player gold.
 
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use umbrachyx::log::{Edit, Engine, FileStorage};
+use umbrachyx::log::{Edit, Engine, FileStorage, Storage};
 use umbrachyx::store::{Committer, MAIN_BRANCH, Provenance, Store, SystemClock};
 
 type FileStore = Store<FileStorage, SystemClock>;
@@ -226,4 +229,93 @@ fn everything_else_is_on_disk_when_answered() {
     assert!(value(&left, "session/2/token").is_some());
     assert!(value(&left, "cache/mixed").is_some());
     assert!(!writer.has_unsynced_puts());
+}
+
+/// A disk whose syncs fail once it is told to.
+struct FailingStorage {
+    file: FileStorage,
+    is_failing: Arc<AtomicBool>,
+}
+
+impl Storage for FailingStorage {
+    fn read_all(&mut self) -> io::Result<Vec<u8>> {
+        self.file.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.file.append(bytes)
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        if self.is_failing.load(Ordering::SeqCst) {
+            return Err(io::Error::other("the disk is gone"));
+        }
+        self.file.sync()
+    }
+
+    fn truncate(&mut self, len: u64) -> io::Result<()> {
+        self.file.truncate(len)
+    }
+}
+
+/// When the disk refuses puts that were already answered, the writer
+/// says so from then on, whichever write found out: the call that
+/// writes them, or a commit that carried them. Whoever serves must stop
+/// then, since readers see values no restart brings back; and no
+/// further put is answered.
+#[test]
+fn a_writer_says_when_answered_puts_were_lost() {
+    for found_by in ["sync", "commit"] {
+        let dir = TempDir::new(&format!("lost-{found_by}"));
+        drop(store(&dir));
+        let is_failing = Arc::new(AtomicBool::new(false));
+        let storage = FailingStorage {
+            file: FileStorage::open(&dir.log()).expect("opens file"),
+            is_failing: Arc::clone(&is_failing),
+        };
+        let store = Store::open(storage, SystemClock).expect("opens store");
+        let committer = Committer::start(store);
+        let writer = committer.writer();
+        writer
+            .put(vec![set("cache/top", "1")])
+            .wait()
+            .expect("puts");
+        assert!(!writer.lost_answered_puts());
+
+        is_failing.store(true, Ordering::SeqCst);
+        if found_by == "sync" {
+            writer.sync_puts().expect_err("the disk is gone");
+        } else {
+            writer
+                .commit(MAIN_BRANCH, vec![set("player/1/gold", "5")], by("game"))
+                .expect_err("the disk is gone");
+        }
+
+        assert!(writer.lost_answered_puts(), "{found_by}");
+        writer
+            .put(vec![set("cache/top", "2")])
+            .wait()
+            .expect_err("no put is answered once the log refused a write");
+    }
+}
+
+/// A failed write that carried no answered put loses nothing answered.
+#[test]
+fn a_failed_write_alone_loses_no_answered_put() {
+    let dir = TempDir::new("alone");
+    drop(store(&dir));
+    let is_failing = Arc::new(AtomicBool::new(false));
+    let storage = FailingStorage {
+        file: FileStorage::open(&dir.log()).expect("opens file"),
+        is_failing: Arc::clone(&is_failing),
+    };
+    let committer = Committer::start(Store::open(storage, SystemClock).expect("opens store"));
+    let writer = committer.writer();
+    is_failing.store(true, Ordering::SeqCst);
+
+    writer
+        .commit(MAIN_BRANCH, vec![set("player/1/gold", "5")], by("game"))
+        .expect_err("the disk is gone");
+
+    assert!(!writer.lost_answered_puts());
 }
