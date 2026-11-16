@@ -6,6 +6,7 @@
 
 mod disk;
 mod key_disk;
+mod plain_run;
 mod rng;
 mod run;
 mod sealed_run;

@@ -122,7 +122,7 @@ pub(crate) enum Request {
 }
 
 impl Request {
-    fn edits(&self) -> &[Edit] {
+    pub(crate) fn edits(&self) -> &[Edit] {
         match self {
             Self::Commit(request) => &request.edits,
             Self::Put(edits) => edits,
