@@ -223,13 +223,19 @@ when the benchmark's client lands on the core a serving thread is on
 which is why its range is beside its median.
 
 Not in the table, because the table was measured before it: the server
-now asks Linux for huge pages for its memory. On the same machine that
-gave about 16% more writes sent 64 at a time, 7% more from one client,
-the same reads, and 1.3% more memory, in three rounds taken in turn
-([`huge-pages.txt`](bench/results/2026-11-14-aws-m6id.xlarge/huge-pages.txt)).
+now asks Linux for huge pages for its memory (why, and how to turn it
+off, is in [`docs/decisions.md`](docs/decisions.md)). Measured with it
+on 2026-11-16, three runs again: on this machine 59,773 `GET`s and
+10,045 durable writes a second from one client, 163,399 `GET`s from 50
+clients against Valkey's 162,075, and 31,017, 51,773 and 60,680 durable
+writes from 8, 64 and 256 clients against Valkey's 25,661, 103,093 and
+122,775
+([`bench/results/2026-11-16-aws-m6id.xlarge/`](bench/results/2026-11-16-aws-m6id.xlarge/));
+on the second machine a release is measured on, a Google Cloud
+`n2-standard-4` with a slower disk, the same rows are ahead and behind
+([`bench/results/2026-11-16-gcp-n2-standard-4/`](bench/results/2026-11-16-gcp-n2-standard-4/)).
 A server holding almost nothing takes about 12 MiB more for it. The
-table will be measured again with it on; why, and how to turn it off, is
-in [`docs/decisions.md`](docs/decisions.md).
+table is replaced at the release.
 
 Next to noisy neighbours on the same machine (other programs keeping
 every processor busy, syncing files on the same disk, churning 70% of

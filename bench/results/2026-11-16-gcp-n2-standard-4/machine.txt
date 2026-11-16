@@ -1,0 +1,18 @@
+machine: gcp-n2-standard-4
+commit: 60c65845dfb154600a87a454d2375e32d635fa0b
+date: 2026-11-16T02:58:34Z
+scratch: /dev/nvme0n1    369G  415M  349G   1% /mnt/nvme
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+7.0.0-1017-gcp
+CPU(s):                                  4
+Model name:                              Intel(R) Xeon(R) CPU @ 2.80GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       778Mi        12Gi       1.0Mi       2.2Gi        14Gi
+1.98.0-x86_64-unknown-linux-gnu (overridden by '/home/ubuntu/umbrachyx/rust-toolchain.toml')
+Valkey server v=9.1.3 sha=29173b67:0 malloc=jemalloc-5.3.0 bits=64 build=fa34878acab1b1fa
+dolt version 2.6.2
+Warning: you are on an old version of Dolt. The newest version is 2.7.3.
+To disable this warning, run 'dolt config --global --add versioncheck.disabled true'
+postgres (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
