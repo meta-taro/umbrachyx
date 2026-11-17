@@ -48,7 +48,7 @@
     <meta name="twitter:image" content="https://meta-taro.github.io/umbrachyx/og.png" />
 
     <link rel="stylesheet" href="style.css" />
-    <link rel="stylesheet" href="extra.css" />
+    <link rel="stylesheet" href="extra.css?v=2" />
     <link rel="canonical" href="https://meta-taro.github.io/umbrachyx/" />
     <link rel="alternate" hreflang="en" href="https://meta-taro.github.io/umbrachyx/" />
     <link rel="alternate" hreflang="ja" href="https://meta-taro.github.io/umbrachyx/ja/" />
@@ -62,6 +62,9 @@
     <meta name="robots" content="index,follow,max-image-preview:large" />
   </head>
   <body>
+    <div class="stars far" aria-hidden="true"></div>
+    <div class="stars mid" aria-hidden="true"></div>
+    <div class="stars near" aria-hidden="true"></div>
     <div class="wrap">
       <header>
         <div class="mark">
@@ -74,14 +77,19 @@
         </div>
 
         <h1>
-          Your data was changed.<br /><span class="quiet"
-            >Nobody can say when, by whom, or why.</span
+          Darkness is faster than light.<br /><span class="quiet"
+            >The database that remembers.</span
           >
         </h1>
 
         <p class="lede">
-          Every change is kept, with who made it, why, and who approved it.<br />
+          Your data was changed, and nobody can say when, by whom, or why.<br />
+          Here every change is kept, with who made it, why, and who approved it.<br />
           <b>Reads answer in tens of microseconds, even while writes keep coming.</b>
+        </p>
+        <p class="origin">
+          If the current value is the light, its history is the shadow that was there before
+          the light arrived.
         </p>
 
         <div class="cta">
@@ -194,6 +202,43 @@
             >five questions about a game's data</a
           >.
         </p>
+      </section>
+
+      <section id="uses">
+        <h2>WHERE IT FITS: THREE MADE-UP CASES</h2>
+        <p>
+          Nobody's production is described here: the three cases are invented, with made-up
+          data. Each one is a walkthrough whose commands the tests run exactly as written.
+        </p>
+        <ul class="cards">
+          <li>
+            <h3>A game's inventory</h3>
+            <p>
+              After an outage an agent prepares a grant of potions. The reviewer sees one player
+              would get fifty and sends it back. Meanwhile the game kept writing, and the agent's
+              "3 + 5 = 8" is no longer true: the merge stops and names the key.
+              <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/game-inventory.md">Walkthrough</a>
+            </p>
+          </li>
+          <li>
+            <h3>A support desk</h3>
+            <p>
+              An agent reads tickets and proposes account credits, one branch per ticket. One
+              is approved, one is beyond what the desk may give and is left alone. Later:
+              "who credited customer 31, and who signed it off?" and "delete my data".
+              <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/support-desk.md">Walkthrough</a>
+            </p>
+          </li>
+          <li>
+            <h3>Settings rolled out in stages</h3>
+            <p>
+              A new checkout goes to a share of visitors, each stage approved by name. At 50%
+              errors rise: that one change is taken back, and a setting someone else changed
+              afterwards stays as it is.
+              <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/staged-settings.md">Walkthrough</a>
+            </p>
+          </li>
+        </ul>
       </section>
 
       <section id="numbers">
@@ -407,6 +452,28 @@
         </ul>
       </section>
 
+      <section id="with-dbboard">
+        <h2>WITH DBBOARD</h2>
+        <p>
+          <a href="https://github.com/meta-taro/dbboard">dbboard</a> is a desktop database
+          viewer from the same author. It connects to <code>umbrachyx serve</code> the way it
+          connects to a Redis server, and shows what the terminal commands print:
+        </p>
+        <ul>
+          <li><b>The history of a key:</b> each value it had, who put it there, why, and who approved.</li>
+          <li><b>The diff</b> between two branches or two commits.</li>
+          <li>
+            <b>The changes waiting</b>, each with its diff, and the buttons to approve or
+            reject.
+          </li>
+        </ul>
+        <p>
+          Nothing in this is special to dbboard. The history is asked for with
+          <code>UMBRA.*</code> commands over the Redis protocol, and any client that speaks
+          it can send them.
+        </p>
+      </section>
+
       <section id="direction">
         <h2>WHERE IT IS GOING</h2>
         <p>
@@ -439,6 +506,28 @@
             that are recorded.
           </li>
         </ul>
+        <h3>What comes next, in this order</h3>
+        <ol>
+          <li>
+            <b>Faster writes to tables that keep no history</b>, where it is still behind
+            Valkey when many clients only write.
+          </li>
+          <li><b>A cheaper check of an agent's token</b> on every write.</li>
+          <li>
+            <b>A log that does not grow for ever:</b> dropping what was overwritten, keeping
+            history for a set time, keys that expire.
+          </li>
+          <li><b>Read-only followers</b> on other machines, and a backup tool.</li>
+          <li>
+            <b>Writes that carry what the agent assumed</b> ("set it to 8 if it is still 3"),
+            and a write that counts once when sent twice.
+          </li>
+        </ol>
+        <p class="small">
+          No dates: the order may change with what the measurements say. What is being
+          worked on is in <a href="https://github.com/meta-taro/umbrachyx/issues">the issues</a>, and what each version brought in
+          <a href="https://github.com/meta-taro/umbrachyx/releases">the releases</a>.
+        </p>
         <p>
           The whole list is in
           <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/concept.md"
@@ -478,6 +567,46 @@ $ valkey-cli -p 6380 umbra.history app player/42/gems
             <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/agents.md"
               >docs/agents.md</a
             >.
+          </li>
+        </ul>
+      </section>
+
+      <section id="faq">
+        <h2>QUESTIONS PEOPLE ASK</h2>
+        <ul>
+          <li>
+            <b>Can it replace Valkey or Redis?</b> Existing clients connect: the server speaks
+            enough of the Redis protocol for them. But it is not a faster Valkey. Choose it
+            when the questions are "who changed this, why, and who approved it".
+          </li>
+          <li>
+            <b>Does everything have to keep its history?</b> No. A table can be declared to
+            keep only current values, for sessions, caches and counters. Those writes are not
+            reviewed and cannot be undone.
+          </li>
+          <li>
+            <b>How does an agent connect?</b> Through MCP (<code>umbrachyx mcp</code>) or the
+            Redis protocol, with a token a person issued for one branch, some keys, a purpose
+            and an expiry.
+          </li>
+          <li>
+            <b>How much memory does the history take?</b> About 655 bytes for each overwrite,
+            all of it in memory, and nothing removes old history yet. Size it for the number
+            of writes, not the number of keys.
+          </li>
+          <li>
+            <b>Can data be deleted for good?</b> Yes. Values are encrypted under a key per
+            subject; destroying the key makes them unreadable, and the shape of the history
+            stays.
+          </li>
+          <li>
+            <b>Is it ready for production?</b> It is one node with no replication and no
+            backup tool. Try it and measure it; do not make it the only copy of data you
+            need.
+          </li>
+          <li>
+            <b>What does a later version do with my data?</b> It opens the log this version
+            wrote. The key file and the <code>UMBRA.*</code> commands may still change.
           </li>
         </ul>
       </section>

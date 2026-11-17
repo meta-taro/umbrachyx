@@ -40,3 +40,218 @@ tr.behind td:first-child {
 .cards + ul {
   margin-top: 24px;
 }
+
+/* --- The dark this product is named after ---------------------------------
+   Umbra: the shadow that is there before the light arrives. This page is
+   always dark, whatever the system is set to, with three layers of stars
+   at different distances drifting at different speeds, so the dark has
+   depth. Only this product's page: the shared look in style.css follows
+   the system. Nothing here needs a script, and nothing moves for a reader
+   who asked for less motion. */
+:root {
+  color-scheme: dark;
+  --bg: #04050b;
+  --bg-subtle: rgba(16, 17, 30, 0.72);
+  --border: rgba(150, 160, 220, 0.16);
+  --border-strong: rgba(160, 170, 230, 0.28);
+  --fg: #f4f4f8;
+  --fg-2: #b0b2c4;
+  --fg-3: #7d8096;
+  --accent: #9a9af8;
+  --accent-bg: rgba(60, 60, 140, 0.35);
+  --paper: #04050b;
+}
+html {
+  background: #04050b;
+}
+body {
+  background: transparent;
+  position: relative;
+}
+/* The far dust of the galaxy: two faint clouds and a band across the sky. */
+html::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -3;
+  pointer-events: none;
+  background:
+    radial-gradient(60% 45% at 78% 8%, rgba(92, 70, 190, 0.28), transparent 70%),
+    radial-gradient(50% 40% at 12% 38%, rgba(40, 90, 190, 0.18), transparent 70%),
+    radial-gradient(70% 50% at 60% 96%, rgba(120, 60, 170, 0.16), transparent 72%),
+    linear-gradient(115deg, transparent 30%, rgba(150, 160, 255, 0.05) 48%, transparent 66%),
+    #04050b;
+}
+.stars {
+  position: fixed;
+  inset: -10% 0;
+  z-index: -2;
+  pointer-events: none;
+  background-repeat: repeat;
+}
+.stars.far {
+  background-image:
+    radial-gradient(1px 1px at 331px 154px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 74px 548px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 59px 519px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 444px 428px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 564px 434px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 228px 596px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 406px 50px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 136px 296px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 120px 584px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 185px 105px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 560px 64px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 508px 544px, rgba(190,205,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 599px 464px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 184px 249px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 537px 506px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 294px 74px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 168px 350px, rgba(190,205,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 40px 79px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 358px 608px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 70px 95px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 66px 62px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 456px 291px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 23px 472px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 119px 505px, rgba(190,205,255,0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 132px 253px, rgba(190,205,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 82px 170px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 284px 140px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 425px 367px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 84px 180px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 238px 12px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 269px 288px, rgba(190,205,255,0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 547px 378px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 527px 55px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 401px 407px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 493px 410px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 213px 451px, rgba(190,205,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 615px 53px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 154px 549px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 26px 72px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 152px 258px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 485px 125px, rgba(190,205,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 491px 495px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 104px 350px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 165px 528px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 370px 150px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 93px 267px, rgba(190,205,255,0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 228px 545px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 199px 245px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 204px 530px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 29px 28px, rgba(190,205,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 198px 619px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 357px 373px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 232px 481px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 494px 1px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 86px 122px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 489px 182px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 88px 405px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 86px 162px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 154px 604px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 610px 485px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 561px 134px, rgba(255,255,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 105px 539px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 216px 28px, rgba(190,205,255,0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 513px 246px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 429px 134px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1px 1px at 469px 597px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 544px 155px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 4px 153px, rgba(190,205,255,0.35) 50%, transparent 100%),
+    radial-gradient(0.8px 0.8px at 123px 569px, rgba(255,255,255,0.5) 50%, transparent 100%),
+    radial-gradient(1px 1px at 530px 543px, rgba(255,255,255,0.35) 50%, transparent 100%);
+  background-size: 620px 620px;
+  animation: drift 420s linear infinite, twinkle 7s ease-in-out infinite;
+}
+.stars.mid {
+  background-image:
+    radial-gradient(1.2px 1.2px at 58px 254px, rgba(255,255,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 790px 100px, rgba(255,255,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 778px 64px, rgba(190,205,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 709px 283px, rgba(255,255,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 519px 253px, rgba(190,205,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 860px 458px, rgba(255,255,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 401px 452px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 438px 74px, rgba(214,196,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 802px 125px, rgba(214,196,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 146px 259px, rgba(190,205,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 764px 96px, rgba(190,205,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 683px 852px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 527px 413px, rgba(190,205,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 365px 326px, rgba(214,196,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 19px 346px, rgba(255,255,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 393px 339px, rgba(255,255,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 115px 807px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 271px 278px, rgba(214,196,255,0.6) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 773px 132px, rgba(214,196,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 415px 152px, rgba(214,196,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 91px 285px, rgba(190,205,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 435px 74px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 820px 266px, rgba(190,205,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 68px 270px, rgba(255,255,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 347px 566px, rgba(190,205,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 44px 539px, rgba(190,205,255,0.6) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 268px 51px, rgba(214,196,255,0.6) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 643px 312px, rgba(255,255,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 512px 688px, rgba(214,196,255,0.75) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 822px 18px, rgba(255,255,255,0.6) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 18px 750px, rgba(255,255,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 251px 457px, rgba(255,255,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.4px 1.4px at 672px 506px, rgba(214,196,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.2px 1.2px at 704px 220px, rgba(190,205,255,0.75) 50%, transparent 100%);
+  background-size: 860px 860px;
+  animation: drift 260s linear infinite, twinkle 5s ease-in-out -2s infinite;
+}
+.stars.near {
+  background-image:
+    radial-gradient(2.2px 2.2px at 286px 828px, rgba(255,255,255,0.85) 50%, transparent 100%),
+    radial-gradient(2.2px 2.2px at 29px 144px, rgba(255,255,255,0.95) 50%, transparent 100%),
+    radial-gradient(2.2px 2.2px at 113px 173px, rgba(190,205,255,0.95) 50%, transparent 100%),
+    radial-gradient(1.8px 1.8px at 496px 600px, rgba(255,255,255,0.95) 50%, transparent 100%),
+    radial-gradient(2.2px 2.2px at 322px 550px, rgba(255,232,205,0.85) 50%, transparent 100%),
+    radial-gradient(2.2px 2.2px at 745px 673px, rgba(255,255,255,0.85) 50%, transparent 100%),
+    radial-gradient(2.2px 2.2px at 633px 446px, rgba(255,255,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.8px 1.8px at 686px 781px, rgba(255,232,205,0.95) 50%, transparent 100%),
+    radial-gradient(1.8px 1.8px at 1029px 411px, rgba(255,255,255,0.85) 50%, transparent 100%),
+    radial-gradient(1.8px 1.8px at 541px 183px, rgba(190,205,255,0.95) 50%, transparent 100%),
+    radial-gradient(1.8px 1.8px at 85px 806px, rgba(255,232,205,0.95) 50%, transparent 100%),
+    radial-gradient(1.8px 1.8px at 476px 173px, rgba(255,232,205,0.95) 50%, transparent 100%);
+  background-size: 1180px 1180px;
+  filter: drop-shadow(0 0 3px rgba(190, 200, 255, 0.7));
+  animation: drift 150s linear infinite, twinkle 3.6s ease-in-out -1s infinite;
+}
+@keyframes drift {
+  from { background-position: 0 0; }
+  to { background-position: -620px 310px; }
+}
+@keyframes twinkle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stars { animation: none !important; }
+}
+
+/* The headline: darkness first, then what it keeps. */
+header h1 {
+  text-shadow: 0 0 28px rgba(150, 150, 255, 0.35);
+}
+header h1 .quiet {
+  color: #c9c9f6;
+}
+.origin {
+  color: var(--fg-3);
+  font-size: 14.5px;
+  margin: -8px 0 28px;
+}
+/* Panels let the stars through a little. */
+.cards > li,
+.card,
+pre {
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+table {
+  background: rgba(8, 9, 18, 0.55);
+}

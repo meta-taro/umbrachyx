@@ -47,7 +47,7 @@
     <meta name="twitter:image" content="https://meta-taro.github.io/umbrachyx/ja/og.png" />
 
     <link rel="stylesheet" href="../style.css" />
-    <link rel="stylesheet" href="../extra.css" />
+    <link rel="stylesheet" href="../extra.css?v=2" />
     <link rel="canonical" href="https://meta-taro.github.io/umbrachyx/ja/" />
     <link rel="alternate" hreflang="ja" href="https://meta-taro.github.io/umbrachyx/ja/" />
     <link rel="alternate" hreflang="en" href="https://meta-taro.github.io/umbrachyx/" />
@@ -61,6 +61,9 @@
     <meta name="robots" content="index,follow,max-image-preview:large" />
   </head>
   <body>
+    <div class="stars far" aria-hidden="true"></div>
+    <div class="stars mid" aria-hidden="true"></div>
+    <div class="stars near" aria-hidden="true"></div>
     <div class="wrap">
       <header>
         <div class="mark">
@@ -73,14 +76,16 @@
         </div>
 
         <h1>
-          データが書き換わっていた。<br /><span class="quiet"
-            >いつ、誰が、なぜ、を誰も言えない。</span
-          >
+          闇は、光より速い。<br /><span class="quiet">記憶が残るデータベース。</span>
         </h1>
 
         <p class="lede">
-          すべての変更が、誰が・なぜ・誰が承認したかと一緒に残ります。<br />
+          データが書き換わっていた。いつ、誰が、なぜ、を誰も言えない。<br />
+          ここでは、すべての変更が、誰が・なぜ・誰が承認したかと一緒に残ります。<br />
           <b>書き込みが続く間も、読み取りは数十マイクロ秒で返ります。</b>
+        </p>
+        <p class="origin">
+          いまの値が光なら、履歴は、光が届く前からそこにある影です。
         </p>
 
         <div class="cta">
@@ -183,6 +188,43 @@
             >ゲームのデータへの 5 つの問い</a
           >。どれも、書いてあるコマンドを試験がそのまま実行しています。
         </p>
+      </section>
+
+      <section id="uses">
+        <h2>架空の例で見る、使いどころ</h2>
+        <p>
+          実在の利用者の話ではありません。3 つとも作った例で、データも作りものです。どれも手順の文書になっていて、書いてあるコマンドを試験がそのまま流しています。
+        </p>
+        <ul class="cards">
+          <li>
+            <h3>ゲームの持ち物</h3>
+            <p>
+              障害のあと、エージェントがポーションの補填を用意する。確認した人が「1
+              人に 50 個入る」と気づいて差し戻す。その間もゲームは書き続けていて、エージェントの「3
+              + 5 = 8」はもう正しくない。マージは止まり、どのキーかを言う。
+              <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/game-inventory.md">手順（英語）</a>
+            </p>
+          </li>
+          <li>
+            <h3>サポート窓口</h3>
+            <p>
+              エージェントがチケットを読み、返金の案を出す。チケットごとに枝が
+              1 本。1 件は承認、1
+              件は窓口の権限を超えるのでそのまま置く。あとから「顧客 31
+              に誰が返金し、誰が認めたか」「私のデータを消して」に答える。
+              <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/support-desk.md">手順（英語）</a>
+            </p>
+          </li>
+          <li>
+            <h3>設定を段階で広げる</h3>
+            <p>
+              新しい購入画面を、訪問者の一部から順に出す。段階ごとに名前つきで承認。50%
+              でエラーが増えたので、その 1
+              回の変更だけを取り消す。あとから別の人が変えた設定は、そのまま残る。
+              <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/examples/staged-settings.md">手順（英語）</a>
+            </p>
+          </li>
+        </ul>
       </section>
 
       <section id="numbers">
@@ -388,6 +430,26 @@
         </ul>
       </section>
 
+      <section id="with-dbboard">
+        <h2>dbboard と一緒に使う</h2>
+        <p>
+          <a href="https://github.com/meta-taro/dbboard">dbboard</a>
+          は、同じ作者のデスクトップ用データベースビューアです。Redis
+          のサーバーにつなぐのと同じやり方で <code>umbrachyx serve</code>
+          につながり、端末のコマンドが返すものを画面で見せます。
+        </p>
+        <ul>
+          <li><b>キーの履歴：</b>これまでの値と、誰が・なぜ入れ、誰が承認したか。</li>
+          <li><b>差分：</b>2 つの枝、または 2 つの確定のあいだ。</li>
+          <li><b>承認待ちの一覧：</b>それぞれの差分と、承認・却下のボタン。</li>
+        </ul>
+        <p>
+          dbboard だけの仕掛けはありません。履歴は Redis のプロトコルの上の
+          <code>UMBRA.*</code>
+          コマンドで聞くので、そのプロトコルを話すクライアントなら何からでも送れます。
+        </p>
+      </section>
+
       <section id="direction">
         <h2>向かう先</h2>
         <p>
@@ -419,6 +481,28 @@
             回送っても 1 回になる書き込み、読み取りの記録。
           </li>
         </ul>
+        <h3>次に入るもの（この順）</h3>
+        <ol>
+          <li>
+            <b>過去を持たないテーブルの、書き込みの速さ。</b
+            >多くのクライアントが書くだけの負荷では、まだ Valkey に負けています。
+          </li>
+          <li><b>エージェントのトークンを確かめる費用</b>を、書き込みごとに安くする。</li>
+          <li>
+            <b>ログが増え続けないようにする。</b
+            >上書きされた分を落とす、履歴を持つ期間を決める、キーに期限を付ける。
+          </li>
+          <li><b>読み取り専用の台</b>をほかの機械に置くことと、バックアップの道具。</li>
+          <li>
+            <b>エージェントの前提を付けた書き込み</b>（「まだ 3 なら 8 にする」）と、2
+            回送っても 1 回になる書き込み。
+          </li>
+        </ol>
+        <p class="small">
+          日付は書きません。順番は、測った結果で入れ替わることがあります。いま手を付けているものは
+          <a href="https://github.com/meta-taro/umbrachyx/issues">Issue</a> に、版ごとに入ったものは
+          <a href="https://github.com/meta-taro/umbrachyx/releases">リリースのページ</a>にあります。
+        </p>
         <p>
           全部の一覧は<a
             href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/concept.md"
@@ -459,6 +543,45 @@ $ valkey-cli -p 6380 umbra.history app player/42/gems
               >docs/agents.md</a
             >
             へ（英語）。
+          </li>
+        </ul>
+      </section>
+
+      <section id="faq">
+        <h2>よくある質問</h2>
+        <ul>
+          <li>
+            <b>Valkey や Redis の代わりになりますか。</b
+            >いまのクライアントはそのままつながります（Redis
+            のプロトコルのうち、クライアントが使う分を話します）。ただし、速い Valkey
+            ではありません。「誰が・なぜ変え、誰が認めたか」を聞きたいときに選んでください。
+          </li>
+          <li>
+            <b>全部に履歴を持たせないといけませんか。</b
+            >いいえ。セッション・キャッシュ・カウンターのように過去が要らないものは、テーブルごとに「いまの値だけ持つ」と宣言できます。その書き込みは確認を通らず、取り消せません。
+          </li>
+          <li>
+            <b>エージェントはどうつなぎますか。</b>MCP（<code>umbrachyx mcp</code>）か Redis
+            のプロトコルで、人が発行したトークンを持ってつなぎます。トークンは、枝 1
+            本・キーの範囲・目的・期限を決めたものです。
+          </li>
+          <li>
+            <b>履歴はどのくらいメモリを使いますか。</b>上書き 1 回あたり約 655
+            バイトで、全部メモリに持ちます。古い履歴を消す仕組みはまだありません。キーの数ではなく、書き込みの回数で見積もってください。
+          </li>
+          <li>
+            <b>データを完全に消せますか。</b
+            >消せます。値は対象（たとえば顧客）ごとの鍵で暗号化してあり、鍵を壊すと二度と読めなくなります。履歴の形は残ります。
+          </li>
+          <li>
+            <b>本番で使えますか。</b>1
+            台で動き、複製もバックアップの道具もまだありません。試して、測ってください。なくなると困るデータの、ただ
+            1 つの置き場所にはしないでください。
+          </li>
+          <li>
+            <b>版が上がったら、データはどうなりますか。</b
+            >後の版は、この版が書いたログを開けます。鍵のファイルと <code>UMBRA.*</code>
+            コマンドは、まだ変わることがあります。
           </li>
         </ul>
       </section>
