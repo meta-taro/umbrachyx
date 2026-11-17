@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::TcpStream as StdStream;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread;
@@ -76,38 +77,97 @@ fn stay_awake_with(processors: usize) -> Duration {
 /// block: left after a short read, it is never heard from again.
 const HAS_EDGE_ON_ARRIVAL: bool = cfg!(unix);
 
+/// How long the thread that writes stays awake after its last group, on
+/// a machine with this many processors. Asleep, it has to be woken by the
+/// operating system for the next write, which a put answered before the
+/// disk waits for and a write that syncs does not notice. With two
+/// processors or fewer it sleeps at once: the serving thread and the
+/// client need them.
+fn writer_stays_awake_with(processors: usize) -> Duration {
+    if processors > 2 {
+        STAY_AWAKE
+    } else {
+        Duration::ZERO
+    }
+}
+
 /// Whether commits are queued for the thread that writes them.
-#[derive(Default)]
 pub(super) struct Queued {
-    some: Mutex<bool>,
+    some: AtomicBool,
+    /// Whether the thread that writes sleeps and must be woken. Set and
+    /// cleared with `asleep` held, so a teller that finds it set and
+    /// takes `asleep` finds the thread waiting.
+    is_asleep: AtomicBool,
+    asleep: Mutex<()>,
     told: Condvar,
+    stay_awake: Duration,
+}
+
+impl Default for Queued {
+    fn default() -> Self {
+        Self::staying_awake(writer_stays_awake_with(
+            thread::available_parallelism().map_or(1, usize::from),
+        ))
+    }
 }
 
 impl Queued {
-    fn tell(&self) {
-        *self.some.lock().unwrap_or_else(PoisonError::into_inner) = true;
-        self.told.notify_one();
+    fn staying_awake(stay_awake: Duration) -> Self {
+        Self {
+            some: AtomicBool::new(false),
+            is_asleep: AtomicBool::new(false),
+            asleep: Mutex::new(()),
+            told: Condvar::new(),
+            stay_awake,
+        }
     }
 
-    /// Sleeps until told, or until `deadline` if there is one.
+    /// Costs a system call only when the thread that writes is asleep.
+    fn tell(&self) {
+        self.some.store(true, Ordering::SeqCst);
+        if self.is_asleep.load(Ordering::SeqCst) {
+            let _asleep = self.asleep.lock().unwrap_or_else(PoisonError::into_inner);
+            self.told.notify_one();
+        }
+    }
+
+    fn take(&self) -> bool {
+        self.some.swap(false, Ordering::SeqCst)
+    }
+
+    /// Returns once told, or at `deadline` if there is one. It looks for
+    /// `stay_awake` first and sleeps after.
     fn wait(&self, deadline: Option<Instant>) {
-        let mut some = self.some.lock().unwrap_or_else(PoisonError::into_inner);
-        while !*some {
+        let idle_since = Instant::now();
+        while idle_since.elapsed() < self.stay_awake {
+            if self.take() {
+                return;
+            }
+            std::hint::spin_loop();
+        }
+        let mut asleep = self.asleep.lock().unwrap_or_else(PoisonError::into_inner);
+        self.is_asleep.store(true, Ordering::SeqCst);
+        // Looked at after saying it sleeps: a teller that came before
+        // left `some` set, and one that comes after will wake it.
+        while !self.take() {
             let Some(deadline) = deadline else {
-                some = self.told.wait(some).unwrap_or_else(PoisonError::into_inner);
+                asleep = self
+                    .told
+                    .wait(asleep)
+                    .unwrap_or_else(PoisonError::into_inner);
                 continue;
             };
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return;
+                break;
             }
-            some = self
+            asleep = self
                 .told
-                .wait_timeout(some, left)
+                .wait_timeout(asleep, left)
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
-        *some = false;
+        self.is_asleep.store(false, Ordering::SeqCst);
     }
 }
 
@@ -568,5 +628,49 @@ mod tests {
         assert_eq!(stay_awake_with(1), Duration::ZERO);
         assert_eq!(stay_awake_with(2), STAY_AWAKE);
         assert_eq!(stay_awake_with(64), STAY_AWAKE);
+    }
+
+    #[test]
+    fn the_thread_that_writes_stays_awake_only_with_a_processor_to_spare() {
+        assert_eq!(writer_stays_awake_with(1), Duration::ZERO);
+        assert_eq!(writer_stays_awake_with(2), Duration::ZERO);
+        assert_eq!(writer_stays_awake_with(4), STAY_AWAKE);
+    }
+
+    #[test]
+    fn what_was_told_before_the_wait_ends_it_at_once() {
+        for stay_awake in [Duration::ZERO, STAY_AWAKE] {
+            let queued = Queued::staying_awake(stay_awake);
+            queued.tell();
+
+            queued.wait(None);
+
+            assert!(!queued.take(), "the wait took what was told");
+        }
+    }
+
+    #[test]
+    fn a_wait_with_nothing_told_ends_at_its_deadline() {
+        let queued = Queued::staying_awake(Duration::ZERO);
+        let began = Instant::now();
+
+        queued.wait(Some(began + Duration::from_millis(20)));
+
+        assert!(began.elapsed() >= Duration::from_millis(20));
+    }
+
+    #[test]
+    fn a_sleeping_thread_is_woken_by_what_is_told_later() {
+        for stay_awake in [Duration::ZERO, STAY_AWAKE] {
+            let queued = Arc::new(Queued::staying_awake(stay_awake));
+            let waiting = Arc::clone(&queued);
+            let waiter = thread::spawn(move || waiting.wait(None));
+            // Long enough for the waiter to be asleep, whichever it is.
+            thread::sleep(Duration::from_millis(20));
+
+            queued.tell();
+
+            waiter.join().expect("the waiter ends once told");
+        }
     }
 }
