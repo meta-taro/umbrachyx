@@ -81,6 +81,27 @@ the command line they are `umbrachyx diff` and `umbrachyx merge
 --approved-by`, as in the quick start below and in
 [`docs/examples/`](docs/examples/).
 
+## Install
+
+There are two ways today. There is no package for `dnf`, `apt` or
+Homebrew and no prebuilt binary yet.
+
+| Way | What it needs |
+|---|---|
+| **The container image**, `ghcr.io/meta-taro/umbrachyx` ([In a container](#in-a-container)) | Docker, on amd64 or arm64. It holds the server and the command-line tool. |
+| **From source**, `cargo build --release` in a checkout ([Quick start](#quick-start)) | Rust through [rustup](https://rustup.rs), which fetches the version this repository pins (1.98.0); on Linux and macOS also a C compiler and `make`, for the memory allocator. The binary is `target/release/umbrachyx`. |
+
+Where it has been run, and what was run there:
+
+| System | What ran |
+|---|---|
+| Ubuntu 24.04 on x86-64 (AWS and Google Cloud) | Built from source; every benchmark and robustness test, at each release |
+| Ubuntu on x86-64 (GitHub's runner) | Built from source; all tests and the robustness tests, on every change |
+| Windows Server on x86-64 (GitHub's runner) | The same tests and robustness tests, on every change |
+| macOS 26 on Apple silicon | Built from source and the tests run while developing; not in CI |
+| The image (Debian 12) on amd64 and arm64 | Started, written to, killed, started again and read back, on every change |
+| Fedora, RHEL and its relatives, other distributions | Not tried. The image should run wherever Docker does; nobody has built it from source there yet |
+
 ## Quick start
 
 Five minutes, with the command-line tool: write, let an agent change a
