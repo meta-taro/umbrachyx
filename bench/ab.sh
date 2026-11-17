@@ -2,7 +2,9 @@
 # Two builds of the server measured in turn on one machine, to tell
 # whether a change is faster there: what one machine gains, another may
 # not. Each round starts each build on a fresh log, fills a million keys
-# and runs the rows that many writers and many readers decide.
+# and runs the rows that many writers and many readers decide; then, on
+# two more fresh logs, the writes to a table that keeps no history,
+# declared `plain` and `plain-async` (builds from 0.2.0 on have them).
 #
 # Both checkouts must already be built (`cargo build --release -p
 # umbrachyx`), and `valkey-benchmark` and `valkey-cli` on the PATH. The
@@ -16,6 +18,7 @@ new="$2"
 rounds="${3:-3}"
 port=6390
 keys=1000000
+value=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 server=
 dir=
 trap '[ -n "$server" ] && kill "$server" 2>/dev/null; [ -n "$dir" ] && rm -rf "$dir"' EXIT
@@ -27,6 +30,40 @@ row() {
     python3 -c 'import csv, sys
 for r in csv.reader(sys.stdin):
     print(",".join([sys.argv[1], "\"" + sys.argv[2] + "\"", r[0], r[1], r[4], r[6]]))' "$side" "$label"
+}
+
+# The writes of a table that keeps no history, held by <engine>.
+plain_rows() {
+  local side="$1" bin="$2" engine="$3"
+  dir="$(mktemp -d)"
+  export UMBRACHYX_DB="$dir/log"
+  "$bin" table kv "$engine" --who bench --why "bench/ab.sh" >/dev/null
+  "$bin" branch bench --from main >/dev/null
+  "$bin" serve bench --port "$port" 2>/dev/null &
+  server=$!
+  until valkey-cli -p "$port" ping >/dev/null 2>&1; do sleep 0.1; done
+  valkey-benchmark -p "$port" -n "$keys" -r "$keys" -c 50 -P 64 -q \
+    SET "kv/bench/key:__rand_int__" "$value" >/dev/null 2>&1
+  local clients
+  for clients in 1 8 64 256; do
+    plain_row "$side" "$engine, $clients clients" -n 200000 -c "$clients"
+  done
+  plain_row "$side" "$engine, 50 clients, 64 at a time" -n 2000000 -c 50 -P 64
+  kill "$server"
+  wait "$server" 2>/dev/null || true
+  server=
+  rm -rf "$dir"
+  dir=
+}
+
+plain_row() {
+  local side="$1" label="$2"
+  shift 2
+  valkey-benchmark -p "$port" -r "$keys" --csv "$@" \
+    SET "kv/bench/key:__rand_int__" "$value" 2>/dev/null | grep -v '"test"' |
+    python3 -c 'import csv, sys
+for r in csv.reader(sys.stdin):
+    print(",".join([sys.argv[1], "\"" + sys.argv[2] + "\"", "SET", r[1], r[4], r[6]]))' "$side" "$label"
 }
 
 echo 'side,clients,test,rps,p50_latency_ms,p99_latency_ms'
@@ -54,5 +91,7 @@ for _ in $(seq 1 "$rounds"); do
     server=
     rm -rf "$dir"
     dir=
+    plain_rows "$side" "$bin" plain
+    plain_rows "$side" "$bin" plain-async
   done
 done
