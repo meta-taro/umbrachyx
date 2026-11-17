@@ -394,3 +394,35 @@ fn commits_written_together_make_their_new_keys_with_one_write() {
         Some("sword")
     );
 }
+
+/// A put to a plain-async table is answered on the thread that asks only
+/// when its subject already has a key: making one writes the key file,
+/// and that thread must not wait for a disk.
+#[test]
+fn a_put_that_needs_a_new_key_is_left_for_the_thread_that_may_wait() {
+    let dir = TempDir::new("early-key");
+    let mut store = open(&dir.log(), &dir.keys()).expect("opens");
+    store
+        .declare_table(
+            b"cache",
+            umbrachyx::log::Engine::PlainAsync,
+            by("owner", "a cache may lose its last second"),
+        )
+        .expect("declares");
+    let committer = Committer::start(store);
+    let (writer, reader) = (committer.writer(), committer.reader());
+    let mut first = writer.put(vec![set("cache/top/gold", "1")]);
+
+    assert_eq!(writer.write_queued_early(), None, "the subject has no key");
+    assert!(first.poll().is_none());
+    writer.write_queued();
+    assert!(matches!(first.poll(), Some(Ok(()))));
+
+    let mut second = writer.put(vec![set("cache/top/gold", "2")]);
+    assert!(writer.write_queued_early().is_some(), "the key is there");
+    assert!(matches!(second.poll(), Some(Ok(()))));
+    assert_eq!(
+        text(reader.view().get(MAIN_BRANCH, b"cache/top/gold")),
+        Some("2".to_owned())
+    );
+}
