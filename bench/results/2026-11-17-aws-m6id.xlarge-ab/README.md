@@ -44,8 +44,10 @@ Medians of the three rounds, a second.
   the day before was the faster one.
 - **Writes sent 64 at a time are 3% fewer with the newer commit**, in
   each of the three rounds (79,148, 79,510 and 79,859 against 81,041,
-  82,082 and 82,512). That is what the work that added tables without a
-  history cost the tables that keep one.
+  82,082 and 82,512); from 64 clients every round of the newer is below
+  every round of the older, 2% at the medians. Which of the changes
+  between the two commits costs it was not measured; they are the ones
+  that added tables without a history.
 - One round of the newer commit gave 109,709 `GET`s from 50 clients
   where the other five gave 152,555 to 157,604: the row that moves when
   the benchmark's client lands on a serving thread's core

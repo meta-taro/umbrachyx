@@ -53,9 +53,10 @@ as fast as Valkey. Memory per overwrite is about 655 bytes against Valkey's
 16, because every change is kept (about 48 in a table declared `plain`,
 which keeps no history).
 
-## Numbers (one AWS m6id.xlarge, every write synced before it is acknowledged)
+## Numbers (one AWS m6id.xlarge)
 
-The median of three runs on 2026-11-17, next to Valkey with `appendfsync always`
+The median of three runs on 2026-11-17. First with every write synced before it
+is acknowledged, next to Valkey with `appendfsync always`
 (Valkey keeps only the current value; the Umbrachyx rows are with the history kept):
 
 | A second | Umbrachyx | Valkey |

@@ -114,7 +114,8 @@ one client's durable writes 8,832 (10,045), 64 clients' 43,649
 (51,773), 256 clients' 56,577 (60,680), writes sent 64 at a time 84,221
 (109,951), `GET`s sent 16 at a time 860,585 (1,166,181). Valkey's rows
 fell by 3 to 11%, Umbrachyx's by up to 26%. On Google Cloud the same
-day the same rows rose, by 5 to 29%.
+day the same rows rose: Umbrachyx's by up to 29%, Valkey's by 2 to 11%
+but for one that fell.
 
 To tell the machine from the code, the commit of the day before and
 this one were measured in turn on a third instance of this type

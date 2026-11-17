@@ -124,7 +124,8 @@
           And narrowing an agent's permissions by configuration fails with one wrong setting,
           so an agent has no way to write to production to begin with. The token an
           agent is given names its branch; it cannot write anywhere else, and it cannot
-          approve. What a hijacked agent was tested not to be able to do is
+          approve. (The one exception is a table declared to keep no history: it has no
+          branches, and there the token decides only which keys.) What a hijacked agent was tested not to be able to do is
           <a href="https://github.com/meta-taro/umbrachyx/blob/develop/docs/agents.md"
             >listed with the tests</a
           >.

@@ -7,7 +7,7 @@ agent's writes wait on a branch until a person approves them.**
   to branch, diff, merge and undo: per key and per cell, the way git
   keeps files.
 - **Reads never wait for writes.** While 50 clients write durably, a `GET`
-  answers in tens of microseconds, about 19 times sooner than Valkey with
+  answers in tens of microseconds, about 27 times sooner than Valkey with
   every write synced, on the machine releases are measured on.
 - **Agents write only to their own branch.** An agent's capability token
   names its branch; nothing it holds can write to `main` or approve a
@@ -19,8 +19,8 @@ agent's writes wait on a branch until a person approves them.**
   or rejects.** What is approved is the diff that person saw: anything
   the agent wrote after it is refused, not merged unseen.
 - **Nothing acknowledged is lost.** Killed mid-write 1,100 times with
-  2,333,963 writes acknowledged on the release machine, and put through
-  more than 400,000 simulated restarts after power cuts and disk faults:
+  2,388,554 writes acknowledged on the release machine, and put through
+  more than 580,000 simulated restarts after power cuts and disk faults:
   not one acknowledged write went missing. A table can be declared to
   answer before the disk instead (`plain-async`); then a failure loses
   its last second of writes and nothing else, and no other table is
@@ -28,12 +28,16 @@ agent's writes wait on a branch until a person approves them.**
 
 It is not a faster Valkey. In three runs on the release machine, with
 the history kept, one client reads about 1.5 times as many values a
-second as with Valkey and writes durably about 1.3 times as many, and 50
-readers get 6% fewer. Many writers at once get 2.7 to 2.9 times fewer
-writes through, writes sent 64 at a time about 8.6 times fewer, and
-keeping history costs far more memory (about 650 bytes a write against
-16). All of these are in [the same table](#numbers-so-far) as the rows
-where Umbrachyx is ahead, measured on AWS against Valkey, PostgreSQL and
+second as with Valkey and writes durably about 1.4 times as many, and 50
+readers get as many. Many writers at once get 2.0 to 2.2 times fewer
+writes through, writes sent 64 at a time about 7.4 times fewer, and
+keeping history costs far more memory (about 655 bytes a write against
+16). A table declared to keep no history is the kind of table Valkey
+is: with reads in the load it does 1.6 to 2.0 times what Valkey does,
+and with writes alone it is behind from 64 clients up, or on every row
+when it answers before the disk as Valkey's default does. All of these
+are in [the same tables](#numbers-so-far) as the rows where Umbrachyx is
+ahead, measured on AWS and Google Cloud against Valkey, PostgreSQL and
 Dolt, with the raw output published.
 
 **Two yardsticks.** Operations a second, next to Valkey, is the one
@@ -314,8 +318,9 @@ Memory is still where a table with history is furthest behind: about 40
 times Valkey's per overwrite, 14 times per key. Valkey keeps only the
 current value of each key; Umbrachyx keeps every commit (who, why, when)
 and the values it replaced. A plain table keeps neither and comes to
-about 3 times Valkey's per overwrite and 2.3 times per key. It was about 3.1 KB an overwrite in 0.1.0, when one
-commit in 1,024 kept a whole tree; now only the head of each branch has
+about 3 times Valkey's per overwrite and 2.3 times per key. With
+history, an overwrite was about 3.1 KB in 0.1.0, when one commit in
+1,024 kept a whole tree; now only the head of each branch has
 one, and reading the whole state of an old commit rebuilds it from the
 nearer end of its history ([`docs/decisions.md`](docs/decisions.md), "The
 store"). A latest-value table keeps no past on `main`; on any other
