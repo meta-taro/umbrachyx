@@ -4,8 +4,9 @@
 # per OS (macOS `fsync` does not reach the disk without `F_FULLFSYNC`), and
 # Linux is the platform the project's guarantees are stated against.
 #
-# Security posture: least privilege (`contents: read`; the one job that
-# publishes the image may also write packages, with the run's own token),
+# Security posture: least privilege (`contents: read`; only the job that
+# publishes the image and the one that names a pushed version may also
+# write packages, with the run's own token),
 # no stored secrets read, and only first-party actions. The toolchain
 # comes from `rust-toolchain.toml` through the rustup already on the
 # runner, not from a third-party action.
@@ -19,7 +20,15 @@ on:
     tags: ['v*']
   pull_request:
     branches: [develop, main, 'feature/**']
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      name_version:
+        description: >-
+          A version whose two images are already pushed (as <version>-amd64
+          and <version>-arm64) and still lack their common name, for instance
+          0.2.0. Leave empty to only run the checks.
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -247,7 +256,39 @@ jobs:
             docker tag umbrachyx:ci "$repository:$version-$arch"
             docker push "$repository:$version-$arch"
           done
+          # Each pushed image is itself an index (the image and what the
+          # build attests about it), which `docker manifest create` refuses;
+          # imagetools joins indexes.
           for tag in "$version" latest; do
-            docker manifest create "$repository:$tag" "$repository:$version-amd64" "$repository:$version-arm64"
-            docker manifest push "$repository:$tag"
+            docker buildx imagetools create -t "$repository:$tag" \
+              "$repository:$version-amd64" "$repository:$version-arm64"
           done
+
+  name-image:
+    # Run by hand, for a version whose two images were pushed by its tag
+    # but did not get their common name: 0.2.0's publish stopped there. It
+    # builds and pushes no image; it only names the two that the tag's run
+    # tried and pushed.
+    name: name a pushed version
+    if: github.event_name == 'workflow_dispatch' && inputs.name_version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Give the two images one name
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.name_version }}
+        run: |
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "not a version: $VERSION" >&2; exit 1 ;;
+          esac
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for tag in "$VERSION" latest; do
+            docker buildx imagetools create -t "$repository:$tag" \
+              "$repository:$VERSION-amd64" "$repository:$VERSION-arm64"
+          done
+          docker buildx imagetools inspect "$repository:$VERSION"
