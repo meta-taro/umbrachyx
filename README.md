@@ -132,13 +132,16 @@ $ umbrachyx history agent/support player/42/gems
 - **[`docs/examples/`](docs/examples/) has three small systems built this
   way**, each run by the tests as written: a game's inventory, a support
   desk, and settings rolled out in stages.
-- **No format is stable yet.** A later version may not open a log this
-  one wrote; keep the commands that load your data, not the log.
+- **A later version opens a log this one wrote**, from 0.2.0 on. The key
+  file kept beside the log, which values encrypted per subject need, and
+  the `UMBRA.*` commands may still change.
 
 ### In a container
 
-The server alone, with its log on a volume. An image is published with
-the first released version; until then, build it from a checkout:
+The server alone, with its log on a volume. Each version's image is
+`ghcr.io/meta-taro/umbrachyx` (`docker pull
+ghcr.io/meta-taro/umbrachyx:0.2.0`, for amd64 and arm64); or build it
+from a checkout:
 
 ```console
 $ docker build -t umbrachyx .
@@ -172,7 +175,7 @@ The name comes from *umbra* (shadow) and *tachyon* (the hypothetical particle
 faster than light). The current value is the light. Its history is the shadow
 that is already there before the light arrives.
 
-> **Status: prototype.** A first single-node core exists so the design can be
+> **Status: 0.2.0, the first released version.** A single-node core, so the design can be
 > tried: a durable log, a tree with branches, diffs and merges, values
 > encrypted per subject so that a subject can be erased, a command-line
 > tool, a server for one branch that speaks enough of the Redis protocol
@@ -183,8 +186,11 @@ that is already there before the light arrives.
 > do). [`docs/demo.md`](docs/demo.md) walks through all five questions
 > below with it. A first comparison with Valkey and Dolt,
 > and what it shows still needs work, is in
-> [`docs/comparison.md`](docs/comparison.md). No format is stable. Do not
-> build on it. The design starts at [`docs/concept.md`](docs/concept.md).
+> [`docs/comparison.md`](docs/comparison.md). A later version opens the
+> log this one wrote; the key file and the `UMBRA.*` commands may still
+> change. It is one node, with no replication and no backup tool: try
+> it and measure it, and do not make it the only copy of data you need.
+> The design starts at [`docs/concept.md`](docs/concept.md).
 > What each version added is in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Numbers so far
@@ -319,7 +325,7 @@ times Valkey's per overwrite, 14 times per key. Valkey keeps only the
 current value of each key; Umbrachyx keeps every commit (who, why, when)
 and the values it replaced. A plain table keeps neither and comes to
 about 3 times Valkey's per overwrite and 2.3 times per key. With
-history, an overwrite was about 3.1 KB in 0.1.0, when one commit in
+history, an overwrite was about 3.1 KB when first measured, when one commit in
 1,024 kept a whole tree; now only the head of each branch has
 one, and reading the whole state of an old commit rebuilds it from the
 nearer end of its history ([`docs/decisions.md`](docs/decisions.md), "The
@@ -328,9 +334,9 @@ branch it keeps the cells the branch wrote, for merges, which is why it
 saves nothing here, where the server writes to a branch. Nothing is
 dropped from a history yet; a retention policy is designed but not built.
 
-The same server measured as 0.1.0 on this machine, a laptop and a Linux
+The same server as first measured (2026-11-11), on this machine, a laptop and a Linux
 CI runner, with how each number was taken and what it does not show:
-[`docs/comparison.md`](docs/comparison.md). Since 0.1.0, on this
+[`docs/comparison.md`](docs/comparison.md). Since then, on this
 machine: one client's durable write went from 1.3 times fewer than
 Valkey's to 1.4 times more, one client's `GET` from 1.3 times slower to
 ahead by half, 50 clients' `GET`s from 1.9 times fewer to level, and an
@@ -338,7 +344,7 @@ overwrite from about 3.1 KB to about 655 bytes. The raw output, machine and
 versions: [`bench/results/`](bench/results/) (this run in
 `2026-11-17-aws-m6id.xlarge/`, the ones before in
 `2026-11-16-aws-m6id.xlarge/`, `2026-11-14-aws-m6id.xlarge/` and
-`2026-11-12-aws-m6id.xlarge/`, 0.1.0 in `2026-11-11-aws-m6id.xlarge/`).
+`2026-11-12-aws-m6id.xlarge/`, the first in `2026-11-11-aws-m6id.xlarge/`).
 The scripts are in [`bench/`](bench/), and CI runs them against Valkey
 on every change.
 
@@ -363,7 +369,7 @@ all of it passed the same day on the Google Cloud machine too.
 Earlier output: the runs before in
 [`bench/results/2026-11-14-aws-m6id.xlarge/robustness.txt`](bench/results/2026-11-14-aws-m6id.xlarge/robustness.txt) and
 [`bench/results/2026-11-12-aws-m6id.xlarge/robustness.txt`](bench/results/2026-11-12-aws-m6id.xlarge/robustness.txt),
-0.1.0 on the same machine in
+the first on the same machine in
 [`bench/results/2026-11-11-aws-m6id.xlarge/robustness.txt`](bench/results/2026-11-11-aws-m6id.xlarge/robustness.txt),
 [`bench/results/2026-11-04/robustness.txt`](bench/results/2026-11-04/robustness.txt),
 and for the encrypted store

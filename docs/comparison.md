@@ -7,7 +7,7 @@ compared, it says that too.
 
 ## Setup
 
-Everything below was measured on 0.1.0 or before it, when each connection
+Everything below was measured on 2026-11-11 or before it, when each connection
 had its own thread, one thread wrote every commit, the log file grew with
 each record, and one commit in 1,024 kept a whole tree. The server has
 changed in all four since ([`decisions.md`](decisions.md)). It was
@@ -17,7 +17,7 @@ are in the README and, raw, in
 with PostgreSQL beside Valkey and rows this page does not have (many
 writers at once, requests sent many at a time, writes with a capability
 token). This page still describes how each kind of number is taken and
-what it does not show; where it gives AWS figures, they are 0.1.0's,
+what it does not show; where it gives AWS figures, they are of 2026-11-11,
 except in the last section, [Tables that keep no
 history](#tables-that-keep-no-history), which is the release run of
 2026-11-17 on both release machines.

@@ -1,10 +1,15 @@
 # Changelog
 
-## 0.1.0
+## 0.2.0
 
-The first tagged version: a single-node prototype to try the design on.
-No format is stable yet, neither the log, the key file nor the protocol
-extensions; a later version may not open what this one wrote.
+The first tagged version: a single node, to try the design on. From this
+version on, a later version opens the log this one wrote; the layout of
+the log may still change. The key file kept beside the log and the
+protocol extensions (`UMBRA.*`) are not stable yet. Measured for release
+on 2026-11-17 on AWS and Google Cloud at commit `20b1673`
+(`bench/results/2026-11-17-aws-m6id.xlarge/` and
+`bench/results/2026-11-17-gcp-n2-standard-4/`); the commits after it
+change documents and the version number only.
 
 - **A durable log is the truth.** A write is acknowledged only once it is
   synced to an append-only log (except to a table declared `plain-async`,
