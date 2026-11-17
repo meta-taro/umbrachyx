@@ -17,6 +17,14 @@
 //! commands stay in order: one that is not a `SET` is not carried out
 //! until the `SET`s before it are answered, so it reads what they wrote.
 //!
+//! `SET`s to a plain-async table wait for no sync, so a serving thread
+//! answers them itself when a turn queued nothing else: handing them to
+//! the thread that writes and being woken with the answer cost more than
+//! applying them. It still never waits: if another thread is writing, or
+//! one of them would have to (the bound on what memory holds ahead of
+//! the disk, a key to make for a new subject), they go to that thread
+//! like the rest.
+//!
 //! Reads are answered from a view, on every serving thread at once, which
 //! one thread serving every connection could not.
 //!
@@ -38,7 +46,7 @@ use mio::{Events, Interest, Poll, Token, Waker};
 use super::resp::{self, Reply};
 use super::session::Session;
 use super::{MAX_PENDING_OUT, READ_CHUNK, Server, Slot, Step, is_set, set_reply};
-use crate::store::{Pending, PendingPut, Writer};
+use crate::store::{Early, Pending, PendingPut, Writer};
 
 /// The token of the waker that announces new connections.
 const WAKE: Token = Token(usize::MAX);
@@ -235,6 +243,11 @@ struct Connection {
     /// A command that is not a `SET` waits in `input` for the `SET`s
     /// before it to be answered.
     is_waiting: bool,
+    /// Whether a `SET` answered once applied was queued since the
+    /// serving thread last asked.
+    has_queued_early: bool,
+    /// Whether a `SET` that waits for the disk was.
+    has_queued_for_disk: bool,
     _slot: Slot,
 }
 
@@ -325,21 +338,39 @@ impl Loop {
     /// connection.
     fn take_turns(&mut self, ready: &[usize], again: &mut Vec<usize>) {
         let mut has_queued = false;
+        let mut has_early = false;
+        let mut has_for_disk = false;
         for token in ready {
             if let Some(connection) = self.connections.get_mut(token) {
                 connection.deliver();
                 let before = connection.unanswered.len();
                 connection.read(&self.server, &mut self.chunk);
                 has_queued |= connection.unanswered.len() > before;
+                has_early |= std::mem::take(&mut connection.has_queued_early);
+                has_for_disk |= std::mem::take(&mut connection.has_queued_for_disk);
             }
         }
-        if has_queued {
-            self.server.queued.tell();
-        }
+        // Only when this turn queued nothing that waits for the disk:
+        // a write that does pays nothing for the attempt.
+        let is_answered = if has_early && !has_for_disk {
+            self.write_early()
+        } else {
+            if has_queued {
+                self.server.queued.tell();
+            }
+            false
+        };
         for token in ready {
             let Some(connection) = self.connections.get_mut(token) else {
                 continue;
             };
+            if is_answered {
+                connection.deliver();
+                if connection.is_waiting {
+                    // The command held back behind the puts can go now.
+                    again.push(*token);
+                }
+            }
             if connection.unanswered.is_empty() {
                 self.awaiting.remove(token);
             } else {
@@ -366,6 +397,25 @@ impl Loop {
                     }
                 }
                 Sent::Close => self.close(*token),
+            }
+        }
+    }
+
+    /// Answers what this turn queued on this thread, if it is all puts
+    /// that need no sync; otherwise tells the thread that writes. Says
+    /// whether the answers are there to deliver.
+    fn write_early(&self) -> bool {
+        match self.server.writer.write_queued_early() {
+            Some(Early::Written) => true,
+            Some(Early::FirstUnsynced) => {
+                // The thread that writes keeps the time until they must
+                // be on disk, and starts counting when it is told.
+                self.server.queued.tell();
+                true
+            }
+            None => {
+                self.server.queued.tell();
+                false
             }
         }
     }
@@ -397,6 +447,8 @@ impl Loop {
                     is_blocked: false,
                     has_backlog: false,
                     is_waiting: false,
+                    has_queued_early: false,
+                    has_queued_for_disk: false,
                     _slot: slot,
                 },
             );
@@ -513,9 +565,15 @@ impl Connection {
                     used += len;
                     match server.execute(&command, &mut self.session) {
                         Some(Step::Sent(commit)) => {
+                            self.has_queued_for_disk = true;
                             self.unanswered.push_back(Outgoing::Waiting(commit));
                         }
                         Some(Step::Put(put)) => {
+                            self.has_queued_for_disk = true;
+                            self.unanswered.push_back(Outgoing::WaitingPut(put));
+                        }
+                        Some(Step::EarlyPut(put)) => {
+                            self.has_queued_early = true;
                             self.unanswered.push_back(Outgoing::WaitingPut(put));
                         }
                         Some(Step::Reply(reply)) => self.reply(reply),

@@ -26,6 +26,10 @@ use crate::tree::Bytes;
 
 const SEALED: u8 = 1;
 const HEADER_LEN: usize = 1 + FINGERPRINT_LEN;
+/// What AES-SIV puts in front of the bytes it seals.
+const TAG_LEN: usize = 16;
+/// How much longer a sealed value is than the value.
+pub(crate) const SEALED_GROWTH: usize = HEADER_LEN + TAG_LEN;
 
 /// Every key there is, by fingerprint, shared with readers on other
 /// threads. Erasing a subject takes its key out of here as well as out of
@@ -116,6 +120,12 @@ impl Sealer {
 }
 
 impl Sealer {
+    /// Whether sealing a value for `key` would make no new key, and so
+    /// write nothing to the key file.
+    pub(crate) fn has_key_for(&self, key: &[u8]) -> bool {
+        self.keys.get(subject(key)).is_some()
+    }
+
     pub(crate) fn fingerprint_of(&self, subject: &[u8]) -> Option<Fingerprint> {
         self.keys.get(subject).map(fingerprint)
     }

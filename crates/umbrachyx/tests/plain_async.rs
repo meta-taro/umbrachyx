@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use umbrachyx::log::{Edit, Engine, FileStorage, Storage};
-use umbrachyx::store::{Committer, MAIN_BRANCH, Provenance, Store, SystemClock};
+use umbrachyx::store::{Committer, Early, MAIN_BRANCH, Provenance, Store, SystemClock};
 
 type FileStore = Store<FileStorage, SystemClock>;
 
@@ -295,6 +295,120 @@ fn everything_else_is_on_disk_when_answered() {
     assert!(value(&left, "session/2/token").is_some());
     assert!(value(&left, "cache/mixed").is_some());
     assert!(!writer.has_unsynced_puts());
+}
+
+/// A thread that serves connections answers the puts it queued itself
+/// when none of them waits for the disk, and says when they are the
+/// first that somebody must sync in time.
+#[test]
+fn queued_puts_are_answered_on_the_thread_that_asks_when_none_waits_for_the_disk() {
+    let dir = TempDir::new("early");
+    let (store, disk) = mirrored(&dir);
+    let committer = Committer::start(store);
+    let (writer, reader) = (committer.writer(), committer.reader());
+    let len = disk.len();
+    let mut first = writer.put(vec![set("cache/a", "1")]);
+    let mut second = writer.put(vec![set("cache/a", "2"), set("cache/b", "1")]);
+
+    assert_eq!(writer.write_queued_early(), Some(Early::FirstUnsynced));
+
+    assert!(matches!(first.poll(), Some(Ok(()))));
+    assert!(matches!(second.poll(), Some(Ok(()))));
+    assert_eq!(
+        reader.view().get(MAIN_BRANCH, b"cache/a").as_deref(),
+        Some(&b"2"[..]),
+        "applied in the order sent"
+    );
+    assert_eq!(disk.len(), len, "nothing written");
+    assert!(writer.has_unsynced_puts());
+
+    let mut third = writer.put(vec![set("cache/a", "3")]);
+    assert_eq!(writer.write_queued_early(), Some(Early::Written));
+    assert!(matches!(third.poll(), Some(Ok(()))));
+    assert_eq!(writer.write_queued_early(), None, "nothing queued");
+
+    drop(committer.stop());
+    assert_eq!(value(&open(&dir.log()), "cache/a"), Some("3".to_owned()));
+}
+
+/// Anything that must be on disk before its answer is left in the queue,
+/// with the puts queued around it and in their order, for the thread
+/// that may wait for the disk.
+#[test]
+fn a_queue_with_a_write_that_waits_for_the_disk_is_left_alone() {
+    type Send = fn(&umbrachyx::store::Writer);
+    let waiting: [(&str, Send); 3] = [
+        ("commit", |writer| {
+            drop(writer.send(MAIN_BRANCH, vec![set("player/1/gold", "5")], by("game")));
+        }),
+        ("plain", |writer| {
+            drop(writer.put(vec![set("session/1/token", "t")]));
+        }),
+        ("refused", |writer| {
+            drop(writer.put(vec![set("player/1/gold", "5")]));
+        }),
+    ];
+    for (name, send) in waiting {
+        let dir = TempDir::new(&format!("left-{name}"));
+        let (store, disk) = mirrored(&dir);
+        let committer = Committer::start(store);
+        let (writer, reader) = (committer.writer(), committer.reader());
+        let len = disk.len();
+        let mut early = writer.put(vec![set("cache/a", "1")]);
+        send(&writer);
+
+        assert_eq!(writer.write_queued_early(), None, "{name}");
+
+        assert!(early.poll().is_none(), "{name}: not answered");
+        assert_eq!(reader.view().get(MAIN_BRANCH, b"cache/a"), None, "{name}");
+        assert_eq!(disk.len(), len, "{name}: nothing written");
+
+        writer.write_queued();
+        assert!(matches!(early.poll(), Some(Ok(()))), "{name}");
+    }
+}
+
+/// Puts that no longer fit under the bound wait for the disk, so they
+/// are not written on the thread that only asks.
+#[test]
+fn puts_past_the_bound_are_left_for_the_thread_that_waits_for_the_disk() {
+    let dir = TempDir::new("early-bound");
+    let (store, disk) = mirrored(&dir);
+    let committer = Committer::start(store);
+    let writer = committer.writer();
+    let megabyte = "x".repeat(1024 * 1024);
+    for n in 0..3 {
+        drop(writer.put(vec![set(&format!("cache/{n}"), &megabyte)]));
+    }
+    assert!(writer.write_queued_early().is_some());
+    let len = disk.len();
+
+    let mut over = writer.put(vec![set("cache/3", &megabyte)]);
+
+    assert_eq!(writer.write_queued_early(), None);
+    assert!(over.poll().is_none());
+    assert_eq!(disk.len(), len, "nothing written");
+    writer.write_queued();
+    assert!(matches!(over.poll(), Some(Ok(()))));
+    assert!(disk.len() > len + 4 * 1024 * 1024, "all four are on disk");
+}
+
+/// Never waits for another thread's turn: while one writes, the queue is
+/// left for it.
+#[test]
+fn nothing_is_answered_early_while_another_thread_writes() {
+    let dir = TempDir::new("early-turn");
+    let committer = Committer::start(store(&dir));
+    let writer = committer.writer();
+    let mut early = writer.put(vec![set("cache/a", "1")]);
+
+    let asked = writer
+        .ask(|_| writer.write_queued_early())
+        .expect("asks the store");
+
+    // The question wrote the queue before it was answered.
+    assert_eq!(asked, None);
+    assert!(matches!(early.poll(), Some(Ok(()))));
 }
 
 /// A disk whose syncs fail once it is told to.

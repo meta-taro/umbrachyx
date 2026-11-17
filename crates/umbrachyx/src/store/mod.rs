@@ -58,7 +58,7 @@ use seal::{Ring, Sealer};
 use tables::{Refusal, Tables};
 
 pub use approvals::{Approved, PendingChange};
-pub use committer::{Committer, Pending, PendingPut, Reader, Writer};
+pub use committer::{Committer, Early, Pending, PendingPut, Reader, Writer};
 pub use inspect::{Inspect, Review};
 pub use merge::{Conflict, Merged, Reverted, ValueChange};
 pub use view::View;

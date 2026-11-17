@@ -5,7 +5,7 @@
 //! its latest-value map, nothing more: both share their nodes and never
 //! change once built.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use super::plain::PlainMap;
@@ -26,7 +26,7 @@ pub struct View {
     /// a view reads what such a table holds now.
     plain: Arc<PlainMap>,
     /// The tables that keep no history, by name.
-    plain_tables: Arc<HashSet<Vec<u8>>>,
+    plain_tables: Arc<HashMap<Vec<u8>, crate::log::Engine>>,
 }
 
 impl View {
@@ -34,7 +34,7 @@ impl View {
         states: BTreeMap<String, (Tree, Hamt)>,
         ring: Option<Ring>,
         plain: Arc<PlainMap>,
-        plain_tables: Arc<HashSet<Vec<u8>>>,
+        plain_tables: Arc<HashMap<Vec<u8>, crate::log::Engine>>,
     ) -> Self {
         Self {
             states,
@@ -47,8 +47,21 @@ impl View {
     /// Whether `key` is in a table that keeps no history, and so is
     /// written with a put rather than a commit.
     pub fn is_plain(&self, key: &[u8]) -> bool {
-        !self.plain_tables.is_empty()
-            && super::tables::table_of(key).is_some_and(|table| self.plain_tables.contains(table))
+        self.plain_engine_of(key).is_some()
+    }
+
+    /// Whether a put to `key` through a committer is answered before it
+    /// is on disk: its table is plain-async.
+    pub fn answers_early(&self, key: &[u8]) -> bool {
+        self.plain_engine_of(key) == Some(crate::log::Engine::PlainAsync)
+    }
+
+    fn plain_engine_of(&self, key: &[u8]) -> Option<crate::log::Engine> {
+        if self.plain_tables.is_empty() {
+            return None;
+        }
+        let table = super::tables::table_of(key)?;
+        self.plain_tables.get(table).copied()
     }
 
     pub fn has_branch(&self, branch: &str) -> bool {

@@ -7,6 +7,7 @@
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -376,5 +377,100 @@ fn a_set_to_a_plain_async_table_reaches_the_disk_within_the_time_given() {
             "never reached the disk"
         );
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The store `a_set_to_a_plain_async_table…` uses: a `cache` table that
+/// is plain-async beside the plain `session`, opened so that what is on
+/// disk can be asked.
+fn store_with_a_cache(dir: &TempDir) -> (Store<Mirrored, SystemClock>, Disk) {
+    let mut store = store(dir);
+    let provenance = Provenance {
+        who: "test".to_owned(),
+        why: "a cache may lose its last second".to_owned(),
+        approved_by: None,
+    };
+    store
+        .declare_table(b"cache", Engine::PlainAsync, provenance)
+        .expect("declares");
+    drop(store);
+    let (storage, disk) = Mirrored::open(&dir.0.join("log"));
+    (
+        Store::open(storage, SystemClock).expect("opens store"),
+        disk,
+    )
+}
+
+/// Sent without waiting, `SET`s to a plain-async table and the `GET`s
+/// between them are answered in the order sent, each `GET` with what the
+/// `SET` before it wrote.
+#[test]
+fn gets_sent_behind_sets_to_a_plain_async_table_read_what_they_wrote() {
+    const ROUNDS: usize = 200;
+    let dir = TempDir::new("async-pipelined");
+    let (store, _disk) = store_with_a_cache(&dir);
+    let (_committer, mut client) = serve_syncing_every(store, Duration::from_secs(3600));
+    // A first write of the subject makes its key; the rest need none.
+    assert_eq!(ask_line(&mut client, &["SET", "cache/top", "start"]), "+OK");
+    let mut request = Vec::new();
+    for n in 0..ROUNDS {
+        request.extend(command(&["SET", "cache/top", &format!("v{n}")]));
+        request.extend(command(&["GET", "cache/top"]));
+    }
+
+    client.write_all(&request).expect("sends");
+
+    for n in 0..ROUNDS {
+        assert_eq!(read_line(&mut client), "+OK");
+        let value = format!("v{n}");
+        assert_eq!(read_line(&mut client), format!("${}", value.len()));
+        assert_eq!(read_line(&mut client), value);
+    }
+}
+
+/// While other clients write a plain-async table without a pause, a put
+/// still reaches the disk about as soon as the server was told to sync:
+/// the threads that answer such puts do not keep the one that syncs
+/// from its turn.
+#[test]
+fn a_busy_plain_async_table_is_still_synced_in_time() {
+    let dir = TempDir::new("async-busy");
+    let (store, disk) = store_with_a_cache(&dir);
+    let (_committer, mut client) = serve_syncing_every(store, Duration::from_millis(100));
+    let address = client.peer_addr().expect("has an address");
+    let stop = Arc::new(AtomicBool::new(false));
+    let busy: Vec<_> = (0..4)
+        .map(|n| {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                let mut client = TcpStream::connect(address).expect("connects");
+                while !stop.load(Ordering::Relaxed) {
+                    let key = format!("cache/busy/{n}");
+                    assert_eq!(ask_line(&mut client, &["SET", &key, "x"]), "+OK");
+                }
+            })
+        })
+        .collect();
+    thread::sleep(Duration::from_millis(50));
+
+    assert_eq!(ask_line(&mut client, &["SET", "cache/marker", "1"]), "+OK");
+    let answered = Instant::now();
+    let on_disk = || {
+        text(
+            disk.after_a_power_cut(&dir)
+                .get(MAIN_BRANCH, b"cache/marker"),
+        )
+    };
+    while on_disk().is_none() {
+        assert!(
+            answered.elapsed() < Duration::from_secs(5),
+            "not on disk five seconds after it was answered"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for client in busy {
+        client.join().expect("the busy client ends");
     }
 }

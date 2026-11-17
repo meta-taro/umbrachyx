@@ -27,6 +27,10 @@
 //! sync, and the store holds them until the next record it writes, a call
 //! to [`Writer::sync_puts`], or the stop. Nothing here keeps time: whoever
 //! runs the committer calls `sync_puts` as often as it promises to.
+//!
+//! A thread that must not wait, for the disk or for another thread, asks
+//! with [`Writer::write_queued_early`]: it writes the queue only if that
+//! is all such puts and nobody else is writing, and otherwise leaves it.
 
 use std::collections::VecDeque;
 use std::io;
@@ -112,6 +116,27 @@ impl Turns {
         Turn(self)
     }
 
+    /// The turn to write, if nobody has it.
+    fn try_take(&self) -> Option<Turn<'_>> {
+        let mut queue = lock(&self.queue);
+        if queue.is_taken {
+            return None;
+        }
+        queue.is_taken = true;
+        Some(Turn(self))
+    }
+
+    /// Everything queued, if there is something and `is_early` says all
+    /// of it can be answered without a sync. Otherwise the queue is left
+    /// as it is.
+    fn next_early_group(&self, is_early: impl FnOnce(&VecDeque<Job>) -> bool) -> Option<Vec<Job>> {
+        let mut queue = lock(&self.queue);
+        if queue.jobs.is_empty() || !is_early(&queue.jobs) {
+            return None;
+        }
+        Some(queue.jobs.drain(..).collect())
+    }
+
     /// The jobs at the front of the queue whose payload fits one record,
     /// at least one if there is any.
     fn next_group(&self) -> Vec<Job> {
@@ -139,6 +164,8 @@ trait Engine: Send + Sync {
     fn write(&self, group: Vec<Job>);
     /// Writes everything queued. The caller holds the turn.
     fn write_queue(&self);
+    /// See [`Writer::write_queued_early`].
+    fn write_early(&self) -> Option<Early>;
     /// Whether the store was there to ask. The caller holds the turn.
     fn inspect(&self, question: Question<'_>) -> bool;
     /// As `inspect`, and publishes the view after it.
@@ -191,6 +218,25 @@ impl<S: Storage, C: Clock> Core<S, C> {
         }
     }
 
+    /// See [`Writer::write_queued_early`].
+    fn write_early(&self) -> Option<Early> {
+        let _turn = self.turns.try_take()?;
+        let mut store = lock(&self.store);
+        let store = store.as_mut()?;
+        let group = self.turns.next_early_group(|jobs| {
+            let len = jobs.iter().map(|job| job.len).sum();
+            store.would_hold(jobs.iter().map(|job| &job.request), len)
+        })?;
+        let had_unsynced = store.has_unsynced_puts();
+        write_group(store, group, &self.published);
+        self.note_unsynced(store);
+        Some(if !had_unsynced && store.has_unsynced_puts() {
+            Early::FirstUnsynced
+        } else {
+            Early::Written
+        })
+    }
+
     fn publish(&self, store: &Store<S, C>) {
         let view = Arc::new(store.view());
         *self
@@ -241,6 +287,10 @@ where
 
     fn write_queue(&self) {
         Core::write_queue(self);
+    }
+
+    fn write_early(&self) -> Option<Early> {
+        Core::write_early(self)
     }
 
     fn inspect(&self, question: Question<'_>) -> bool {
@@ -410,6 +460,19 @@ impl Writer {
         self.engine.write_queue();
     }
 
+    /// Writes and answers everything queued, on this thread, if all of it
+    /// is puts that are answered before they are on disk, and nobody else
+    /// is writing. Never waits: not for the disk, and not for another
+    /// thread's turn. `None` leaves the queue as it was, for whoever
+    /// calls [`Writer::write_queued`].
+    ///
+    /// For a thread that serves connections: handing such puts to the
+    /// thread that writes and being woken with the answer costs more than
+    /// applying them.
+    pub fn write_queued_early(&self) -> Option<Early> {
+        self.engine.write_early()
+    }
+
     /// Whether puts to plain-async tables were answered that are not on
     /// disk yet, as of the last group written.
     pub fn has_unsynced_puts(&self) -> bool {
@@ -454,6 +517,16 @@ impl Writer {
             .review(Box::new(|store| answer = Some(decision(store))));
         answer.ok_or(StoreError::Stopped)
     }
+}
+
+/// What [`Writer::write_queued_early`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Early {
+    /// The puts are applied and answered.
+    Written,
+    /// As `Written`, and they are the first the log does not hold: from
+    /// now somebody has to call [`Writer::sync_puts`] in time.
+    FirstUnsynced,
 }
 
 /// A commit sent to a [`Committer`] and not yet answered.

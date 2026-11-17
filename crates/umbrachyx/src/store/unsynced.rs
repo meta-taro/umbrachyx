@@ -87,6 +87,38 @@ impl<S: Storage, C: Clock> Store<S, C> {
         Ok(None)
     }
 
+    /// Whether `requests`, `len` bytes of payload before sealing, would
+    /// all be applied and held rather than written now: every one a put
+    /// to plain-async tables, room for them under the bound, and no key
+    /// to make for a new subject, which would write the key file. Errs
+    /// towards no: a request the store would refuse is not held.
+    pub(crate) fn would_hold<'a>(
+        &self,
+        requests: impl Iterator<Item = &'a super::Request>,
+        len: usize,
+    ) -> bool {
+        let mut edits = 0;
+        for request in requests {
+            let super::Request::Put(puts) = request else {
+                return false;
+            };
+            if !self.may_answer_early(puts) || !self.has_keys_for(puts) {
+                return false;
+            }
+            edits += puts.len();
+        }
+        let sealed_len = len + edits * super::seal::SEALED_GROWTH;
+        !self.log.is_poisoned() && self.unsynced.len + sealed_len <= MAX_UNSYNCED_LEN
+    }
+
+    fn has_keys_for(&self, puts: &[Edit]) -> bool {
+        let Some(sealer) = &self.sealer else {
+            return true;
+        };
+        puts.iter()
+            .all(|edit| edit.value.is_none() || sealer.has_key_for(&edit.key))
+    }
+
     /// Whether every key is in a table whose writes may be answered
     /// before they are on disk.
     pub(super) fn may_answer_early(&self, edits: &[Edit]) -> bool {
