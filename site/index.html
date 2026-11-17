@@ -216,49 +216,49 @@
             <tbody>
               <tr>
                 <td>Reads while 50 clients keep writing</td>
-                <td class="n"><b>24,612</b></td>
-                <td class="n">1,782</td>
+                <td class="n"><b>24,667</b></td>
+                <td class="n">1,758</td>
                 <td>about 14× more</td>
               </tr>
               <tr>
                 <td>Reads, one client</td>
-                <td class="n"><b>54,230</b></td>
-                <td class="n">36,443</td>
+                <td class="n"><b>54,377</b></td>
+                <td class="n">37,216</td>
                 <td>about 1.5× more</td>
               </tr>
               <tr>
                 <td>Synced writes, one client</td>
-                <td class="n"><b>8,548</b></td>
-                <td class="n">6,401</td>
-                <td>about 1.3× more</td>
+                <td class="n"><b>8,832</b></td>
+                <td class="n">6,268</td>
+                <td>about 1.4× more</td>
               </tr>
               <tr>
                 <td>Reads, 50 clients</td>
-                <td class="n">144,509</td>
-                <td class="n">153,374</td>
-                <td>6% fewer</td>
+                <td class="n">149,477</td>
+                <td class="n">151,745</td>
+                <td>1% fewer</td>
               </tr>
               <tr class="behind">
                 <td>Synced writes, 64 clients</td>
-                <td class="n">36,010</td>
-                <td class="n"><b>98,717</b></td>
-                <td>about 2.7× fewer</td>
+                <td class="n">43,649</td>
+                <td class="n"><b>94,473</b></td>
+                <td>about 2.2× fewer</td>
               </tr>
               <tr class="behind">
                 <td>Synced writes, 256 clients</td>
-                <td class="n">39,746</td>
-                <td class="n"><b>116,347</b></td>
-                <td>about 2.9× fewer</td>
+                <td class="n">56,577</td>
+                <td class="n"><b>112,360</b></td>
+                <td>about 2.0× fewer</td>
               </tr>
               <tr class="behind">
                 <td>Synced writes, 50 clients sending 64 at a time</td>
-                <td class="n">73,443</td>
-                <td class="n"><b>629,327</b></td>
-                <td>about 8.6× fewer</td>
+                <td class="n">84,221</td>
+                <td class="n"><b>626,959</b></td>
+                <td>about 7.4× fewer</td>
               </tr>
               <tr class="behind">
                 <td>Memory for each overwrite</td>
-                <td class="n">about 650 bytes</td>
+                <td class="n">about 655 bytes</td>
                 <td class="n"><b>about 16 bytes</b></td>
                 <td>about 40× more</td>
               </tr>
@@ -266,7 +266,7 @@
           </table>
         </div>
         <p class="small">
-          Every row is the median of three runs on 2026-11-14, and every Umbrachyx row is with
+          Every row is the median of three runs on 2026-11-17, and every Umbrachyx row is with
           all of the history kept. <b>It is not a faster Valkey.</b> With many clients writing at once, and
           in memory, it is clearly behind: that is what keeping all of the history costs. The
           raw output, the machine and the steps are in
@@ -276,16 +276,83 @@
           <a href="https://github.com/meta-taro/umbrachyx#numbers-so-far">README</a>.
         </p>
 
+        <h3>Tables that keep no history</h3>
+        <p>
+          A table can be declared to keep only its current values, as Valkey does: no history,
+          no branches, no review. <code>plain</code> still syncs every write before it answers,
+          and is set against <code>appendfsync always</code>. <code>plain-async</code> answers
+          first and syncs within a second, and is set against Valkey's default,
+          <code>appendfsync everysec</code>.
+        </p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>A second</th>
+                <th class="n">Plain</th>
+                <th class="n">Valkey <code>always</code></th>
+                <th class="n">Plain-async</th>
+                <th class="n">Valkey <code>everysec</code></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>95% reads, 5% writes, 50 clients</td>
+                <td class="n"><b>162,179</b></td>
+                <td class="n">81,269</td>
+                <td class="n"><b>170,792</b></td>
+                <td class="n">106,042</td>
+              </tr>
+              <tr>
+                <td>50% reads, 50% writes, 50 clients</td>
+                <td class="n"><b>124,003</b></td>
+                <td class="n">72,454</td>
+                <td class="n"><b>156,246</b></td>
+                <td class="n">100,182</td>
+              </tr>
+              <tr>
+                <td>Writes, one client</td>
+                <td class="n"><b>10,680</b></td>
+                <td class="n">6,268</td>
+                <td class="n">29,061</td>
+                <td class="n"><b>34,554</b></td>
+              </tr>
+              <tr class="behind">
+                <td>Writes, 64 clients</td>
+                <td class="n">90,050</td>
+                <td class="n"><b>94,473</b></td>
+                <td class="n">106,838</td>
+                <td class="n"><b>156,495</b></td>
+              </tr>
+              <tr class="behind">
+                <td>Writes, 50 clients sending 64 at a time</td>
+                <td class="n">540,687</td>
+                <td class="n"><b>626,959</b></td>
+                <td class="n">572,082</td>
+                <td class="n"><b>638,570</b></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small">
+          The same machine and day. With reads in the load, both kinds are ahead of Valkey.
+          Writes alone, a plain-async table is behind on every row, and a plain table from 64
+          clients up. Starting again after five million writes takes 3.3 seconds with a plain
+          table and 57.5 with the history kept.
+        </p>
+
         <h3>Robustness</h3>
         <ul>
           <li>
-            <b>The server killed in the middle of writes:</b> 1,100 times, with 2,333,963 writes
+            <b>The server killed in the middle of writes:</b> 1,100 times, with 2,388,554 writes
             acknowledged; none lost.
           </li>
           <li>
-            <b>Simulated disks and power cuts:</b> three simulations of 10,000 seeds each
+            <b>Simulated disks and power cuts:</b> four simulations of 10,000 seeds each
             (writes torn part way, failed syncs, flipped bits, a clock that goes back), more
-            than 400,000 restarts in all; no acknowledged write went missing.
+            than 580,000 restarts in all; no write that waited for the disk went missing. A
+            <code>plain-async</code> table lost only the last puts it had answered early, as it
+            says it may.
           </li>
           <li>All of these run in CI on Linux and Windows for every change.</li>
         </ul>
