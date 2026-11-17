@@ -11,13 +11,16 @@ Everything below was measured on 0.1.0 or before it, when each connection
 had its own thread, one thread wrote every commit, the log file grew with
 each record, and one commit in 1,024 kept a whole tree. The server has
 changed in all four since ([`decisions.md`](decisions.md)). It was
-measured again on the release machine, last on 2026-11-14: those numbers
+measured again on the release machine, last on 2026-11-17: those numbers
 are in the README and, raw, in
-[`bench/results/2026-11-14-aws-m6id.xlarge/`](../bench/results/2026-11-14-aws-m6id.xlarge/),
+[`bench/results/2026-11-17-aws-m6id.xlarge/`](../bench/results/2026-11-17-aws-m6id.xlarge/),
 with PostgreSQL beside Valkey and rows this page does not have (many
 writers at once, requests sent many at a time, writes with a capability
 token). This page still describes how each kind of number is taken and
-what it does not show; where it gives AWS figures, they are 0.1.0's.
+what it does not show; where it gives AWS figures, they are 0.1.0's,
+except in the last section, [Tables that keep no
+history](#tables-that-keep-no-history), which is the release run of
+2026-11-17 on both release machines.
 
 - Apple M4 MacBook Air (fanless, 32 GB), macOS 26.6.2, internal SSD with
   APFS, on AC power, 2026-11-03. One machine; nothing else heavy running.
@@ -370,3 +373,106 @@ twice the history's, from the lock around the encryption keys, but at
 1–2 µs a read against about 110 µs over the server it does not show
 here. These are one machine's numbers and have not been
 taken on the Linux runner or the fixed machines.
+
+## Tables that keep no history
+
+A table declared `plain` or `plain-async` keeps the current value of
+each key and nothing else ([`decisions.md`](decisions.md#tables-that-keep-no-history-plain-and-plain-async)),
+which is what Valkey keeps. So these rows are set against Valkey by what
+each side promises about the disk, and not otherwise:
+
+- a `plain` table syncs every write before it answers, as Valkey does
+  with `appendfsync always`;
+- a `plain-async` table answers first and syncs within a second, as
+  Valkey does with `appendfsync everysec`, its default. A power cut may
+  take the last second of answered writes from either.
+
+The "with history" column is the same server with the keys in a table
+that keeps its history, for what the history costs. Medians of three
+runs on 2026-11-17 at commit `20b1673`, a million keys written first,
+32-byte values, `valkey-benchmark` as the client of both
+(`bench/umbrachyx.sh`, `bench/valkey.sh`).
+
+On the AWS machine (`m6id.xlarge`,
+[`2026-11-17-aws-m6id.xlarge/`](../bench/results/2026-11-17-aws-m6id.xlarge/)):
+
+| Writes a second | With history | Plain | Valkey `always` | Plain-async | Valkey `everysec` |
+|---|---|---|---|---|---|
+| One client | 8,832 | **10,680** | 6,268 | 29,061 | **34,554** |
+| 8 clients | 26,706 | **46,436** | 24,555 | 107,585 | **151,745** |
+| 64 clients | 43,649 | 90,050 | **94,473** | 106,838 | **156,495** |
+| 256 clients | 56,577 | 107,181 | **112,360** | 98,377 | **119,261** |
+| 50 clients sending 64 at a time | 84,221 | 540,687 | **626,959** | 572,082 | **638,570** |
+
+On the Google Cloud machine (`n2-standard-4`, whose disk takes about
+twice as long to sync,
+[`2026-11-17-gcp-n2-standard-4/`](../bench/results/2026-11-17-gcp-n2-standard-4/)):
+
+| Writes a second | With history | Plain | Valkey `always` | Plain-async | Valkey `everysec` |
+|---|---|---|---|---|---|
+| One client | 4,103 | **4,752** | 3,036 | 16,351 | **27,375** |
+| 8 clients | 13,870 | **21,678** | 11,910 | 62,247 | **109,051** |
+| 64 clients | 28,337 | 47,450 | **50,994** | 59,102 | **108,519** |
+| 256 clients | 35,342 | 58,275 | **80,225** | 58,634 | **90,171** |
+| 50 clients sending 64 at a time | 77,244 | 458,085 | **498,256** | 467,727 | **574,053** |
+
+- **A plain table is ahead of Valkey's `always` from one and eight
+  clients** (1.6 to 1.9 times), **and behind it from more**: 5 to 7%
+  from 64 clients, 5% from 256 on AWS and 27% on Google Cloud, 8 to 14%
+  sent 64 at a time.
+- **A plain-async table is behind Valkey's `everysec` on every row**:
+  by 10 to 32% on AWS and 19 to 46% on Google Cloud. Its write is handed
+  from the thread that serves the connection to the one thread that
+  writes and back before it is answered; Valkey answers on the thread
+  that read it. Its rate also stops near 100,000 a second from separate
+  clients on AWS and 60,000 on Google Cloud however many there are.
+- **Against a table with history**, a plain table writes 2.1 times as
+  much from 64 clients and 6.4 times sent 64 at a time on AWS, 1.7 and
+  5.9 times on Google Cloud.
+
+### Reads and writes mixed
+
+One program sends both servers the same load (`bench/mixed.sh`,
+`examples/mixed_load.rs`): 50 clients, each sending one command and
+waiting for its reply, a `GET` or a `SET` of a 32-byte value to one of a
+million keys, for 10 seconds after a warm-up. Operations a second,
+medians of the three runs.
+
+| AWS | With history | Plain | Valkey `always` | Plain-async | Valkey `everysec` |
+|---|---|---|---|---|---|
+| 95% reads | 138,039 | **162,179** | 81,269 | **170,792** | 106,042 |
+| 80% reads | 114,288 | **149,576** | 77,656 | **170,350** | 103,999 |
+| 50% reads | 67,301 | **124,003** | 72,454 | **156,246** | 100,182 |
+
+| Google Cloud | With history | Plain | Valkey `always` | Plain-async | Valkey `everysec` |
+|---|---|---|---|---|---|
+| 95% reads | 100,363 | **121,578** | 54,059 | **124,869** | 81,475 |
+| 80% reads | 77,121 | **100,452** | 51,059 | **120,262** | 80,026 |
+| 50% reads | 46,773 | **75,775** | 48,439 | **113,274** | 75,835 |
+
+- **With reads in the load, every row is ahead of the Valkey setting it
+  is set against**: a plain table by 1.6 to 2.2 times, a plain-async
+  table by 1.5 to 1.6 times. Valkey answers reads and writes on one
+  thread; here reads are answered on every serving thread and do not
+  wait for a write.
+- **A table with history is ahead of `always` too** at 95% and 80% reads
+  (1.5 to 1.9 times) and 3 to 7% behind when half the operations are
+  writes.
+- What this does not show: clients that send many commands at a time,
+  where the write rows above apply, and any ratio or number of clients
+  other than these.
+
+### Starting again, and memory
+
+After five million writes over a million keys (`bench/restart.sh`, once
+on each machine), opening the log again takes 57.5 s on AWS and 61.5 s
+on Google Cloud when the keys keep their history, and 3.3 and 3.4 s when
+they are in a plain table. The log holds every write of both (655 MB and
+455 MB): nothing shortens it yet, and a plain table's overwritten values
+are read and dropped.
+
+A plain table holds about 130 bytes a key written once and 45 to 49
+bytes for each overwrite after (one run of six gave 24), Valkey 55 and
+15 to 17 (`bench/memory.sh`, `memory.csv` in each run). Neither script
+has a row for `plain-async` or for `everysec`: how soon a write is
+synced does not change what is held.

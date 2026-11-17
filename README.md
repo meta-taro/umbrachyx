@@ -187,32 +187,34 @@ that is already there before the light arrives.
 
 One machine, the one every release is measured on: an EC2 `m6id.xlarge`
 in Tokyo (four virtual CPUs, 16 GiB, Ubuntu 24.04, the logs on its local
-NVMe disk), three runs on 2026-11-14 at commit `269dc7a`, the median in
-each cell. Every write on every side is on disk before it is acknowledged
-(Valkey with `appendfsync always`, PostgreSQL as it ships). Synthetic
-data, 32-byte values, 1,000,000 keys present. PostgreSQL reads and
-updates one row by its primary key with prepared statements; it keeps no
-history, and is here as the database without one. Valkey keeps only the
-current value too: every Umbrachyx row is with the history kept.
+NVMe disk), three runs on 2026-11-17 at commit `20b1673`, the median in
+each cell. Synthetic data, 32-byte values, 1,000,000 keys present.
 
-| A second, unless it says otherwise | Umbrachyx | Valkey | PostgreSQL | Against Valkey |
+First, tables that keep their history, which is what a table does unless
+it is declared otherwise. Every write on every side is on disk before it
+is acknowledged (Valkey with `appendfsync always`, PostgreSQL as it
+ships). PostgreSQL reads and updates one row by its primary key with
+prepared statements; it keeps no history, and is here as the database
+without one. Valkey keeps only the current value too.
+
+| A second, unless it says otherwise | Umbrachyx, with history | Valkey | PostgreSQL | Against Valkey |
 |---|---|---|---|---|
-| `GET` while 50 clients write: median / p99 | **0.023 / 0.48 ms** | 0.61 / 0.99 ms | 0.21 / 0.87 ms | **~26× sooner** |
-| `GET`s while 50 clients write | **24,612** | 1,782 | 3,798 | **~14× more** |
-| `GET` p99 with 10,000 connections | **107 ms** | 191 ms | | **~1.8× sooner** |
-| `GET` p99 with 5,000 connections | **49 ms** | 78 ms | | **~1.6× sooner** |
-| `GET` p99 with 1,000 connections | **9.1 ms** | 14.3 ms | | **~1.6× sooner** |
-| `GET`s, one client | **54,230** | 36,443 | 25,844 | **~1.5× more** |
-| Durable writes, one client | **8,548** | 6,401 | 10,592 | **~1.3× more** |
-| `GET`s, 50 clients | 144,509 | **153,374** | 69,057 | 6% fewer (138,122 to 160,256) |
-| Durable writes, 8 clients | 23,688 | 24,963 | **32,688** | 5% fewer |
-| `GET`s, 50 clients sending 16 at a time | 841,043 | **1,218,769** | | **~1.4× fewer** |
-| Durable writes, 64 clients | 36,010 | **98,717** | 40,949 | **~2.7× fewer** |
-| Durable writes, 256 clients | 39,746 | **116,347** | 29,087 | **~2.9× fewer** |
-| Durable writes, 50 clients sending 64 at a time | 73,443 | **629,327** | | **~8.6× fewer** |
-| The same on a server with fewer keys, without and with a capability token | 113,129 / 41,075 | | | |
-| Diff of 10 changes in two commits, vs Dolt | **1.1 µs** | | | Dolt: 323 µs (1,000,000 records) |
-| Loading 1,000,000 records, vs Dolt | **1.4 s** | | | Dolt: 7 s |
+| `GET` while 50 clients write: median / p99 | **0.023 / 0.47 ms** | 0.62 / 1.01 ms | 0.21 / 0.88 ms | **~27× sooner** |
+| `GET`s while 50 clients write | **24,667** | 1,758 | 3,748 | **~14× more** |
+| `GET` p99 with 10,000 connections | **107 ms** | 182 ms | | **~1.7× sooner** |
+| `GET` p99 with 5,000 connections | **52 ms** | 113 ms | | **~2.1× sooner** |
+| `GET` p99 with 1,000 connections | **9.4 ms** | 15.0 ms | | **~1.6× sooner** |
+| `GET`s, one client | **54,377** | 37,216 | 27,307 | **~1.5× more** |
+| Durable writes, one client | 8,832 | 6,268 | **10,203** | **~1.4× more** |
+| Durable writes, 8 clients | 26,706 | 24,555 | **32,176** | 9% more |
+| `GET`s, 50 clients | 149,477 | **151,745** | 67,849 | 1% fewer (143,472 to 156,495) |
+| `GET`s, 50 clients sending 16 at a time | 860,585 | **1,201,923** | | **~1.4× fewer** |
+| Durable writes, 64 clients | 43,649 | **94,473** | 40,274 | **~2.2× fewer** |
+| Durable writes, 256 clients | 56,577 | **112,360** | 28,148 | **~2.0× fewer** |
+| Durable writes, 50 clients sending 64 at a time | 84,221 | **626,959** | | **~7.4× fewer** |
+| The same on a server with fewer keys, without and with a capability token | 124,177 / 42,670 | | | |
+| Diff of 10 changes in two commits, vs Dolt | **1.1 µs** | | | Dolt: 309 µs (1,000,000 records) |
+| Loading 1,000,000 records, vs Dolt | **1.5 s** | | | Dolt: 7 s |
 
 Where Umbrachyx is ahead, the design is why. Valkey answers on one
 thread, after the sync of the writes around it; Umbrachyx reads a
@@ -224,57 +226,95 @@ only the record to make durable.
 
 Where it is behind, one thread is the reason. Every commit is applied by
 a single thread: it reads the cell the write replaces, copies the path
-of the tree to it, hashes the commit and checks the token. On this
-machine that work is about 14.5 µs a commit with a million keys and
-their history held, and the rows where sync is not the limit top out
-near 40,000 writes a second from separate clients and 73,000 sent 64 at
-a time, however many clients send them; Valkey appends to a buffer and
-syncs once for all of them. A capability token costs each write a
-further check. The 50-client `GET` row is not steady: a run gives less
-when the benchmark's client lands on the core a serving thread is on
+of the tree to it, hashes the commit and checks the token. With a
+million keys and their history held, the rows where sync is not the
+limit top out near 57,000 writes a second from separate clients and
+84,000 sent 64 at a time, however many clients send them; Valkey appends
+to a buffer and syncs once for all of them. A capability token costs
+each write a further check. The 50-client `GET` row is not steady: a run
+gives less when the benchmark's client lands on the core a serving
+thread is on
 ([`bench/results/2026-11-13-aws-m6id.xlarge-next/`](bench/results/2026-11-13-aws-m6id.xlarge-next/)),
 which is why its range is beside its median.
 
-Not in the table, because the table was measured before it: the server
-now asks Linux for huge pages for its memory (why, and how to turn it
-off, is in [`docs/decisions.md`](docs/decisions.md)). Measured with it
-on 2026-11-16, three runs again: on this machine 59,773 `GET`s and
-10,045 durable writes a second from one client, 163,399 `GET`s from 50
-clients against Valkey's 162,075, and 31,017, 51,773 and 60,680 durable
-writes from 8, 64 and 256 clients against Valkey's 25,661, 103,093 and
-122,775
-([`bench/results/2026-11-16-aws-m6id.xlarge/`](bench/results/2026-11-16-aws-m6id.xlarge/));
-on the second machine a release is measured on, a Google Cloud
-`n2-standard-4` with a slower disk, the same rows are ahead and behind
-([`bench/results/2026-11-16-gcp-n2-standard-4/`](bench/results/2026-11-16-gcp-n2-standard-4/)).
-A server holding almost nothing takes about 12 MiB more for it. The
-table is replaced at the release.
+Second, tables declared to keep no history, which is the kind of table
+Valkey is. A `plain` table still syncs every write before it answers,
+and is set against Valkey with `appendfsync always`; a `plain-async`
+table answers first and syncs within a second, and is set against
+Valkey's default, `appendfsync everysec`. The history column is the
+table above again, for the price of the history.
+
+| Writes a second | With history | Plain | Valkey `always` | Plain-async | Valkey `everysec` |
+|---|---|---|---|---|---|
+| One client | 8,832 | **10,680** | 6,268 | 29,061 | **34,554** |
+| 8 clients | 26,706 | **46,436** | 24,555 | 107,585 | **151,745** |
+| 64 clients | 43,649 | 90,050 | **94,473** | 106,838 | **156,495** |
+| 256 clients | 56,577 | 107,181 | **112,360** | 98,377 | **119,261** |
+| 50 clients sending 64 at a time | 84,221 | 540,687 | **626,959** | 572,082 | **638,570** |
+
+| Reads and writes mixed, 50 clients, operations a second | With history | Plain | Valkey `always` | Plain-async | Valkey `everysec` |
+|---|---|---|---|---|---|
+| 95% reads | 138,039 | **162,179** | 81,269 | **170,792** | 106,042 |
+| 80% reads | 114,288 | **149,576** | 77,656 | **170,350** | 103,999 |
+| 50% reads | 67,301 | **124,003** | 72,454 | **156,246** | 100,182 |
+
+Writes alone, a plain table is ahead of Valkey from one and eight
+clients, 5% behind from 64 and 256, and 14% behind sent 64 at a time; a
+plain-async table is behind Valkey's `everysec` on every row, by 10 to
+32%. A write to it crosses two threads before it is answered, and
+Valkey's crosses none. With reads mixed in it is the other way round: a plain table does 1.7 to 2.0
+times what Valkey does with `always`, a plain-async table 1.6 times
+what it does with `everysec`, and a table that keeps its history is
+ahead of `always` too until half the operations are writes (7% fewer
+there). The mixed rows are sent by one program for both servers
+(`bench/mixed.sh`), one command at a time from each of 50 clients.
+
+Starting again after five million writes takes 57.5 s when the keys
+keep their history and 3.3 s when they are in a plain table: the log
+keeps every write of both (655 MB and 455 MB), and the history is what
+takes the time to rebuild. Nothing shortens a log yet.
+
+The second machine a release is measured on, a Google Cloud
+`n2-standard-4` with a slower disk, gives lower numbers and the same
+picture: the same rows ahead and the same rows behind, by more where it
+is behind (a plain table's writes from 256 clients 27% fewer than
+Valkey's, a plain-async table's 19 to 46% fewer than `everysec`)
+([`bench/results/2026-11-17-gcp-n2-standard-4/`](bench/results/2026-11-17-gcp-n2-standard-4/)).
+Two instances of one machine type differ too: the run of the day before
+on another `m6id.xlarge` gave up to a third more on some rows from
+almost the same code, and two commits measured in turn on a third
+instance showed the instance, not the code, to be the difference
+([`bench/results/2026-11-17-aws-m6id.xlarge-ab/`](bench/results/2026-11-17-aws-m6id.xlarge-ab/)).
+A factor between two servers holds on one machine; a number alone does
+not carry over to the next.
 
 Next to noisy neighbours on the same machine (other programs keeping
 every processor busy, syncing files on the same disk, churning 70% of
 the memory and talking over the network; `bench/colocated.sh`), the
-server kept answering, at about a seventh of its rate: 1,331 durable
-writes a second from one client instead of 9,362, and 24,233 `GET`s from
-50 clients instead of 158,089, with the slowest percent of those `GET`s
-at 9 ms. Killed 100 times mid-write beside them, it lost none of 471,378
+server kept answering, at about a seventh of its rate: 1,208 durable
+writes a second from one client instead of 9,368, and 21,988 `GET`s from
+50 clients instead of 157,520, with the slowest percent of those `GET`s
+at 10 ms. Killed 100 times mid-write beside them, it lost none of 518,966
 acknowledged writes. Given 1 GiB of memory and filled until it could get
 no more, it stopped saying `memory allocation of 36480 bytes failed`,
-and all 343,232 writes it had acknowledged were there when it started
-again ([`colocated.txt`](bench/results/2026-11-14-aws-m6id.xlarge/colocated.txt)).
+and all 342,912 writes it had acknowledged were there when it started
+again ([`colocated.txt`](bench/results/2026-11-17-aws-m6id.xlarge/colocated.txt)).
 
 In memory, per key written once and per later overwrite
 (`bench/memory.sh`, 200,000 keys):
 
 | | A million keys, each written once | Each overwrite after that |
 |---|---|---|
-| Umbrachyx, history | about 0.8 GB | about 650 bytes |
-| Umbrachyx, latest-value table on a branch | about 0.7 GB | about 625 bytes |
+| Umbrachyx, history | about 0.8 GB | about 655 bytes |
+| Umbrachyx, latest-value table on a branch | about 0.7 GB | about 600 bytes |
+| Umbrachyx, plain table | about 0.13 GB | about 48 bytes |
 | Valkey | about 55 MB | about 16 bytes |
 
-Memory is still where Umbrachyx is furthest behind: about 40 times
-Valkey's per overwrite, 14 times per key. Valkey keeps only the current
-value of each key; Umbrachyx keeps every commit (who, why, when) and the
-values it replaced. It was about 3.1 KB an overwrite in 0.1.0, when one
+Memory is still where a table with history is furthest behind: about 40
+times Valkey's per overwrite, 14 times per key. Valkey keeps only the
+current value of each key; Umbrachyx keeps every commit (who, why, when)
+and the values it replaced. A plain table keeps neither and comes to
+about 3 times Valkey's per overwrite and 2.3 times per key. It was about 3.1 KB an overwrite in 0.1.0, when one
 commit in 1,024 kept a whole tree; now only the head of each branch has
 one, and reading the whole state of an old commit rebuilds it from the
 nearer end of its history ([`docs/decisions.md`](docs/decisions.md), "The
@@ -287,11 +327,12 @@ The same server measured as 0.1.0 on this machine, a laptop and a Linux
 CI runner, with how each number was taken and what it does not show:
 [`docs/comparison.md`](docs/comparison.md). Since 0.1.0, on this
 machine: one client's durable write went from 1.3 times fewer than
-Valkey's to 1.3 times more, one client's `GET` from 1.3 times slower to
-ahead by half, 50 clients' `GET`s from 1.9 times fewer to 6% fewer, and an
-overwrite from about 3.1 KB to about 650 bytes. The raw output, machine and
+Valkey's to 1.4 times more, one client's `GET` from 1.3 times slower to
+ahead by half, 50 clients' `GET`s from 1.9 times fewer to level, and an
+overwrite from about 3.1 KB to about 655 bytes. The raw output, machine and
 versions: [`bench/results/`](bench/results/) (this run in
-`2026-11-14-aws-m6id.xlarge/`, the one before in
+`2026-11-17-aws-m6id.xlarge/`, the ones before in
+`2026-11-16-aws-m6id.xlarge/`, `2026-11-14-aws-m6id.xlarge/` and
 `2026-11-12-aws-m6id.xlarge/`, 0.1.0 in `2026-11-11-aws-m6id.xlarge/`).
 The scripts are in [`bench/`](bench/), and CI runs them against Valkey
 on every change.
@@ -300,19 +341,22 @@ on every change.
 
 | Test | Runs | Result |
 |---|---|---|
-| Kill the server with SIGKILL while 16 clients send `SET`s (half pipelined) | 100 | 2,258,381 acknowledged, none lost |
-| Kill a process appending to the log | 1,000 | 75,582 acknowledged, none lost |
+| Kill the server with SIGKILL while 16 clients send `SET`s (half pipelined) | 100 | 2,312,686 acknowledged, none lost |
+| Kill a process appending to the log | 1,000 | 75,868 acknowledged, none lost |
 | Simulated disk: power cuts tearing writes at any sector, failed syncs, bit flips | 10,000 seeds | 130,306 restarts; every acknowledged record back, 6,647 corruptions and 198 damaged file headers refused |
 | Simulated store: commits, branches, merges, reverts, approvals and rejections through crashes and a clock that goes back, with a second store following its log | 10,000 seeds | 596,193 commits, 152,028 restarts, 4,536 approvals, 10,530 rejections; every branch as acknowledged, every rejection kept; the follower never held a record the store did not, and ended with all 459,601 |
 | Simulated encrypted store: commits, erasures and failed key file writes through crashes | 10,000 seeds | 406,973 commits, 70,090 erasures, 120,619 restarts; every value as acknowledged, no erased value read again |
+| Simulated tables without history: puts answered before they are on disk and writes that wait for it, through failed syncs, crashes and power cuts, with a second store following the log | 10,000 seeds | 432,389 groups of puts answered early, 346,893 writes that waited, 180,718 restarts; 78,351 of them lost the last puts answered early and never anything else |
 
 CI runs all of them on Linux and Windows for every change. The server test
 and the simulations were also run against deliberately broken versions
 (acknowledging before the write is durable, skipping a sync, misreading
 damage) and caught each of them. The table is the run on the AWS release
-machine on 2026-11-14
-([`bench/results/2026-11-14-aws-m6id.xlarge/robustness.txt`](bench/results/2026-11-14-aws-m6id.xlarge/robustness.txt)).
-Earlier output: the run before in
+machine on 2026-11-17
+([`bench/results/2026-11-17-aws-m6id.xlarge/robustness.txt`](bench/results/2026-11-17-aws-m6id.xlarge/robustness.txt));
+all of it passed the same day on the Google Cloud machine too.
+Earlier output: the runs before in
+[`bench/results/2026-11-14-aws-m6id.xlarge/robustness.txt`](bench/results/2026-11-14-aws-m6id.xlarge/robustness.txt) and
 [`bench/results/2026-11-12-aws-m6id.xlarge/robustness.txt`](bench/results/2026-11-12-aws-m6id.xlarge/robustness.txt),
 0.1.0 on the same machine in
 [`bench/results/2026-11-11-aws-m6id.xlarge/robustness.txt`](bench/results/2026-11-11-aws-m6id.xlarge/robustness.txt),
@@ -322,7 +366,8 @@ and for the encrypted store
 
 Not tested yet: power cuts on real hardware (only simulated), runs longer
 than minutes, and more than one node. Umbrachyx has no replication yet.
-A restart replays the whole log, about 15 µs per commit.
+A restart replays the whole log: 57.5 s after five million writes to
+tables with history, 3.3 s after as many to a plain table.
 
 ## What it is for
 

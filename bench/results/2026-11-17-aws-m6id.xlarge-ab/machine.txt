@@ -1,0 +1,8 @@
+60c65845dfb154600a87a454d2375e32d635fa0b
+20b167357dafec0db0afc559b3892685137be996
+7.0.0-1014-aws
+CPU(s):                                  4
+Model name:                              Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       724Mi        10Gi       2.7Mi       4.0Gi        14Gi
+always [madvise] never

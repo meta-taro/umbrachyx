@@ -1,0 +1,26 @@
+
+running 1 test
+test kill_the_server_during_writes has been running for over 60 seconds
+100 rounds, 1601256 acknowledged SETs, none lost
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 955.90s
+
+
+running 1 test
+test kill_during_writes has been running for over 60 seconds
+1000 rounds, 35889 acknowledged writes, none lost
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 149.13s
+
+
+running 4 tests
+10000 seeds: 130306 restarts, 306962 records acknowledged at the end, 6647 corruptions refused, 198 damaged headers refused, 897 last-record damages cut off
+.test sim::plain_run::tests::ten_thousand_seeds has been running for over 60 seconds
+test sim::sealed_run::tests::ten_thousand_seeds_sealed has been running for over 60 seconds
+test sim::store_run::tests::ten_thousand_seeds has been running for over 60 seconds
+sealed store, 10000 seeds: 406973 commits, 70090 erasures, 120619 restarts, 15961 commits refused for a failed key write, 9563 erasures whose key file was finished later, interrupted erasures kept 1326 and lost 1258, 242612 commits to erased subjects
+.plain tables, 10000 seeds: 432389 groups of puts answered before they were on disk, 346893 writes that waited for it (153594 carried earlier puts), 180718 restarts, 78351 of them lost the last puts (141566 groups in all, never anything else), interrupted writes kept 5679 and lost 8014, 27582 puts refused after a failed write; a replica was sent records 310970 times
+.store, 10000 seeds: 596193 commits (91940 groups), 152028 restarts, interrupted commits kept 5750 and lost 5964, clock went back 21710 times, 38739 branches made, 7279 merges, 8716 merges refused for conflicts, 15901 reverts, 4536 approvals (5977 refused for conflicts), 10530 rejections; a replica was sent records 349409 times, restarted 64088 times and ended with all 459601 records
+.
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 113 filtered out; finished in 110.27s
+

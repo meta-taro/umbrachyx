@@ -1,0 +1,8 @@
+"persistence","test","rps","p50_latency_ms","p99_latency_ms"
+"every commit synced","GET","27306.878248","0.035","0.055"
+"every commit synced","UPDATE","10337.994528","0.091","0.145"
+"every commit synced, 50 clients","GET","67849.417716","0.582","1.434"
+"every commit synced, GET while 50 clients UPDATE","GET","3683.637023","0.215","0.884"
+"every commit synced, 8 clients","UPDATE","32246.258225","0.232","0.393"
+"every commit synced, 64 clients","UPDATE","40739.163230","1.396","3.150"
+"every commit synced, 256 clients","UPDATE","28147.559572","6.906","21.152"

@@ -1440,6 +1440,14 @@ So a table can be declared to keep no history at all.
   less than one and a half times the history's from 64 clients, or less
   than three times when sent 64 at a time (the prototype gave 1.8 and
   4.5), or its simulation or the hijacked-agent tests fail.
+- **Measured on 2026-11-17** on both release machines
+  (`docs/comparison.md`, "Tables that keep no history"): 2.1 times the
+  history's writes from 64 clients and 6.4 times sent 64 at a time on
+  AWS, 1.7 and 5.9 times on Google Cloud; the simulation and the
+  hijacked-agent tests pass. Beside Valkey a plain table is ahead from
+  one and eight clients and 5 to 27% behind from more; a plain-async
+  table is behind Valkey's `everysec` on every row of writes alone, by
+  10 to 46%, and both are ahead of it once reads are mixed in.
 
 ## Retention per column (not built yet)
 
