@@ -139,13 +139,12 @@ $ umbrachyx history agent/support player/42/gems
 ### In a container
 
 The server alone, with its log on a volume. Each version's image is
-`ghcr.io/meta-taro/umbrachyx` (`docker pull
-ghcr.io/meta-taro/umbrachyx:0.2.0`, for amd64 and arm64); or build it
-from a checkout:
+published for amd64 and arm64 (`ghcr.io/meta-taro/umbrachyx:0.2.0`;
+without a version, the newest); `docker build -t umbrachyx .` in a
+checkout builds the same from source.
 
 ```console
-$ docker build -t umbrachyx .
-$ docker run -d --name umbrachyx -p 127.0.0.1:6380:6380 -v umbrachyx-data:/data umbrachyx
+$ docker run -d --name umbrachyx -p 127.0.0.1:6380:6380 -v umbrachyx-data:/data ghcr.io/meta-taro/umbrachyx
 $ valkey-cli -p 6380 set player/42/gems 100
 OK
 $ valkey-cli -p 6380 umbra.history app player/42/gems

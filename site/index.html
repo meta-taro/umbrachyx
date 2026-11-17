@@ -451,14 +451,12 @@
       <section id="start">
         <h2>START</h2>
         <p>
-          The server alone, in Docker, with its log on a volume. Each version's image is
-          <code>ghcr.io/meta-taro/umbrachyx</code> (<code>docker pull ghcr.io/meta-taro/umbrachyx:0.2.0</code>);
-          or build it from a checkout.
+          The server alone, in Docker, with its log on a volume. The image is for amd64 and
+          arm64; what each version holds is on
+          <a href="https://github.com/meta-taro/umbrachyx/releases">the releases page</a>.
         </p>
         <pre>
-$ git clone https://github.com/meta-taro/umbrachyx &amp;&amp; cd umbrachyx
-$ docker build -t umbrachyx .
-$ docker run -d --name umbrachyx -p 127.0.0.1:6380:6380 -v umbrachyx-data:/data umbrachyx
+$ docker run -d --name umbrachyx -p 127.0.0.1:6380:6380 -v umbrachyx-data:/data ghcr.io/meta-taro/umbrachyx
 $ valkey-cli -p 6380 set player/42/gems 100
 OK
 $ valkey-cli -p 6380 umbra.history app player/42/gems

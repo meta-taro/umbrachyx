@@ -432,12 +432,11 @@
         <h2>始め方</h2>
         <p>
           サーバーだけを Docker
-          で立てます。ログはボリュームに置かれます。配布のイメージは版ごとに <code>ghcr.io/meta-taro/umbrachyx</code> に置きます（<code>docker pull ghcr.io/meta-taro/umbrachyx:0.2.0</code>）。取ってきたソースから組み立てることもできます。
+          で立てます。ログはボリュームに置かれます。イメージは amd64 と arm64 用です。版ごとの中身は
+          <a href="https://github.com/meta-taro/umbrachyx/releases">リリースのページ</a>にあります。
         </p>
         <pre>
-$ git clone https://github.com/meta-taro/umbrachyx &amp;&amp; cd umbrachyx
-$ docker build -t umbrachyx .
-$ docker run -d --name umbrachyx -p 127.0.0.1:6380:6380 -v umbrachyx-data:/data umbrachyx
+$ docker run -d --name umbrachyx -p 127.0.0.1:6380:6380 -v umbrachyx-data:/data ghcr.io/meta-taro/umbrachyx
 $ valkey-cli -p 6380 set player/42/gems 100
 OK
 $ valkey-cli -p 6380 umbra.history app player/42/gems
