@@ -146,7 +146,8 @@ $ umbrachyx history agent/support player/42/gems
   store from the copy. Running it again adds what was written since. A
   subject erased since has no key in the backup afterwards; older copies
   of the backup still do, so keep them only as long as an erasure may
-  take. The server has to be stopped for it, for now
+  take. The server has to be stopped for it, for now, and it is not in
+  a released version yet: build from source to try it
   ([`docs/decisions.md`](docs/decisions.md#backup-and-restore)).
 - **`umbrachyx export` prints the whole log as JSON Lines**, one record a
   line, to search with `jq` or `grep`:

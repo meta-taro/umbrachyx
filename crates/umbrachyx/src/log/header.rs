@@ -61,6 +61,14 @@ impl Header {
     }
 }
 
+/// Whether `bytes`, the start of a file, could be the start of a log:
+/// nothing at all, or what a header begins with as far as they go. A
+/// header cut short by a crash still is.
+pub fn is_start(bytes: &[u8]) -> bool {
+    let len = bytes.len().min(MAGIC.len());
+    bytes[..len] == MAGIC[..len]
+}
+
 /// Reads the start of a log file.
 pub fn read(bytes: &[u8]) -> Start {
     let Some(header) = bytes.get(..HEADER_LEN) else {

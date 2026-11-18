@@ -1166,7 +1166,7 @@ copy.
   log.** A backup is a copy of the log's bytes (`log`), the keys the
   store held when its log had `N` records (`keys-N`), and a manifest
   that names `N`, the bytes of `log` those records take, the chain over
-  them and the log's name. The log is copied and synced, the keys are
+  them, the log's name and a hash of the key file. The log is copied and synced, the keys are
   written beside the older ones, the manifest is replaced in one rename,
   and only then is the older key file removed. Stopped at any of these
   steps, the manifest names a log and a key file that are both there:
@@ -1191,10 +1191,22 @@ copy.
 - **Only synced records are copied.** What a `plain-async` table has
   answered and not yet written is not in a backup, as it would not be
   on disk after a power cut.
-- **Restoring writes a new store and checks every record on the way**:
-  the checksums, how many records there are, and the chain against the
-  manifest. It refuses to write where a log or a key file exists, and it
-  never opens the backup itself as a store.
+- **Restoring checks everything before it writes anything**: every
+  record's checksum, how many records there are and their chain against
+  the manifest, and the key file against the hash the manifest holds.
+  It refuses to write where a log or a key file exists. The backup is
+  only read, nothing is made or locked in it, so it can be restored
+  from a copy that cannot be written to, such as a snapshot.
+- **With no record written since, a backup writes nothing.** A key made
+  since has sealed nothing that is in the log yet, and writing the key
+  file again under the name the manifest holds a hash of would leave a
+  backup stopped there with a key file that is not the manifest's.
+- **A backup does not write among other files.** A directory that holds
+  files and no manifest is refused, and a file named `log` there is
+  only started over if it is empty or begins as a log does, which is
+  what a first backup that was stopped leaves.
+- **A manifest of a later layout is refused as that**, not as damage,
+  as a log's header is.
 - **Not while a server has the log open.** The log is locked by the
   process that writes it, so the command needs the server stopped. A
   server that backs itself up, to a place named by whoever starts it and

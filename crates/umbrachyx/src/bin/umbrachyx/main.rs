@@ -18,7 +18,7 @@ use std::time::Duration;
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
 use umbrachyx::log::{Edit, Engine, FileStorage};
 use umbrachyx::server::{DEFAULT_SYNC_EVERY, MAX_CONNECTIONS, Server};
-use umbrachyx::store::backup::{self, DirTarget};
+use umbrachyx::store::backup::{self, DirSource, DirTarget};
 use umbrachyx::store::{
     CommitId, Committer, Conflict, MAIN_BRANCH, Merged, Provenance, Reverted, Store, SystemClock,
     short,
@@ -289,10 +289,7 @@ fn restore(path: &str, args: &Args) -> Result<ExitCode, String> {
             ));
         }
     }
-    if !std::path::Path::new(dir).is_dir() {
-        return Err(format!("{dir}: no such directory"));
-    }
-    let mut target = DirTarget::open(dir.as_ref()).map_err(|e| format!("{dir}: {e}"))?;
+    let mut target = DirSource::new(dir.as_ref());
     let mut log = FileStorage::open(path.as_ref()).map_err(|e| format!("{path}: {e}"))?;
     let mut keys = FileKeyStorage::new(keys_path.as_ref());
     match backup::restore(&mut target, &mut log, Some(&mut keys)) {

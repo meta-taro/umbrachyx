@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
 use umbrachyx::log::{Edit, FileStorage};
-use umbrachyx::store::backup::{BackupError, DirTarget, Target, restore};
+use umbrachyx::store::backup::{BackupError, DirSource, DirTarget, Source, Target, restore};
 use umbrachyx::store::{CommitId, MAIN_BRANCH, Provenance, Store, SystemClock};
 
 type FileStore = Store<FileStorage, SystemClock>;
@@ -62,7 +62,8 @@ impl TempDir {
     fn restore(&self, name: &str) -> Result<u64, BackupError> {
         let mut log = FileStorage::open(&self.log(name)).expect("opens file");
         let mut keys = FileKeyStorage::new(&self.keys(name));
-        restore(&mut self.target(), &mut log, Some(&mut keys)).map(|restored| restored.records)
+        let mut source = DirSource::new(&self.backup_dir());
+        restore(&mut source, &mut log, Some(&mut keys)).map(|restored| restored.records)
     }
 
     fn backup_files(&self) -> Vec<String> {
@@ -243,7 +244,7 @@ fn a_store_without_keys_is_backed_up_without_a_key_file() {
 
     assert_eq!(dir.backup_files(), ["log", "manifest"]);
     let mut log = FileStorage::open(&dir.log("restored")).expect("opens file");
-    restore(&mut dir.target(), &mut log, None).expect("restores");
+    restore(&mut DirSource::new(&dir.backup_dir()), &mut log, None).expect("restores");
     drop(log);
     assert_eq!(
         value(&open("restored"), "player/1/gems"),
@@ -341,6 +342,126 @@ fn a_damaged_backup_is_refused() {
     );
 }
 
+/// Changes one file of the backup and says how restoring it went. Where
+/// the store was to be, nothing may be left.
+fn restored_after(name: &str, file: &str, change: impl FnOnce(&mut Vec<u8>)) -> BackupError {
+    let dir = TempDir::new(name);
+    let mut source = dir.open("source");
+    commit(&mut source, "player/1/gems", "100");
+    commit(&mut source, "player/2/gems", "7");
+    source.backup(&mut dir.target()).expect("backs up");
+    let path = dir.backup_dir().join(file);
+    let mut bytes = std::fs::read(&path).expect("reads");
+    change(&mut bytes);
+    std::fs::write(&path, bytes).expect("writes");
+
+    let refused = dir.restore("restored").expect_err("is refused");
+
+    assert_eq!(std::fs::read(dir.log("restored")).expect("reads"), b"");
+    assert!(!dir.keys("restored").exists());
+    refused
+}
+
+#[test]
+fn a_key_file_that_is_not_the_manifests_is_refused_before_anything_is_written() {
+    let cut = restored_after("keys-cut", "keys-2", |bytes| {
+        bytes.truncate(bytes.len() - 1)
+    });
+    let flipped = restored_after("keys-flipped", "keys-2", |bytes| bytes[40] ^= 1);
+    let emptied = restored_after("keys-emptied", "keys-2", Vec::clear);
+
+    for refused in [cut, flipped, emptied] {
+        assert!(matches!(refused, BackupError::Damaged(_)), "{refused:?}");
+    }
+}
+
+#[test]
+fn a_manifest_that_does_not_check_out_is_refused() {
+    let flipped = restored_after("manifest-flipped", "manifest", |bytes| bytes[30] ^= 1);
+    let cut = restored_after("manifest-cut", "manifest", |bytes| bytes.truncate(50));
+    let later = restored_after("manifest-later", "manifest", |bytes| bytes[8] = 9);
+
+    assert!(matches!(flipped, BackupError::Damaged(_)), "{flipped:?}");
+    assert!(matches!(cut, BackupError::Damaged(_)), "{cut:?}");
+    assert!(
+        matches!(later, BackupError::NewerFormat { version: 9 }),
+        "{later:?}"
+    );
+}
+
+#[test]
+fn restoring_changes_nothing_in_the_backup_and_makes_nothing_where_there_is_none() {
+    let dir = TempDir::new("read-only");
+    let mut source = dir.open("source");
+    commit(&mut source, "player/1/gems", "100");
+    source.backup(&mut dir.target()).expect("backs up");
+    let files = |dir: &TempDir| -> Vec<(String, Vec<u8>)> {
+        dir.backup_files()
+            .into_iter()
+            .map(|name| {
+                let bytes = std::fs::read(dir.backup_dir().join(&name)).expect("reads");
+                (name, bytes)
+            })
+            .collect()
+    };
+    let before = files(&dir);
+    let nowhere = dir.0.join("nowhere");
+
+    dir.restore("restored").expect("restores");
+    let mut log = FileStorage::open(&dir.log("other")).expect("opens file");
+    let refused = restore(&mut DirSource::new(&nowhere), &mut log, None);
+
+    assert_eq!(files(&dir), before);
+    assert!(matches!(refused, Err(BackupError::NoBackup)), "{refused:?}");
+    assert!(!nowhere.exists());
+}
+
+#[test]
+fn a_file_named_log_that_is_not_a_backups_is_not_written_over() {
+    let dir = TempDir::new("their-log");
+    std::fs::create_dir_all(dir.backup_dir()).expect("creates");
+    std::fs::write(dir.backup_dir().join("log"), b"their own notes").expect("writes");
+    let mut source = dir.open("source");
+    commit(&mut source, "player/1/gems", "100");
+
+    let refused = source.backup(&mut dir.target());
+
+    assert!(
+        matches!(refused, Err(BackupError::NotABackup)),
+        "{refused:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.backup_dir().join("log")).expect("reads"),
+        b"their own notes"
+    );
+}
+
+#[test]
+fn a_key_made_since_the_last_backup_with_no_record_yet_changes_nothing_in_it() {
+    let dir = TempDir::new("same-records");
+    let mut source = dir.open("source");
+    commit(&mut source, "player/1/gems", "100");
+    source.backup(&mut dir.target()).expect("backs up");
+    let key_file = std::fs::read(dir.backup_dir().join("keys-1")).expect("reads");
+    drop(source);
+    // A key with nothing sealed under it in the log, as a write that was
+    // stopped before its record leaves one.
+    Keys::open(FileKeyStorage::new(&dir.keys("source")))
+        .expect("opens the key file")
+        .key_for(b"player/2")
+        .expect("makes a key");
+    let mut source = dir.open("source");
+
+    let backup = source.backup(&mut dir.target()).expect("backs up again");
+
+    assert_eq!(backup.added, 0);
+    assert_eq!(
+        std::fs::read(dir.backup_dir().join("keys-1")).expect("reads"),
+        key_file
+    );
+    assert_same(&dir.restored("restored"), &source);
+}
+
 #[test]
 fn a_directory_that_holds_other_files_is_not_taken_for_a_backup() {
     let dir = TempDir::new("foreign");
@@ -370,13 +491,19 @@ impl Stopping {
     }
 }
 
-impl Target for Stopping {
+impl Source for Stopping {
     fn log_len(&mut self) -> io::Result<u64> {
         self.target.log_len()
     }
     fn log_read(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         self.target.log_read(offset, len)
     }
+    fn read(&mut self, name: &str) -> io::Result<Option<Vec<u8>>> {
+        self.target.read(name)
+    }
+}
+
+impl Target for Stopping {
     fn log_truncate(&mut self, len: u64) -> io::Result<()> {
         self.write()?.log_truncate(len)
     }
@@ -385,9 +512,6 @@ impl Target for Stopping {
     }
     fn log_sync(&mut self) -> io::Result<()> {
         self.write()?.log_sync()
-    }
-    fn read(&mut self, name: &str) -> io::Result<Option<Vec<u8>>> {
-        self.target.read(name)
     }
     fn replace(&mut self, name: &str, bytes: &[u8]) -> io::Result<()> {
         self.write()?.replace(name, bytes)
@@ -494,8 +618,7 @@ fn a_copy_of_a_backup_restores_as_the_backup_does() {
 
     let mut log = FileStorage::open(&dir.log("restored")).expect("opens file");
     let mut keys = FileKeyStorage::new(&dir.keys("restored"));
-    let mut target = DirTarget::open(&copy).expect("opens the copy");
-    restore(&mut target, &mut log, Some(&mut keys)).expect("restores");
+    restore(&mut DirSource::new(&copy), &mut log, Some(&mut keys)).expect("restores");
     drop(log);
 
     assert_same(&dir.open("restored"), &source);

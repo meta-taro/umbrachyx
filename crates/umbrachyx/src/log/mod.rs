@@ -15,6 +15,7 @@ use header::{Header, Start};
 
 pub(crate) use header::HEADER_LEN;
 pub use header::LogId;
+pub(crate) use header::is_start as is_start_of_a_log;
 pub use record::{Branch, Commit, Edit, Engine, Erase, MAX_PAYLOAD_LEN, Record, Reject, Table};
 pub(crate) use storage::sync_parent_dir;
 pub use storage::{FileStorage, Storage};

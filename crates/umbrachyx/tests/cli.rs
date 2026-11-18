@@ -504,6 +504,7 @@ fn restore_refuses_to_write_over_a_store_and_leaves_nothing_where_it_fails() {
     assert_eq!(from_nothing.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&from_nothing.stderr).contains("no finished backup"));
     assert!(!dir.0.join("nowhere").exists());
+    assert_eq!(std::fs::read_dir(&empty).expect("lists").count(), 0);
     assert!(!dir.0.join("nowhere.keys").exists());
     // The store that was there reads as before.
     let read = dir.run(&["get", "main", "player/1/gems"]);
