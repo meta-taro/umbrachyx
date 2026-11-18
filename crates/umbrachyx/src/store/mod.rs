@@ -42,6 +42,7 @@ use crate::log::{
 use crate::tree::{Bytes, Tree};
 
 mod approvals;
+pub mod backup;
 mod committer;
 mod export;
 mod inspect;

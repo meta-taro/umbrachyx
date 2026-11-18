@@ -1,7 +1,7 @@
 //! Command-line access to a store: write commits, read values and their
 //! history, branch, diff, merge, undo a commit, erase a subject, declare how
-//! a table is held, write the log out as JSON Lines, and serve a branch over
-//! the Redis protocol. Also makes the root key and the capability tokens
+//! a table is held, write the log out as JSON Lines, back the store up and
+//! restore it, and serve a branch over the Redis protocol. Also makes the root key and the capability tokens
 //! that agents carry.
 //!
 //! The log file is named by `UMBRACHYX_DB`. Values are encrypted under a key
@@ -18,6 +18,7 @@ use std::time::Duration;
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
 use umbrachyx::log::{Edit, Engine, FileStorage};
 use umbrachyx::server::{DEFAULT_SYNC_EVERY, MAX_CONNECTIONS, Server};
+use umbrachyx::store::backup::{self, DirSource, DirTarget};
 use umbrachyx::store::{
     CommitId, Committer, Conflict, MAIN_BRANCH, Merged, Provenance, Reverted, Store, SystemClock,
     short,
@@ -61,6 +62,15 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   export                      every record of the log as a line of JSON, for
                               jq and grep: commits with their changes,
                               branches, tables, rejections and erasures
+  backup <directory>          brings the backup in <directory> up to what the
+                              store holds now: its log and its keys as they
+                              are at one moment. The first run copies
+                              everything, later runs what was written since,
+                              and a subject erased since has no key in the
+                              backup afterwards. Not while a server has the
+                              log open
+  restore <directory>         writes the store the backup in <directory>
+                              holds to $UMBRACHYX_DB, which must not exist yet
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
         [--sync-every MS] [--public-key K [--require-auth]]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
@@ -194,6 +204,9 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         _ => {}
     }
     let path = std::env::var(DB_ENV).unwrap_or_else(|_| DEFAULT_DB.to_owned());
+    if command == "restore" {
+        return restore(&path, &args);
+    }
     // A server syncs for every write, so its log is zeroed ahead of what it
     // writes and a sync has only the record to make durable. Other commands
     // write once and leave; they open the log as it is and give back any
@@ -223,6 +236,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         "erasures" => erasures(&store, &args),
         "table" => table(&mut store, &args),
         "tables" => tables(&store, &args),
+        "backup" => back_up(&mut store, &args),
         "serve" => serve(store, &args),
         "mcp" => tokens::mcp(store, &args),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
@@ -246,6 +260,50 @@ fn export(
     match written {
         Err(error) if error.kind() != ErrorKind::BrokenPipe => Err(error.to_string()),
         _ => Ok(ExitCode::SUCCESS),
+    }
+}
+
+fn back_up(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
+    let [dir] = args.exactly()?;
+    let mut target = DirTarget::open(dir.as_ref()).map_err(|e| format!("{dir}: {e}"))?;
+    let done = store
+        .backup(&mut target)
+        .map_err(|e| format!("{dir}: {e}"))?;
+    println!(
+        "backed up {} records to {dir} ({} new, {} bytes)",
+        done.records, done.added, done.bytes
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Writes the store a backup holds to `path`, where there must be none.
+/// The files this made are removed again if the backup is refused, so a
+/// failed restore leaves no empty store behind.
+fn restore(path: &str, args: &Args) -> Result<ExitCode, String> {
+    let [dir] = args.exactly()?;
+    let keys_path = format!("{path}.keys");
+    for existing in [path, keys_path.as_str()] {
+        if std::path::Path::new(existing).exists() {
+            return Err(format!(
+                "{existing} exists; restore to a place where there is no store"
+            ));
+        }
+    }
+    let mut target = DirSource::new(dir.as_ref());
+    let mut log = FileStorage::open(path.as_ref()).map_err(|e| format!("{path}: {e}"))?;
+    let mut keys = FileKeyStorage::new(keys_path.as_ref());
+    match backup::restore(&mut target, &mut log, Some(&mut keys)) {
+        Ok(restored) => {
+            println!("restored {} records from {dir} to {path}", restored.records);
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(error) => {
+            drop(log);
+            // Whatever is left is ours: neither file was there before.
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(&keys_path);
+            Err(format!("{dir}: {error}"))
+        }
     }
 }
 

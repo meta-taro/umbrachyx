@@ -321,7 +321,7 @@ impl<S: KeyStorage> Keys<S> {
 
     /// Every key in memory as the file's bytes: the header, then the keys
     /// in subject order.
-    fn entries(&self) -> Result<Vec<u8>, KeyError> {
+    pub(crate) fn entries(&self) -> Result<Vec<u8>, KeyError> {
         let mut subjects: Vec<&Vec<u8>> = self.keys.keys().collect();
         subjects.sort();
         let mut bytes = header().to_vec();
