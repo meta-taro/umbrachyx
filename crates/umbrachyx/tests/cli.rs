@@ -436,3 +436,76 @@ fn serve_refuses_a_bind_that_is_not_an_address() {
         "stderr: {stderr}"
     );
 }
+
+fn commit_gems(dir: &TempDir, value: &str) {
+    let key = format!("player/1/gems={value}");
+    let output = dir.run(&["commit", "main", &key, "--who", "seed", "--why", "test"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Runs a command on the store at `db` in the test's directory.
+fn run_on(dir: &TempDir, db: &str, args: &[&str]) -> Output {
+    dir.umbrachyx(args)
+        .env("UMBRACHYX_DB", dir.0.join(db))
+        .output()
+        .expect("runs")
+}
+
+#[test]
+fn backup_and_restore_bring_a_store_back_somewhere_else() {
+    let dir = TempDir::new("backup");
+    let backup = dir.0.join("backup");
+    let backup = backup.to_str().expect("utf-8 path");
+    commit_gems(&dir, "40");
+
+    let first = dir.run(&["backup", backup]);
+    commit_gems(&dir, "55");
+    let second = dir.run(&["backup", backup]);
+    let restored = run_on(&dir, "restored", &["restore", backup]);
+
+    for output in [&first, &second, &restored] {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stderr: {stderr}");
+    }
+    let said = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        said.contains("2 records") && said.contains("1 new"),
+        "{said}"
+    );
+    let read = run_on(&dir, "restored", &["get", "main", "player/1/gems"]);
+    assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), "55");
+    let history = |db: &str| run_on(&dir, db, &["log", "main"]).stdout;
+    assert_eq!(history("restored"), history("log"));
+}
+
+#[test]
+fn restore_refuses_to_write_over_a_store_and_leaves_nothing_where_it_fails() {
+    let dir = TempDir::new("restore-refused");
+    let backup = dir.0.join("backup");
+    let backup = backup.to_str().expect("utf-8 path");
+    commit_gems(&dir, "40");
+    assert!(dir.run(&["backup", backup]).status.success());
+
+    let over = dir.run(&["restore", backup]);
+    let empty = dir.0.join("empty");
+    std::fs::create_dir_all(&empty).expect("creates");
+    let from_nothing = run_on(
+        &dir,
+        "nowhere",
+        &["restore", empty.to_str().expect("utf-8")],
+    );
+
+    assert_eq!(over.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&over.stderr).contains("exists"));
+    assert_eq!(from_nothing.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&from_nothing.stderr).contains("no finished backup"));
+    assert!(!dir.0.join("nowhere").exists());
+    assert!(!dir.0.join("nowhere.keys").exists());
+    // The store that was there reads as before.
+    let read = dir.run(&["get", "main", "player/1/gems"]);
+    assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), "40");
+}

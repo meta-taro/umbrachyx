@@ -109,6 +109,55 @@ fn scan_after_header(bytes: &[u8]) -> Result<record::Scan, LogError> {
     })
 }
 
+/// What a copy of a log's file turned out to hold.
+pub(crate) struct Copied {
+    pub(crate) id: LogId,
+    pub(crate) records: u64,
+    /// The chain over all of them.
+    pub(crate) chain: Chain,
+}
+
+/// Checks `bytes`, a copy of a log's file from its start, and says what
+/// it holds. Every byte must belong: a copy that ends in part of a record
+/// is refused, as damage inside it is.
+pub(crate) fn check_copy(bytes: &[u8]) -> Result<Copied, LogError> {
+    let header = match header::read(bytes) {
+        Start::Header(header) => header,
+        Start::Newer(version) => return Err(LogError::NewerFormat { version }),
+        Start::None => {
+            return Err(LogError::Corrupt {
+                offset: 0,
+                reason: "no log header",
+            });
+        }
+    };
+    if header.first_record != 0 {
+        return Err(LogError::Corrupt {
+            offset: 0,
+            reason: "the file is not the first of its log",
+        });
+    }
+    let scan = scan_after_header(bytes)?;
+    let frames = &bytes[HEADER_LEN..];
+    if scan.valid_len != frames.len() as u64 {
+        return Err(LogError::Corrupt {
+            offset: HEADER_LEN as u64 + scan.valid_len,
+            reason: "a record cut short",
+        });
+    }
+    let mut chain = header.chain_before;
+    let mut start = 0;
+    for &end in &scan.ends {
+        chain = chained(&chain, &frames[start..end as usize]);
+        start = end as usize;
+    }
+    Ok(Copied {
+        id: header.id,
+        records: scan.ends.len() as u64,
+        chain,
+    })
+}
+
 #[derive(Debug)]
 pub struct Log<S: Storage> {
     storage: S,
@@ -305,6 +354,24 @@ impl<S: Storage> Log<S> {
 
     pub fn is_empty(&self) -> bool {
         self.ends.is_empty()
+    }
+
+    /// What the log's file starts with.
+    pub(crate) fn header_bytes(&self) -> [u8; HEADER_LEN] {
+        self.header.encode()
+    }
+
+    /// Where the acknowledged records end in the file, its header
+    /// counted: a copy of the file up to here is a log that holds them
+    /// all and nothing else.
+    pub(crate) fn file_len(&self) -> u64 {
+        self.len
+    }
+
+    /// `len` bytes of the file from `offset` on, read through the
+    /// storage's own handle as the chain is.
+    pub(crate) fn read_file(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.storage.read_at(offset, len)
     }
 
     /// The storage underneath, for the simulation to inject faults into.

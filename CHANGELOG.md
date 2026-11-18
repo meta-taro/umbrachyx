@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Backup and restore.** `umbrachyx backup <directory>` copies the log
+  and the keys as they are at one moment, and adds only what was written
+  since when run again; `umbrachyx restore <directory>` writes a new
+  store from it and checks every record on the way. A backup stopped
+  part way stays what it was before. An erasure reaches a backup with
+  the next one taken. The server has to be stopped while it runs.
+
 ## 0.2.0
 
 The first tagged version: a single node, to try the design on. From this

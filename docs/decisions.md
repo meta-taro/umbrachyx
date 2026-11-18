@@ -1064,9 +1064,12 @@ erases the subject while the history keeps its shape (see
   stay unreadable. A merge conflict on an erased value shows it as
   absent, without saying it was erased.
 - **What erasing does not reach**: copies kept below the file system, such
-  as blocks a solid-state disk has not reused yet, and backups of the key
-  file. Keeping the key file out of backups, or encrypting it under a key
-  held elsewhere, is left to the operator for now.
+  as blocks a solid-state disk has not reused yet, and copies of the key
+  file made before the erasure. `umbrachyx backup` drops an erased key
+  from its backup the next time it runs
+  ([Backup and restore](#backup-and-restore)); older copies of that
+  backup, and copies made any other way, are the operator's to throw
+  away.
 
 ## Approving changes
 
@@ -1144,6 +1147,61 @@ for it is the gate for the first public release, with the speed work.
   returned; a person need not see it.
 - **Not in this version:** reopening a rejected change (an agent offers
   it again on a new branch) and approvals that need two people.
+
+## Backup and restore
+
+A store is two files that only make sense together, its log and its key
+file. `umbrachyx backup <directory>` copies both as they are at one
+moment, and `umbrachyx restore <directory>` writes a new store from the
+copy.
+
+- **The store takes its own backup, between two writes.** Copying the
+  log and then the key file lets a write come between them, and either
+  order breaks: an erasure in between leaves a log that needs a key the
+  copy of the key file no longer has, a new subject in between leaves
+  one that needs a key the copy does not have yet. Either way the copy
+  does not open. Taken by the store, the keys and the number of records
+  are read at the same moment.
+- **A manifest, written last, says which keys go with how much of the
+  log.** A backup is a copy of the log's bytes (`log`), the keys the
+  store held when its log had `N` records (`keys-N`), and a manifest
+  that names `N`, the bytes of `log` those records take, the chain over
+  them and the log's name. The log is copied and synced, the keys are
+  written beside the older ones, the manifest is replaced in one rename,
+  and only then is the older key file removed. Stopped at any of these
+  steps, the manifest names a log and a key file that are both there:
+  the backup is what it was before or what the store is now, never a
+  mix. A test stops a backup after every write it makes in turn and
+  restores each time.
+- **Backing up to the same place again adds what was written since.**
+  A place in the log is a record's number, as it is for a replica, and
+  the chain says whether the backup holds this store's records up to
+  there. A backup of another log, or of a history this store does not
+  have (a store restored from an older backup and written to since), is
+  refused and left as it was.
+- **An erasure reaches a backup with the next one taken.** The new key
+  file has no key for a subject erased since, and the old key file is
+  removed. That is as far as it reaches: a copy made of an older backup
+  (a tape, a snapshot, a bucket that keeps versions) still holds the
+  keys of its day, and restoring it brings back what was erased after
+  it. Copies of a backup have to be thrown away on a schedule for an
+  erasure to be final, and how long they are kept is how long an
+  erasure takes to be. The files that hold keys can only be read by
+  their owner on Unix.
+- **Only synced records are copied.** What a `plain-async` table has
+  answered and not yet written is not in a backup, as it would not be
+  on disk after a power cut.
+- **Restoring writes a new store and checks every record on the way**:
+  the checksums, how many records there are, and the chain against the
+  manifest. It refuses to write where a log or a key file exists, and it
+  never opens the backup itself as a store.
+- **Not while a server has the log open.** The log is locked by the
+  process that writes it, so the command needs the server stopped. A
+  server that backs itself up, to a place named by whoever starts it and
+  never by a client, is to come; so is a simulation that takes the
+  power away during a backup, which today's test does not.
+- **Restoring reads the whole copy of the log into memory**, as opening
+  a store does.
 
 ## Replication (being built)
 

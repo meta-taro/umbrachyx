@@ -85,6 +85,12 @@ impl Sealer {
         }
     }
 
+    /// Every key held now, as a key file's bytes: what a backup keeps
+    /// beside its copy of the log.
+    pub(crate) fn key_file(&self) -> Result<Vec<u8>, KeyError> {
+        self.keys.entries()
+    }
+
     pub(crate) fn ring(&self) -> Ring {
         Arc::clone(&self.ring)
     }

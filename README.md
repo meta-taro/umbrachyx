@@ -141,6 +141,13 @@ $ umbrachyx history agent/support player/42/gems
   and written within a second, as Valkey does with `appendfsync
   everysec`. What each kind of table keeps and gives up is in
   [`docs/decisions.md`](docs/decisions.md#tables-that-keep-no-history-plain-and-plain-async).
+- **`umbrachyx backup <directory>` copies the log and the keys as they
+  are at one moment**, and `umbrachyx restore <directory>` writes a new
+  store from the copy. Running it again adds what was written since. A
+  subject erased since has no key in the backup afterwards; older copies
+  of the backup still do, so keep them only as long as an erasure may
+  take. The server has to be stopped for it, for now
+  ([`docs/decisions.md`](docs/decisions.md#backup-and-restore)).
 - **`umbrachyx export` prints the whole log as JSON Lines**, one record a
   line, to search with `jq` or `grep`:
   `umbrachyx export | jq 'select(.who == "agent:support")'`.
@@ -208,7 +215,7 @@ that is already there before the light arrives.
 > and what it shows still needs work, is in
 > [`docs/comparison.md`](docs/comparison.md). A later version opens the
 > log this one wrote; the key file and the `UMBRA.*` commands may still
-> change. It is one node, with no replication and no backup tool: try
+> change. It is one node, with no replication: try
 > it and measure it, and do not make it the only copy of data you need.
 > The design starts at [`docs/concept.md`](docs/concept.md).
 > What each version added is in [`CHANGELOG.md`](CHANGELOG.md).
