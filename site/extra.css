@@ -47,11 +47,17 @@ tr.behind td:first-child {
    at different distances drifting at different speeds, so the dark has
    depth. Only this product's page: the shared look in style.css follows
    the system. Nothing here needs a script, and nothing moves for a reader
-   who asked for less motion. */
+   who asked for less motion.
+
+   A phone has to keep up with it. Each layer is painted once and then only
+   moved and faded (`transform` and `opacity`), which the browser does
+   without painting again; the stars sway a short way and back rather than
+   scroll their background, the glow of the near ones is part of the
+   gradient rather than a filter, and no panel blurs what is behind it. */
 :root {
   color-scheme: dark;
   --bg: #04050b;
-  --bg-subtle: rgba(16, 17, 30, 0.72);
+  --bg-subtle: rgba(16, 17, 30, 0.86);
   --border: rgba(150, 160, 220, 0.16);
   --border-strong: rgba(160, 170, 230, 0.28);
   --fg: #f4f4f8;
@@ -84,12 +90,25 @@ html::before {
 }
 .stars {
   position: fixed;
-  inset: -10% 0;
+  inset: 0;
   z-index: -2;
+  overflow: hidden;
   pointer-events: none;
-  background-repeat: repeat;
+  will-change: opacity;
 }
-.stars.far {
+/* The stars themselves: wider than the screen by the way they sway. */
+.stars::before {
+  content: '';
+  position: absolute;
+  inset: calc(var(--sway) / -2) calc(var(--sway) * -1) 0 0;
+  background-repeat: repeat;
+  will-change: transform;
+  animation: drift 90s ease-in-out infinite alternate;
+}
+.stars.far { --sway: 120px; animation: twinkle 7s ease-in-out infinite; }
+.stars.mid { --sway: 200px; animation: twinkle 5s ease-in-out -2s infinite; }
+.stars.near { --sway: 320px; animation: twinkle 3.6s ease-in-out -1s infinite; }
+.stars.far::before {
   background-image:
     radial-gradient(1px 1px at 331px 154px, rgba(255,255,255,0.6) 50%, transparent 100%),
     radial-gradient(0.8px 0.8px at 74px 548px, rgba(255,255,255,0.5) 50%, transparent 100%),
@@ -162,9 +181,8 @@ html::before {
     radial-gradient(0.8px 0.8px at 123px 569px, rgba(255,255,255,0.5) 50%, transparent 100%),
     radial-gradient(1px 1px at 530px 543px, rgba(255,255,255,0.35) 50%, transparent 100%);
   background-size: 620px 620px;
-  animation: drift 420s linear infinite, twinkle 7s ease-in-out infinite;
 }
-.stars.mid {
+.stars.mid::before {
   background-image:
     radial-gradient(1.2px 1.2px at 58px 254px, rgba(255,255,255,0.75) 50%, transparent 100%),
     radial-gradient(1.4px 1.4px at 790px 100px, rgba(255,255,255,0.85) 50%, transparent 100%),
@@ -201,36 +219,34 @@ html::before {
     radial-gradient(1.4px 1.4px at 672px 506px, rgba(214,196,255,0.85) 50%, transparent 100%),
     radial-gradient(1.2px 1.2px at 704px 220px, rgba(190,205,255,0.75) 50%, transparent 100%);
   background-size: 860px 860px;
-  animation: drift 260s linear infinite, twinkle 5s ease-in-out -2s infinite;
 }
-.stars.near {
+.stars.near::before {
   background-image:
-    radial-gradient(2.2px 2.2px at 286px 828px, rgba(255,255,255,0.85) 50%, transparent 100%),
-    radial-gradient(2.2px 2.2px at 29px 144px, rgba(255,255,255,0.95) 50%, transparent 100%),
-    radial-gradient(2.2px 2.2px at 113px 173px, rgba(190,205,255,0.95) 50%, transparent 100%),
-    radial-gradient(1.8px 1.8px at 496px 600px, rgba(255,255,255,0.95) 50%, transparent 100%),
-    radial-gradient(2.2px 2.2px at 322px 550px, rgba(255,232,205,0.85) 50%, transparent 100%),
-    radial-gradient(2.2px 2.2px at 745px 673px, rgba(255,255,255,0.85) 50%, transparent 100%),
-    radial-gradient(2.2px 2.2px at 633px 446px, rgba(255,255,255,0.85) 50%, transparent 100%),
-    radial-gradient(1.8px 1.8px at 686px 781px, rgba(255,232,205,0.95) 50%, transparent 100%),
-    radial-gradient(1.8px 1.8px at 1029px 411px, rgba(255,255,255,0.85) 50%, transparent 100%),
-    radial-gradient(1.8px 1.8px at 541px 183px, rgba(190,205,255,0.95) 50%, transparent 100%),
-    radial-gradient(1.8px 1.8px at 85px 806px, rgba(255,232,205,0.95) 50%, transparent 100%),
-    radial-gradient(1.8px 1.8px at 476px 173px, rgba(255,232,205,0.95) 50%, transparent 100%);
+    radial-gradient(6.6px 6.6px at 286px 828px, rgba(255,255,255,0.85) 0, rgba(255,255,255,0.85) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(6.6px 6.6px at 29px 144px, rgba(255,255,255,0.95) 0, rgba(255,255,255,0.95) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(6.6px 6.6px at 113px 173px, rgba(190,205,255,0.95) 0, rgba(190,205,255,0.95) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(5.4px 5.4px at 496px 600px, rgba(255,255,255,0.95) 0, rgba(255,255,255,0.95) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(6.6px 6.6px at 322px 550px, rgba(255,232,205,0.85) 0, rgba(255,232,205,0.85) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(6.6px 6.6px at 745px 673px, rgba(255,255,255,0.85) 0, rgba(255,255,255,0.85) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(6.6px 6.6px at 633px 446px, rgba(255,255,255,0.85) 0, rgba(255,255,255,0.85) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(5.4px 5.4px at 686px 781px, rgba(255,232,205,0.95) 0, rgba(255,232,205,0.95) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(5.4px 5.4px at 1029px 411px, rgba(255,255,255,0.85) 0, rgba(255,255,255,0.85) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(5.4px 5.4px at 541px 183px, rgba(190,205,255,0.95) 0, rgba(190,205,255,0.95) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(5.4px 5.4px at 85px 806px, rgba(255,232,205,0.95) 0, rgba(255,232,205,0.95) 30%, rgba(190,200,255,0.22) 45%, transparent 100%),
+    radial-gradient(5.4px 5.4px at 476px 173px, rgba(255,232,205,0.95) 0, rgba(255,232,205,0.95) 30%, rgba(190,200,255,0.22) 45%, transparent 100%);
   background-size: 1180px 1180px;
-  filter: drop-shadow(0 0 3px rgba(190, 200, 255, 0.7));
-  animation: drift 150s linear infinite, twinkle 3.6s ease-in-out -1s infinite;
 }
 @keyframes drift {
-  from { background-position: 0 0; }
-  to { background-position: -620px 310px; }
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(calc(var(--sway) * -1), calc(var(--sway) / 2), 0); }
 }
 @keyframes twinkle {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .stars { animation: none !important; }
+  .stars,
+  .stars::before { animation: none !important; }
 }
 
 /* The headline: darkness first, then what it keeps. */
@@ -244,13 +260,6 @@ header h1 .quiet {
   color: var(--fg-3);
   font-size: 14.5px;
   margin: -8px 0 28px;
-}
-/* Panels let the stars through a little. */
-.cards > li,
-.card,
-pre {
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
 }
 table {
   background: rgba(8, 9, 18, 0.55);
