@@ -19,6 +19,10 @@
 //!   many bytes of `log` they are, the chain over them, the log's name
 //!   and a hash of the key file.
 //!
+//! A first backup writes a manifest that holds nothing before it copies
+//! anything, so that what a power cut leaves of the copy's first bytes is
+//! known to be a backup's and is started over.
+//!
 //! Backing up to the same place again adds the records written since to
 //! `log`, writes the keys as they are now beside the older ones, replaces
 //! the manifest, and only then removes the older key file. Stopped at any
@@ -254,6 +258,13 @@ impl Manifest {
             .transpose()
     }
 
+    /// Whether a backup has finished here. The manifest written before a
+    /// first backup's copy says where the backup is to be and holds
+    /// nothing, not even the log's header.
+    fn is_started(&self) -> bool {
+        self.log_len != 0
+    }
+
     fn keys_name(&self) -> String {
         format!("{KEYS_PREFIX}{}", self.records)
     }
@@ -284,14 +295,14 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let manifest = Manifest {
             records: self.log.records(),
             log_len: self.log.file_len(),
-            chain: self.chain_now()?,
+            chain: self.chain_at(self.log.records())?,
             id: self.log.id(),
             keys: key_file
                 .as_deref()
                 .map(|bytes| *blake3::hash(bytes).as_bytes()),
         };
         let held = self.start_of_copy(target)?;
-        if held.is_some_and(|held| held.records == manifest.records) {
+        if held.log_len == manifest.log_len {
             // Nothing was written since, and the key file the manifest
             // names stays as it is: a key made since has sealed nothing
             // that is in the log yet.
@@ -302,8 +313,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 bytes: 0,
             });
         }
-        let mut copied = held.map_or(HEADER_LEN as u64, |held| held.log_len);
-        let from = copied;
+        let mut copied = held.log_len;
         while copied < manifest.log_len {
             let len = usize::try_from(manifest.log_len - copied)
                 .unwrap_or(COPY_CHUNK)
@@ -320,13 +330,12 @@ impl<S: Storage, C: Clock> Store<S, C> {
         remove_other_keys(target, &manifest)?;
         Ok(Backup {
             records: manifest.records,
-            added: manifest.records - held.map_or(0, |held| held.records),
-            bytes: copied - from,
+            added: manifest.records - held.records,
+            bytes: copied - held.log_len,
         })
     }
 
-    fn chain_now(&mut self) -> Result<Chain, BackupError> {
-        let records = self.log.records();
+    fn chain_at(&mut self, records: u64) -> Result<Chain, BackupError> {
         self.log
             .chain_at(records)?
             .ok_or(BackupError::Damaged("the log lost records it had"))
@@ -334,19 +343,31 @@ impl<S: Storage, C: Clock> Store<S, C> {
 
     /// Makes the copy of the log at `target` end where its last finished
     /// backup ended, and returns that backup's manifest: what the copy
-    /// holds, to which this store's later records are added. With no
-    /// finished backup there the copy starts over, with the header.
-    fn start_of_copy(&mut self, target: &mut impl Target) -> Result<Option<Manifest>, BackupError> {
-        let Some(held) = Manifest::read(target)? else {
-            // What a first backup left when it was stopped is started
-            // over; anything else named `log` is somebody's.
-            let len = target.log_len()?.min(HEADER_LEN as u64) as usize;
-            if !log::is_start_of_a_log(&target.log_read(0, len)?) {
-                return Err(BackupError::NotABackup);
+    /// holds, to which this store's later records are added.
+    ///
+    /// Where there is no manifest, one that holds nothing is written
+    /// before the copy is touched. From then on the copy is known to be
+    /// a backup's, whatever a power cut leaves of its first bytes; before
+    /// it, a file named `log` that is neither empty nor the start of a
+    /// log is somebody's, and is left alone.
+    fn start_of_copy(&mut self, target: &mut impl Target) -> Result<Manifest, BackupError> {
+        let held = match Manifest::read(target)? {
+            Some(held) => held,
+            None => {
+                let len = target.log_len()?.min(HEADER_LEN as u64) as usize;
+                if !log::is_start_of_a_log(&target.log_read(0, len)?) {
+                    return Err(BackupError::NotABackup);
+                }
+                let nothing = Manifest {
+                    records: 0,
+                    log_len: 0,
+                    chain: self.chain_at(0)?,
+                    id: self.log.id(),
+                    keys: None,
+                };
+                target.replace(MANIFEST, &nothing.encode())?;
+                nothing
             }
-            target.log_truncate(0)?;
-            target.log_append(&self.log.header_bytes())?;
-            return Ok(None);
         };
         if held.id != self.log.id() || self.log.chain_at(held.records)? != Some(held.chain) {
             return Err(BackupError::AnotherLog);
@@ -356,13 +377,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 "the copy of the log is shorter than the manifest says",
             ));
         }
-        if target.log_read(0, HEADER_LEN)? != self.log.header_bytes() {
+        if held.is_started() && target.log_read(0, HEADER_LEN)? != self.log.header_bytes() {
             return Err(BackupError::AnotherLog);
         }
         // Past the manifest's end is what a backup that did not finish
         // left behind.
         target.log_truncate(held.log_len)?;
-        Ok(Some(held))
+        Ok(held)
     }
 }
 
@@ -390,7 +411,9 @@ pub fn restore(
     log: &mut impl Storage,
     keys: Option<&mut dyn KeyStorage>,
 ) -> Result<Restored, BackupError> {
-    let manifest = Manifest::read(target)?.ok_or(BackupError::NoBackup)?;
+    let manifest = Manifest::read(target)?
+        .filter(Manifest::is_started)
+        .ok_or(BackupError::NoBackup)?;
     let len = usize::try_from(manifest.log_len)
         .map_err(|_| BackupError::Damaged("the manifest names more bytes than fit in memory"))?;
     if target.log_len()? < manifest.log_len {

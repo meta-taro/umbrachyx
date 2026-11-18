@@ -1172,7 +1172,9 @@ copy.
   steps, the manifest names a log and a key file that are both there:
   the backup is what it was before or what the store is now, never a
   mix. A test stops a backup after every write it makes in turn and
-  restores each time.
+  restores each time, and a simulation of 10,000 seeds does the same
+  with the power cut or the process killed where the backup is kept,
+  erasures in between, and a restore after every backup.
 - **Backing up to the same place again adds what was written since.**
   A place in the log is a record's number, as it is for a replica, and
   the chain says whether the backup holds this store's records up to
@@ -1202,16 +1204,20 @@ copy.
   file again under the name the manifest holds a hash of would leave a
   backup stopped there with a key file that is not the manifest's.
 - **A backup does not write among other files.** A directory that holds
-  files and no manifest is refused, and a file named `log` there is
-  only started over if it is empty or begins as a log does, which is
-  what a first backup that was stopped leaves.
+  files and no manifest is refused, and so is a file named `log` there
+  that is neither empty nor the start of a log.
+- **A first backup writes a manifest that holds nothing before it
+  copies anything.** The simulation found why: a power cut during the
+  first copy can leave its first bytes as garbage, which then looked
+  like somebody else's file and was refused for good. With the manifest
+  there first, the copy is known to be a backup's and is started over.
+  Restoring such a place says there is no finished backup.
 - **A manifest of a later layout is refused as that**, not as damage,
   as a log's header is.
 - **Not while a server has the log open.** The log is locked by the
   process that writes it, so the command needs the server stopped. A
   server that backs itself up, to a place named by whoever starts it and
-  never by a client, is to come; so is a simulation that takes the
-  power away during a backup, which today's test does not.
+  never by a client, is to come.
 - **Restoring reads the whole copy of the log into memory**, as opening
   a store does.
 
