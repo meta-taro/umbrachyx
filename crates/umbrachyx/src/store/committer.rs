@@ -32,7 +32,9 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
+use std::time::Duration;
 
+use super::backup::{BackupError, Moment, Origin};
 use super::{
     Clock, CommitId, CommitRequest, Inspect, Provenance, Request, Review, Store, StoreError, View,
 };
@@ -45,6 +47,8 @@ type Answer = Result<CommitId, StoreError>;
 type Question<'a> = Box<dyn FnOnce(&dyn Inspect) + 'a>;
 /// Approves or rejects a change.
 type Decision<'a> = Box<dyn FnOnce(&mut dyn Review) + 'a>;
+/// Reads what a backup needs of the store.
+type BackupTurn<'a> = Box<dyn FnOnce(&mut dyn Origin) + 'a>;
 
 struct Job {
     request: Request,
@@ -87,6 +91,9 @@ struct Queue {
     is_taken: bool,
 }
 
+/// How long a backup's turn waits for a writer to take its own first.
+const LET_A_WRITER_GO: Duration = Duration::from_millis(10);
+
 /// The turn to write, held by one thread at a time. Dropping it, also by a
 /// panic, lets the next one take it.
 struct Turn<'a>(&'a Turns);
@@ -110,6 +117,25 @@ impl Turns {
         }
         queue.is_taken = true;
         Turn(self)
+    }
+
+    /// Waits for the turn as [`Turns::take`] does, after letting whoever
+    /// is writing, or about to, have theirs: for work that takes many
+    /// turns in a row and must not keep the writers waiting through all
+    /// of them. A commit queued and never waited for has no writer
+    /// coming, so the wait for one is short.
+    fn take_after_a_writer(&self) -> Turn<'_> {
+        let queue = lock(&self.queue);
+        if queue.is_taken || !queue.jobs.is_empty() {
+            drop(
+                self.ended
+                    .wait_timeout(queue, LET_A_WRITER_GO)
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+        } else {
+            drop(queue);
+        }
+        self.take()
     }
 
     /// The jobs at the front of the queue whose payload fits one record,
@@ -143,6 +169,10 @@ trait Engine: Send + Sync {
     fn inspect(&self, question: Question<'_>) -> bool;
     /// As `inspect`, and publishes the view after it.
     fn review(&self, decision: Decision<'_>) -> bool;
+    /// As `inspect`, for a backup, without writing the queue first: a
+    /// backup holds what was acknowledged, whatever waits. The caller
+    /// holds the turn.
+    fn back_up(&self, turn: BackupTurn<'_>) -> bool;
     /// Whether puts were answered that the log does not hold yet, as of
     /// the last group written.
     fn has_unsynced_puts(&self) -> bool;
@@ -262,6 +292,16 @@ where
                 // An approval moves main; readers see it from here on.
                 self.publish(store);
                 self.note_unsynced(store);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn back_up(&self, turn: BackupTurn<'_>) -> bool {
+        match lock(&self.store).as_mut() {
+            Some(store) => {
+                turn(store);
                 true
             }
             None => false,
@@ -453,6 +493,42 @@ impl Writer {
         self.engine
             .review(Box::new(|store| answer = Some(decision(store))));
         answer.ok_or(StoreError::Stopped)
+    }
+}
+
+impl Writer {
+    /// One turn of a backup: what it reads of the store, between two
+    /// groups of writes.
+    fn back_up<T>(
+        &self,
+        read: impl FnOnce(&mut dyn Origin) -> Result<T, BackupError>,
+    ) -> Result<T, BackupError> {
+        let mut answer = None;
+        let _turn = self.engine.turns().take_after_a_writer();
+        self.engine
+            .back_up(Box::new(|store| answer = Some(read(store))));
+        answer.unwrap_or(Err(BackupError::Stopped))
+    }
+}
+
+/// A store behind a committer is backed up through any of its writers,
+/// while the others write: each turn of the backup waits for the group
+/// being written and holds up the next for as long as it reads.
+impl Origin for Writer {
+    fn records(&mut self) -> Result<u64, BackupError> {
+        self.back_up(|store| store.records())
+    }
+
+    fn catch_up(&mut self) -> Result<bool, BackupError> {
+        self.back_up(|store| store.catch_up())
+    }
+
+    fn moment(&mut self, held_records: u64) -> Result<Moment, BackupError> {
+        self.back_up(|store| store.moment(held_records))
+    }
+
+    fn log_bytes(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, BackupError> {
+        self.back_up(|store| store.log_bytes(offset, len))
     }
 }
 

@@ -1065,8 +1065,8 @@ erases the subject while the history keeps its shape (see
   absent, without saying it was erased.
 - **What erasing does not reach**: copies kept below the file system, such
   as blocks a solid-state disk has not reused yet, and copies of the key
-  file made before the erasure. `umbrachyx backup` drops an erased key
-  from its backup the next time it runs
+  file made before the erasure. A backup drops an erased key with the
+  next backup begun after the erasure
   ([Backup and restore](#backup-and-restore)); older copies of that
   backup, and copies made any other way, are the operator's to throw
   away.
@@ -1152,16 +1152,54 @@ for it is the gate for the first public release, with the speed work.
 
 A store is two files that only make sense together, its log and its key
 file. `umbrachyx backup <directory>` copies both as they are at one
-moment, and `umbrachyx restore <directory>` writes a new store from the
-copy.
+moment, `umbrachyx serve --backup-to <directory>` does the same while
+the server runs, and `umbrachyx restore <directory>` writes a new store
+from the copy.
 
-- **The store takes its own backup, between two writes.** Copying the
+- **The store begins its own backup, between two writes.** Copying the
   log and then the key file lets a write come between them, and either
   order breaks: an erasure in between leaves a log that needs a key the
   copy of the key file no longer has, a new subject in between leaves
   one that needs a key the copy does not have yet. Either way the copy
-  does not open. Taken by the store, the keys and the number of records
+  does not open. Begun by the store, the keys and the number of records
   are read at the same moment.
+- **Only that moment is taken between two writes; the log is copied
+  afterwards, while the store is written to.** Records that were
+  acknowledged are never written again, so the bytes of the log up to
+  the moment can be read a part at a time, with writes in between, and
+  are still the log as it was then. A backup holds the moment it began
+  and nothing written after; the next one adds that. This is what lets
+  a server back itself up without stopping: a write waits for one part
+  to be read (a mebibyte), and never for the place the backup is kept.
+  The chain over the log, which the manifest holds, is worked out the
+  same way, a part at a time and only over what was written since it
+  was last worked out.
+- **A server backs up where and when whoever starts it says**
+  (`serve --backup-to <directory> --backup-every <seconds>`, every 60
+  seconds unless told). No command a client sends takes a backup, names
+  the place or reads it, so nothing that reaches the port can make the
+  server write a file. The place is checked before the server listens,
+  and a place that cannot keep this store's backup stops it from
+  starting. After that a backup that fails does not stop the server,
+  since what clients wrote is in the log all the same: it says so once
+  on standard error, tries again each time, and says when it works
+  again. With nothing written since the last backup, nothing is touched.
+- **A place that held the backup and no longer does is not started
+  over.** When the disk a backup is kept on goes away, the same path is
+  another disk, usually the one the system runs on, and a new backup
+  begun there would fill it. The server says the backup is gone and
+  keeps trying until it is back.
+- **What a running server pays for its backup, measured on a laptop**
+  (Apple M-series, one disk for the log and the backup, where a sync
+  takes 4 ms; `cargo test --release --test server_backup -- --ignored
+  --nocapture`, three runs): the first backup of a 23 MiB log took
+  0.14 s, and of the 27 to 30 `SET`s a client sent one after another
+  meanwhile, half were answered within 4.1 to 4.5 ms and the slowest in
+  8 to 11 ms. With no backup, half were answered within 4.0 ms and the
+  slowest in 5 ms. No turn the backup took of the store was longer than
+  0.5 ms; what the slowest `SET` waited for beyond that was not found.
+  This has not been measured on the release machines, with more than
+  one client, or with the backup on a disk of its own.
 - **A manifest, written last, says which keys go with how much of the
   log.** A backup is a copy of the log's bytes (`log`), the keys the
   store held when its log had `N` records (`keys-N`), and a manifest
@@ -1170,20 +1208,23 @@ copy.
   written beside the older ones, the manifest is replaced in one rename,
   and only then is the older key file removed. Stopped at any of these
   steps, the manifest names a log and a key file that are both there:
-  the backup is what it was before or what the store is now, never a
-  mix. A test stops a backup after every write it makes in turn and
-  restores each time, and a simulation of 10,000 seeds does the same
-  with the power cut or the process killed where the backup is kept,
-  erasures in between, and a restore after every backup.
+  the backup is what it was before or what the store was when this one
+  began, never a mix. A test stops a backup after every write it makes
+  in turn and restores each time, and a simulation of 10,000 seeds does
+  the same with the power cut or the process killed where the backup is
+  kept, commits and erasures between backups and between the turns one
+  backup takes of the store, and a restore after every backup.
 - **Backing up to the same place again adds what was written since.**
   A place in the log is a record's number, as it is for a replica, and
   the chain says whether the backup holds this store's records up to
   there. A backup of another log, or of a history this store does not
   have (a store restored from an older backup and written to since), is
   refused and left as it was.
-- **An erasure reaches a backup with the next one taken.** The new key
-  file has no key for a subject erased since, and the old key file is
-  removed. That is as far as it reaches: a copy made of an older backup
+- **An erasure reaches a backup with the next one begun after it.** The
+  new key file has no key for a subject erased before the backup began,
+  and the old key file is removed. A subject erased while a backup is
+  being copied is still in that backup, which is of the moment before,
+  and leaves with the next. That is as far as it reaches: a copy made of an older backup
   (a tape, a snapshot, a bucket that keeps versions) still holds the
   keys of its day, and restoring it brings back what was erased after
   it. Copies of a backup have to be thrown away on a schedule for an

@@ -173,6 +173,12 @@ pub struct Log<S: Storage> {
     /// as anyone has asked: a log nobody replicates never works it out,
     /// so writing pays nothing for it.
     checkpoints: Vec<Chain>,
+    /// How many records the chain has been worked out over, and the
+    /// chain over them: whoever asks again pays for what was written
+    /// since, not for all that follows the last checkpoint.
+    chained: (u64, Chain),
+    /// The last answer of [`Log::chain_at`], and for how many records.
+    answered: (u64, Chain),
     is_poisoned: bool,
 }
 
@@ -211,6 +217,8 @@ impl<S: Storage> Log<S> {
                 .map(|end| HEADER_LEN as u64 + end)
                 .collect(),
             checkpoints: vec![header.chain_before],
+            chained: (0, header.chain_before),
+            answered: (0, header.chain_before),
             is_poisoned: false,
         };
         Ok((log, scan.records))
@@ -297,16 +305,56 @@ impl<S: Storage> Log<S> {
         if records > self.records() {
             return Ok(None);
         }
-        let kept = (records / CHAIN_EVERY) as usize;
-        while self.checkpoints.len() <= kept {
-            let from = (self.checkpoints.len() as u64 - 1) * CHAIN_EVERY;
-            let last = self.checkpoints[self.checkpoints.len() - 1];
-            let next = self.chain_over(last, from, from + CHAIN_EVERY)?;
-            self.checkpoints.push(next);
+        if records >= self.chained.0 {
+            self.chain_up_to(records)?;
+            self.answered = self.chained;
+            return Ok(Some(self.chained.1));
         }
-        let from = kept as u64 * CHAIN_EVERY;
-        self.chain_over(self.checkpoints[kept], from, records)
-            .map(Some)
+        // From the checkpoint before, or from the last answer if that
+        // is nearer: a backup asks for the chain where the backup
+        // before it ended, which is what it was last told.
+        let kept = (records / CHAIN_EVERY) as usize;
+        let checkpoint = (kept as u64 * CHAIN_EVERY, self.checkpoints[kept]);
+        let (from, chain) = if (checkpoint.0..=records).contains(&self.answered.0) {
+            self.answered
+        } else {
+            checkpoint
+        };
+        self.answered = (records, self.chain_over(chain, from, records)?);
+        Ok(Some(self.answered.1))
+    }
+
+    /// Works out the chain over the next records it has not been worked
+    /// out over, `max_len` bytes of them or one record if that is more,
+    /// and returns whether any are left. [`Log::chain_at`] works out all
+    /// that is missing at once, which for a log written to for a while
+    /// is long; whoever cannot stop the writers that long calls this
+    /// first until it says no.
+    pub(crate) fn chain_step(&mut self, max_len: u64) -> io::Result<bool> {
+        let done = self.chained.0 as usize;
+        if done == self.ends.len() {
+            return Ok(false);
+        }
+        let start = done
+            .checked_sub(1)
+            .map_or(HEADER_LEN as u64, |n| self.ends[n]);
+        let within = self.ends[done..].partition_point(|&end| end - start <= max_len);
+        self.chain_up_to((done + within.max(1)) as u64)?;
+        Ok(self.chained.0 < self.records())
+    }
+
+    /// Carries the chain worked out so far on to the first `until`
+    /// records, keeping it after each `CHAIN_EVERY` on the way.
+    fn chain_up_to(&mut self, until: u64) -> io::Result<()> {
+        while self.chained.0 < until {
+            let (done, chain) = self.chained;
+            let next = ((done / CHAIN_EVERY + 1) * CHAIN_EVERY).min(until);
+            self.chained = (next, self.chain_over(chain, done, next)?);
+            if next.is_multiple_of(CHAIN_EVERY) {
+                self.checkpoints.push(self.chained.1);
+            }
+        }
+        Ok(())
     }
 
     /// `chain`, which covers the first `from` records, carried on over
@@ -502,6 +550,65 @@ mod tests {
             assert_eq!(chain, other.chain_at(records).expect("reads"));
         }
         assert_eq!(one.chain_at(6).expect("reads"), None, "past its end");
+    }
+
+    #[test]
+    fn the_chain_worked_out_a_part_at_a_time_is_the_chain_worked_out_at_once() {
+        let (mut at_once, _) = Log::open(SimStorage::default()).expect("opens");
+        let (mut in_parts, _) = Log::open(SimStorage::default()).expect("opens");
+        let records = CHAIN_EVERY as u32 + 40;
+        for n in 1..=records {
+            at_once.append(&record(n)).expect("appends");
+            in_parts.append(&record(n)).expect("appends");
+        }
+        let frame = in_parts.len() / u64::from(records);
+
+        let mut steps = 1;
+        while in_parts.chain_step(frame * 100).expect("reads") {
+            steps += 1;
+        }
+
+        assert_eq!(steps, records.div_ceil(100));
+        // Each log is asked from the end back, so that the one asked at
+        // once works out all of it in its first answer.
+        for records in [CHAIN_EVERY + 40, CHAIN_EVERY, CHAIN_EVERY - 1, 100, 1, 0] {
+            let chain = at_once.chain_at(records).expect("reads");
+            assert!(chain.is_some());
+            assert_eq!(in_parts.chain_at(records).expect("reads"), chain);
+        }
+        // Asked again where it was last asked, and a little after.
+        for records in [100, 100, 130, 101, CHAIN_EVERY + 3, CHAIN_EVERY + 1] {
+            assert_eq!(
+                in_parts.chain_at(records).expect("reads"),
+                Log::open(at_once.storage.clone())
+                    .expect("opens")
+                    .0
+                    .chain_at(records)
+                    .expect("reads"),
+                "{records}"
+            );
+        }
+        // Past what the steps covered, the chain goes on from there.
+        at_once.append(&record(7)).expect("appends");
+        in_parts.append(&record(7)).expect("appends");
+        let last = CHAIN_EVERY + 41;
+        assert!(!in_parts.chain_step(1).expect("reads"));
+        assert_eq!(
+            in_parts.chain_at(last).expect("reads"),
+            at_once.chain_at(last).expect("reads")
+        );
+    }
+
+    #[test]
+    fn a_step_takes_one_record_however_little_it_may_read() {
+        let (mut log, _) = Log::open(SimStorage::default()).expect("opens");
+        for n in 1..=3 {
+            log.append(&record(n)).expect("appends");
+        }
+
+        let left: Vec<bool> = (0..4).map(|_| log.chain_step(1).expect("reads")).collect();
+
+        assert_eq!(left, [true, true, false, false]);
     }
 
     #[test]

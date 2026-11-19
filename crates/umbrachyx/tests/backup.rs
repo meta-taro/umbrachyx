@@ -6,11 +6,17 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
 use umbrachyx::log::{Edit, FileStorage};
-use umbrachyx::store::backup::{BackupError, DirSource, DirTarget, Source, Target, restore};
-use umbrachyx::store::{CommitId, MAIN_BRANCH, Provenance, Store, SystemClock};
+use umbrachyx::store::backup::{
+    BackupError, DirSource, DirTarget, Moment, Origin, Source, Target, back_up, restore,
+};
+use umbrachyx::store::{CommitId, Committer, MAIN_BRANCH, Provenance, Store, SystemClock};
 
 type FileStore = Store<FileStorage, SystemClock>;
 
@@ -622,4 +628,163 @@ fn a_copy_of_a_backup_restores_as_the_backup_does() {
     drop(log);
 
     assert_same(&dir.open("restored"), &source);
+}
+
+/// A store that is written to between the turns a backup takes of it,
+/// as one behind a server is.
+struct Busy<'a, F: FnMut(&mut FileStore)> {
+    store: &'a mut FileStore,
+    meanwhile: F,
+}
+
+impl<F: FnMut(&mut FileStore)> Origin for Busy<'_, F> {
+    fn records(&mut self) -> Result<u64, BackupError> {
+        self.store.records()
+    }
+
+    /// What is written before the moment is taken is in the backup, as
+    /// anything written before it began: nothing to try here.
+    fn catch_up(&mut self) -> Result<bool, BackupError> {
+        self.store.catch_up()
+    }
+
+    fn moment(&mut self, held_records: u64) -> Result<Moment, BackupError> {
+        let moment = self.store.moment(held_records);
+        (self.meanwhile)(self.store);
+        moment
+    }
+
+    fn log_bytes(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, BackupError> {
+        let bytes = self.store.log_bytes(offset, len);
+        (self.meanwhile)(self.store);
+        bytes
+    }
+}
+
+#[test]
+fn a_backup_holds_the_moment_it_began_whatever_is_written_meanwhile() {
+    let dir = TempDir::new("meanwhile");
+    let mut source = dir.open("source");
+    commit(&mut source, "player/1/gems", "100");
+    commit(&mut source, "player/2/gems", "7");
+    let (head, entries) = (source.head(MAIN_BRANCH), source.entries(MAIN_BRANCH));
+    let mut written = 0;
+    let mut busy = Busy {
+        store: &mut source,
+        meanwhile: |store| {
+            written += 1;
+            commit(store, "player/1/gems", &format!("{}", 100 + written));
+        },
+    };
+
+    let backup = back_up(&mut busy, &mut dir.target()).expect("backs up");
+
+    assert_eq!((backup.records, backup.added), (2, 2));
+    assert!(written >= 2, "the store was written to {written} times");
+    let restored = dir.restored("restored");
+    assert_eq!(restored.head(MAIN_BRANCH), head);
+    assert_eq!(restored.entries(MAIN_BRANCH), entries);
+    assert_eq!(restored.log_records(), 2);
+    // The next backup adds what was written meanwhile.
+    let next = source.backup(&mut dir.target()).expect("backs up again");
+    assert_eq!(next.added, written);
+    assert_same(&dir.restored("later"), &source);
+}
+
+#[test]
+fn a_key_erased_while_a_backup_runs_leaves_with_the_backup_after_it() {
+    let dir = TempDir::new("erased-meanwhile");
+    let mut source = dir.open("source");
+    commit(&mut source, "player/1/gems", "100");
+    commit(&mut source, "player/2/gems", "7");
+    let key_of_player_1 = Keys::open(FileKeyStorage::new(&dir.keys("source")))
+        .expect("opens the key file")
+        .get(b"player/1")
+        .copied()
+        .expect("has a key");
+    let holds_the_key = |dir: &TempDir| {
+        dir.backup_files().iter().any(|name| {
+            std::fs::read(dir.backup_dir().join(name))
+                .expect("reads")
+                .windows(key_of_player_1.len())
+                .any(|w| w == key_of_player_1)
+        })
+    };
+    let mut is_erased = false;
+    let mut busy = Busy {
+        store: &mut source,
+        meanwhile: |store| {
+            if !std::mem::replace(&mut is_erased, true) {
+                store
+                    .erase(b"player/1", by("ops", "asked to be forgotten"))
+                    .expect("erases");
+            }
+        },
+    };
+
+    back_up(&mut busy, &mut dir.target()).expect("backs up");
+
+    // The backup is of the moment before the erasure: it began then.
+    assert!(holds_the_key(&dir));
+    assert_eq!(
+        value(&dir.restored("before"), "player/1/gems"),
+        Some(b"100".to_vec())
+    );
+    source.backup(&mut dir.target()).expect("backs up again");
+    assert!(!holds_the_key(&dir));
+    let restored = dir.restored("after");
+    assert_eq!(value(&restored, "player/1/gems"), None);
+    assert_same(&restored, &source);
+}
+
+#[test]
+fn a_backup_taken_through_the_committer_holds_a_moment_of_what_others_were_writing() {
+    const BACKUPS: usize = 5;
+    let dir = TempDir::new("committer");
+    let mut source = dir.open("source");
+    commit(&mut source, "player/0/gems", "0");
+    let committer = Committer::start(source);
+    let is_done = Arc::new(AtomicBool::new(false));
+    let others = thread::spawn({
+        let (writer, is_done) = (committer.writer(), Arc::clone(&is_done));
+        move || {
+            let mut written = 0;
+            while !is_done.load(Ordering::Acquire) {
+                written += 1;
+                let edit = set(&format!("player/{written}/gems"), "1");
+                writer
+                    .commit(MAIN_BRANCH, vec![edit], by("seed", "test data"))
+                    .expect("commits");
+            }
+            written
+        }
+    });
+    let mut writer = committer.writer();
+
+    let backups: Vec<_> = (0..BACKUPS)
+        .map(|_| {
+            thread::sleep(Duration::from_millis(5));
+            back_up(&mut writer, &mut dir.target()).expect("backs up")
+        })
+        .collect();
+
+    is_done.store(true, Ordering::Release);
+    let written = others.join().expect("the writer ends");
+    let source = committer.stop();
+    let held = backups[BACKUPS - 1].records;
+    assert!(held > 1 && held <= written + 1, "{held} of {written}");
+    assert!(
+        backups
+            .windows(2)
+            .all(|pair| pair[0].records <= pair[1].records)
+    );
+    // The commits were written one after another, so a moment of the
+    // store is the first so many of them.
+    let restored = dir.restored("restored");
+    let ids = |store: &FileStore| -> Vec<_> {
+        store.log(MAIN_BRANCH).iter().map(|info| info.id).collect()
+    };
+    assert_eq!(restored.log_records(), held);
+    assert_eq!(ids(&restored).len() as u64, held);
+    assert!(ids(&source).ends_with(&ids(&restored)));
 }
