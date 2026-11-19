@@ -109,9 +109,10 @@ without an entry here is not adopted.
     the file is not opened either way.
   - **The name is not used for anything yet.** It is there so that a
     copy of a log (a backup, a replica) can be told from another log
-    that happens to hold as many records. A replica makes its own name
-    for now; taking its primary's comes with the connection between
-    them.
+    that happens to hold as many records. A replica has its primary's
+    name, because it starts as a restored backup of it, and a primary
+    sends nothing to a store whose log is named otherwise (see
+    Replication).
   - **Logs written before this are not opened**, and nothing converts
     them: no version had been released.
 - **A record is a commit, a new branch, or a group of commits.** A commit
@@ -1264,9 +1265,7 @@ from the copy.
 
 ## Replication (being built)
 
-One store that writes, and others that follow it and answer reads. So
-far the parts that need no network exist; nothing sends bytes between
-machines yet, and nothing here changes what a single server does.
+One store that writes, and others that follow it and answer reads.
 
 - **A replica is fed the primary's log and nothing else.** A commit's id
   is a hash of what the log holds of it, so a store that applies the same
@@ -1293,6 +1292,45 @@ machines yet, and nothing here changes what a single server does.
   chain is worked out when asked for, from checkpoints every 1,024
   records, so a store nobody follows pays nothing: hashing on every
   append cost a one-key commit about 0.3 µs of its 3.7.
+- **The replica asks; nothing is pushed.** It says which log it holds,
+  how many records, and the chain over them, and is answered with the
+  records after those or with why none are sent (`store::follow`). A
+  primary keeps no list of replicas and owes a slow one nothing. An ask
+  is also the news that everything before it is on the replica's disk,
+  which is what acknowledging a write only once a replica has it will be
+  built on. Pushing would save a round trip per batch; it is not built
+  until a measurement shows the round trip matters.
+- **A replica starts as a restored backup of its primary.** That gives
+  it the log's name and the keys in one step that already exists. With
+  no records the chain says nothing, so the name is the only thing that
+  tells an empty replica from a store that has nothing to do with this
+  primary; a primary asked by a log of another name sends nothing.
+- **What does not fit is refused, and the replica stops asking.** A
+  primary that holds fewer records than the replica, or other records
+  under the same name (one of the two was written to apart from the
+  other), sends nothing. Neither mends itself, so the replica does not
+  try again; it keeps what it has.
+- **An answer is taken in only if it starts where the replica's log
+  ends.** The answer says which ask it answers. One that arrives twice,
+  or after a later one, is left.
+- **A store that follows takes no writes of its own.** The refusal is
+  in the committer, behind every way in, not in the server's list of
+  commands: commits, puts and decisions sent to a following store are
+  answered with an error, whoever sends them
+  (`Committer::start_following`). One record written apart from the
+  primary and the replica can be sent nothing more.
+- **What a replica is sent in one answer is written with one sync.**
+  Syncing each record would hold a replica to one disk sync per record
+  while its primary writes many with each.
+- **Answering a replica takes turns between writes**, as a backup does:
+  the chain is worked out a megabyte a turn, an answer is at most a
+  megabyte, and each turn first lets a waiting writer go.
+- **The network is in the simulation.** Between the simulated replica
+  and its primary, answers are lost, arrive late in place of another,
+  are cut short and have bits flipped, while both stores crash and lose
+  power. A real connection checks its bytes and keeps their order; a
+  replica that is right whatever arrives is right on any connection,
+  and after one is made again.
 - **Records are read through the store's own file handle.** The log file
   is locked, and on Windows no other handle can read it.
 - **An erasure reaches the replica as a record and destroys its copy of
@@ -1307,8 +1345,9 @@ machines yet, and nothing here changes what a single server does.
   then. Sending new keys with the log needs the connection encrypted;
   until it is, replication is for measurements and trials, not for data
   that must stay secret on the network.
-- **To come:** the connection, a replica's server that refuses writes
-  and decisions with `READONLY`, and measurements with one
+- **To come:** the connection, a replica's server that answers writes
+  and decisions with `READONLY`, acknowledging a write only once a
+  replica holds it, and measurements with one
   writer and several readers next to Valkey and PostgreSQL set up the
   same way.
 
