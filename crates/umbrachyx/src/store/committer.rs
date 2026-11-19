@@ -70,6 +70,10 @@ trait Engine: Send + Sync {
     fn write_queue(&self);
     /// Whether the store was there to ask. The caller holds the turn.
     fn inspect(&self, question: Question<'_>) -> bool;
+    /// As `inspect`, without writing the queue first and without the
+    /// turn: for a question asked while whoever has the turn waits for a
+    /// replica.
+    fn look(&self, question: Question<'_>) -> bool;
     /// As `inspect`, and publishes the view after it. Refused, the
     /// decision not carried out, if the store was not there or no
     /// replica keeps up; an error after it was carried out if no replica
@@ -255,6 +259,10 @@ where
 
     fn inspect(&self, question: Question<'_>) -> bool {
         self.write_queue();
+        self.look(question)
+    }
+
+    fn look(&self, question: Question<'_>) -> bool {
         match lock(&self.store).as_ref() {
             Some(store) => {
                 question(store);
@@ -547,11 +555,19 @@ impl Writer {
     /// are written. It waits behind their sync, so it suits a person
     /// reading the history, not a hot path; reads of live values go
     /// through a [`Reader`].
+    ///
+    /// One case differs, in a store that answers a write only once a
+    /// replica holds it. While a write waits for a replica, the question
+    /// is answered from what is written by then, that write included,
+    /// and commits queued behind it are not waited for: a replica that
+    /// has gone would hold every question as long as it holds the write.
     pub fn ask<T>(&self, question: impl FnOnce(&dyn Inspect) -> T) -> Result<T, StoreError> {
         let mut answer = None;
-        let _turn = self.engine.turns().take();
-        self.engine
-            .inspect(Box::new(|store| answer = Some(question(store))));
+        let question: Question<'_> = Box::new(|store| answer = Some(question(store)));
+        match self.engine.turns().take_to_read() {
+            Some(_turn) => self.engine.inspect(question),
+            None => self.engine.look(question),
+        };
         answer.ok_or(StoreError::Stopped)
     }
 

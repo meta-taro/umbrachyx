@@ -1409,11 +1409,14 @@ One store that writes, and others that follow it and answer reads.
   they are answered before they are on this server's own disk; while
   writes are refused for want of a replica, they are refused with the
   rest. Reads see a write before a replica holds it. A question about
-  the history or a decision takes the writers' turn, so one asked while
-  a write waits for a replica waits with it: a round trip to the
-  replica as a rule, and once, for as long as the limit, when the
-  replica has gone; the thread that serves it serves no other client
-  meanwhile. After a restart the primary
+  the history asked while a write waits for a replica is answered from
+  what is written by then, that write included, and does not wait with
+  it: the threads that serve clients answer such questions, and a
+  replica that had gone would hold them, and every client they serve,
+  for as long as the limit. Commits queued behind the waiting write are
+  not written first, as they otherwise are before a question; a client
+  still reads what it wrote, because a server answers its commands in
+  order. A decision is a write and waits its turn. After a restart the primary
   counts nothing as held until a replica asks again.
 - **What waiting costs is not measured on two machines.** With both
   servers on one laptop and one disk (sync 4 ms), a `SET` from one

@@ -361,3 +361,36 @@ fn a_put_answered_before_it_is_on_disk_does_not_wait_for_a_replica() {
 
     assert!(start.elapsed() < LONG / 2, "{:?}", start.elapsed());
 }
+
+#[test]
+fn a_question_is_answered_while_a_write_waits_for_a_replica() {
+    let dir = TempDir::new("question");
+    // No replica asks until the question has been answered.
+    let (primary, replica) = pair(&dir, LONG);
+    let writer = primary.writer();
+    let before = writer.held_records();
+    let waiting = {
+        let writer = primary.writer();
+        thread::spawn(move || write(&writer, "150"))
+    };
+    let start = std::time::Instant::now();
+    while writer.held_records() == before {
+        assert!(start.elapsed() < LONG, "the write was never written");
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let start = std::time::Instant::now();
+    let head = writer
+        .ask(|store| store.head(MAIN_BRANCH))
+        .expect("answers");
+
+    assert!(
+        start.elapsed() < LONG / 4,
+        "the question waited {:?} with the write",
+        start.elapsed()
+    );
+    let _following = Following::start(&primary, &replica);
+    let written = waiting.join().expect("the writer ends").expect("commits");
+    // The write is in the log and readers see it, so the question does.
+    assert_eq!(head, Some(written));
+}

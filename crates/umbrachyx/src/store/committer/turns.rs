@@ -114,6 +114,15 @@ impl Turns {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
+        drop(queue);
+        self.take_to_read()
+    }
+
+    /// Waits for the turn as [`Turns::take`] does, to read the store.
+    /// `None` if whoever has the turn waits for a replica: what it wrote
+    /// is in the store, and reading does not wait with it.
+    pub(super) fn take_to_read(&self) -> Option<Turn<'_>> {
+        let mut queue = lock(&self.queue);
         loop {
             if queue.is_lent {
                 return None;
@@ -129,7 +138,8 @@ impl Turns {
         }
     }
 
-    /// Lets replicas be answered while whoever has the turn runs `wait`.
+    /// Lets replicas be answered, and the store be read, while whoever
+    /// has the turn runs `wait`.
     pub(super) fn lend_while<T>(&self, wait: impl FnOnce() -> T) -> T {
         lock(&self.queue).is_lent = true;
         self.ended.notify_all();
