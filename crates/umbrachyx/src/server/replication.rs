@@ -24,7 +24,15 @@
 //! not when it next asks. When no answer comes it
 //! says so once and keeps asking; when the primary refuses it, or it
 //! cannot take in what it was sent, it says why and stops asking, and
-//! goes on answering reads. `UMBRA.REPLICATION` says which of these it
+//! goes on answering reads.
+//!
+//! A server may be started to answer a write only once a replica holds
+//! it (see `store::replicas`). A write no replica held in time is
+//! answered `NOTREPLICATED`: it is in this server's log. Writes after it
+//! are answered `NOREPLICA` and not written, until a replica holds
+//! everything.
+//!
+//! `UMBRA.REPLICATION` says which of these it
 //! is, and how far behind, to any client; it does not say where the
 //! primary is, which is whoever started the server's to know.
 
@@ -95,13 +103,14 @@ fn lock(shared: &Shared) -> std::sync::MutexGuard<'_, Following> {
 /// The reply to a replication command a client may send, or `None` if
 /// `name` is none.
 pub(super) fn reply(
+    writer: &Writer,
     feeds: bool,
     following: Option<&Shared>,
     name: &str,
     args: &[Vec<u8>],
 ) -> Option<Reply> {
     match name {
-        REPLICATION if args.is_empty() => Some(status(feeds, following)),
+        REPLICATION if args.is_empty() => Some(status(writer, feeds, following)),
         REPLICATION => Some(Reply::Error(format!(
             "ERR wrong number of arguments for '{}' command",
             REPLICATION.to_ascii_lowercase()
@@ -202,9 +211,22 @@ fn held_answer(writer: &mut Writer, ask: &Ask) -> Result<Result<Sent, Refusal>, 
     Ok(first)
 }
 
-fn status(feeds: bool, following: Option<&Shared>) -> Reply {
+fn status(writer: &Writer, feeds: bool, following: Option<&Shared>) -> Reply {
     let status = match following {
-        None => json!({ "role": "primary", "feeds_replicas": feeds }),
+        None => {
+            // For a server that answers a write only once a replica
+            // holds it: how many records one has said it holds, and
+            // whether writes are refused because none keeps up.
+            let replicas = writer.replicas();
+            json!({
+                "role": "primary",
+                "feeds_replicas": feeds,
+                "waits_for_a_replica": replicas.is_some(),
+                "records": writer.held_records(),
+                "replica_records": replicas.map(|(held, _)| held),
+                "refuses_writes": replicas.map(|(_, is_behind)| is_behind),
+            })
+        }
         Some(shared) => {
             let following = lock(shared);
             json!({

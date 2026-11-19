@@ -715,3 +715,57 @@ fn serve_refuses_to_follow_what_is_not_a_host_and_a_port() {
     let said = String::from_utf8_lossy(&refused.stderr);
     assert!(said.contains("is not a host and a port"), "{said}");
 }
+
+#[test]
+fn serve_that_waits_for_a_replica_says_which_writes_no_replica_holds() {
+    let dir = TempDir::new("serve-wait");
+    let feed_port = free_port().to_string();
+    let options = [
+        "--feed-replicas-on",
+        &feed_port,
+        "--wait-for-replica",
+        "0.05",
+    ];
+    let (_primary, said, port) = serve_on_a_free_port(&dir, &options);
+    let mut primary = connect(port);
+
+    // No replica ever asks.
+    let only_here = first_line(&mut primary, &["SET", "player/1/gems", "55"]);
+    let not_written = first_line(&mut primary, &["SET", "player/1/gems", "70"]);
+
+    assert!(
+        said.contains("answering a write only once a replica holds it, waiting 0.05 s at most"),
+        "{said}"
+    );
+    assert!(only_here.starts_with("-NOTREPLICATED "), "{only_here}");
+    assert!(not_written.starts_with("-NOREPLICA "), "{not_written}");
+    assert_eq!(first_line(&mut primary, &["GET", "player/1/gems"]), "55");
+    let status = first_line(&mut primary, &["UMBRA.REPLICATION"]);
+    assert!(status.contains("\"refuses_writes\":true"), "{status}");
+    assert!(status.contains("\"replica_records\":0"), "{status}");
+}
+
+#[test]
+fn serve_refuses_to_wait_for_replicas_it_has_no_port_for() {
+    let dir = TempDir::new("serve-wait-refused");
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+
+    let no_port = dir.run(&["serve", BRANCH, "--wait-for-replica", "5"]);
+    let not_a_time = dir.run(&[
+        "serve",
+        BRANCH,
+        "--feed-replicas-on",
+        "1",
+        "--wait-for-replica",
+        "soon",
+    ]);
+
+    let said = String::from_utf8_lossy(&no_port.stderr);
+    assert!(said.contains("needs --feed-replicas-on"), "{said}");
+    let said = String::from_utf8_lossy(&not_a_time.stderr);
+    assert!(said.contains("is not a number of seconds"), "{said}");
+}

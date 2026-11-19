@@ -51,6 +51,7 @@ mod latest;
 mod merge;
 mod plain;
 mod replica;
+mod replicas;
 mod seal;
 mod tables;
 mod unsynced;
@@ -257,6 +258,12 @@ pub enum StoreError {
     /// The store writes for itself, so it takes in no other store's
     /// records.
     NotFollowing,
+    /// The store answers a write only once a replica holds it, and no
+    /// replica is keeping up. Nothing was written.
+    NoReplica,
+    /// The write is in this store's log, and no replica said it holds
+    /// it within the time the store waits.
+    NotReplicated,
     Keys(KeyError),
     /// The log has values sealed under this many keys the key file does
     /// not hold. Nothing was written.
@@ -340,6 +347,16 @@ impl fmt::Display for StoreError {
             Self::ReadOnly => write!(
                 f,
                 "this store follows another and takes no writes of its own; nothing was written"
+            ),
+            Self::NoReplica => write!(
+                f,
+                "no replica holds what this server has written, and it answers a write only \
+                 once one does; nothing was written"
+            ),
+            Self::NotReplicated => write!(
+                f,
+                "written on this server, but no replica said it holds it in time: it is here \
+                 and will be sent on, and would be lost with this server until then"
             ),
             Self::NotFollowing => write!(
                 f,
