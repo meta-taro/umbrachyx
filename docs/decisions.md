@@ -1191,14 +1191,15 @@ from the copy.
   keeps trying until it is back.
 - **What a running server pays for its backup, measured on a laptop**
   (Apple M-series, one disk for the log and the backup, where a sync
-  takes 4 ms; `cargo test --release --test server_backup -- --nocapture`,
-  three runs): during the first backup of a 23 MiB log, half of a
-  client's `SET`s were answered within 4.1 ms, as within 4.0 ms with no
-  backup, and no turn the backup took of the store was longer than
-  0.5 ms. The slowest `SET` took 19 to 23 ms against 4 to 11 ms: it was
-  sent while the backup synced its copy, on the same disk as the log.
-  This has not been measured on the release machines or with the backup
-  on a disk of its own.
+  takes 4 ms; `cargo test --release --test server_backup -- --ignored
+  --nocapture`, three runs): the first backup of a 23 MiB log took
+  0.14 s, and of the 27 to 30 `SET`s a client sent one after another
+  meanwhile, half were answered within 4.1 to 4.5 ms and the slowest in
+  8 to 11 ms. With no backup, half were answered within 4.0 ms and the
+  slowest in 5 ms. No turn the backup took of the store was longer than
+  0.5 ms; what the slowest `SET` waited for beyond that was not found.
+  This has not been measured on the release machines, with more than
+  one client, or with the backup on a disk of its own.
 - **A manifest, written last, says which keys go with how much of the
   log.** A backup is a copy of the log's bytes (`log`), the keys the
   store held when its log had `N` records (`keys-N`), and a manifest
