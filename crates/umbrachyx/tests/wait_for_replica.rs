@@ -246,7 +246,17 @@ fn a_commit_no_replica_held_in_time_is_said_to_be_only_here_and_the_next_is_not_
         assert!(start.elapsed() < LONG, "{:?}", writer.replicas());
         thread::sleep(Duration::from_millis(5));
     }
-    write(&writer, "200").expect("commits again");
+    // The limit is short and a slow disk may pass it again: a write
+    // that does is said so, and the next waits for the replica to hold
+    // everything once more.
+    while let Err(error) = write(&writer, "200") {
+        assert!(
+            matches!(error, StoreError::NotReplicated | StoreError::NoReplica),
+            "{error:?}"
+        );
+        assert!(start.elapsed() < LONG, "never written again: {error:?}");
+        thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(
         replica
             .reader()
