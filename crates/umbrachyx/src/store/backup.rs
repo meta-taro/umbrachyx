@@ -6,8 +6,14 @@
 //! lacks does not open, and a key file that still holds a key the log
 //! says was destroyed has not forgotten what it was told to. Copying one
 //! and then the other lets a write come between them. So a backup is
-//! taken by the store itself, between two writes, and says in a third
-//! file which copy of the keys goes with how much of the log.
+//! begun by the store itself, between two writes: there it says how much
+//! of the log there is and gives every key it holds, and a third file
+//! says which copy of the keys goes with how much of the log. The bytes
+//! of the log up to there are copied afterwards, a part at a time, and
+//! the store may be written to meanwhile: records that were acknowledged
+//! are not written again. So a store behind a server is backed up while
+//! it serves, and its writers wait for a part to be read, never for the
+//! place the backup is kept.
 //!
 //! A backup is three kinds of file:
 //!
@@ -28,9 +34,10 @@
 //! the manifest, and only then removes the older key file. Stopped at any
 //! of these steps, the manifest still names a log and a key file that are
 //! both there and go together: the backup is what it was before, or what
-//! the store is now, never a mix. A subject erased since the last backup
-//! has no key in the new key file, and the old one is removed, so an
-//! erasure reaches a backup with the next one taken.
+//! the store was when this one began, never a mix. A subject erased
+//! before a backup begins has no key in its key file, and the old one is
+//! removed, so an erasure reaches a backup with the next one begun after
+//! it.
 //!
 //! That is as far as it reaches. A copy made of an older backup still
 //! holds the keys of its day, and restoring it brings back what was
@@ -43,19 +50,23 @@
 //! write to, and it refuses to write over a store.
 
 use std::fmt;
-use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::io;
 
 use super::{Clock, Store};
 use crate::keys::{KeyError, KeyStorage};
-use crate::log::{self, Chain, HEADER_LEN, LogError, LogId, Storage, sync_parent_dir};
+use crate::log::{self, Chain, HEADER_LEN, LogError, LogId, Storage};
+
+mod dir;
+
+pub use dir::{DirSource, DirTarget};
 
 const MANIFEST: &str = "manifest";
 const KEYS_PREFIX: &str = "keys-";
 const LOG: &str = "log";
 
-/// The log is copied this many bytes at a time.
+/// The log is copied this many bytes at a time, and its chain worked
+/// out over as many: what a store's writers wait for at most, when a
+/// backup is taken of it as they write.
 const COPY_CHUNK: usize = 1024 * 1024;
 
 /// A backup to read: all that restoring needs of it.
@@ -111,6 +122,8 @@ pub enum BackupError {
     NotEmpty,
     /// The backup has keys and nowhere was given to put them.
     NeedsKeys,
+    /// The store was stopped while it was being backed up.
+    Stopped,
 }
 
 impl fmt::Display for BackupError {
@@ -135,6 +148,7 @@ impl fmt::Display for BackupError {
             ),
             Self::NotEmpty => write!(f, "there is a store here already; restore to a new place"),
             Self::NeedsKeys => write!(f, "the backup has keys and nowhere to put them was given"),
+            Self::Stopped => write!(f, "the store was stopped during the backup"),
         }
     }
 }
@@ -278,113 +292,217 @@ fn word<const N: usize>(bytes: &[u8]) -> [u8; N] {
     word
 }
 
-impl<S: Storage, C: Clock> Store<S, C> {
-    /// Brings the backup at `target` up to what this store holds now: the
-    /// records its log has synced, and the keys as they are. Nothing can
-    /// be written to the store meanwhile, which is what makes the two go
-    /// together.
-    ///
-    /// A backup of another log, or of a history this store does not
-    /// have, is refused and left as it was. Stopped part way, the backup
-    /// stays what it was before, and running this again finishes it.
-    pub fn backup(&mut self, target: &mut impl Target) -> Result<Backup, BackupError> {
+/// The store a backup is taken of, asked in turns: once for the moment
+/// the backup is to hold, then for the bytes of its log up to that
+/// moment, a part at a time. The store may be written to between the
+/// turns, so a server's writers wait for a turn each and never for the
+/// place the backup is kept: the bytes a moment names are records that
+/// were acknowledged, and those are not written again.
+pub trait Origin {
+    /// How many records the log holds now.
+    fn records(&mut self) -> Result<u64, BackupError>;
+    /// Works out a part of the chain over the log, which a moment says
+    /// whole, and returns whether more is left. Asked until it says no,
+    /// so that the turn that takes the moment works out the chain over
+    /// what was written since, not over all the log holds.
+    fn catch_up(&mut self) -> Result<bool, BackupError>;
+    /// What the store holds now, and what its log says of the first
+    /// `held_records` records, which a backup taken before holds.
+    fn moment(&mut self, held_records: u64) -> Result<Moment, BackupError>;
+    /// `len` bytes of the log's file from `offset` on, all within a
+    /// moment given before.
+    fn log_bytes(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, BackupError>;
+}
+
+/// A store at one moment, as far as a backup needs it: how much of the
+/// log there was and every key held then, taken together between two
+/// writes.
+pub struct Moment {
+    /// The manifest of a backup that holds this moment.
+    now: Manifest,
+    key_file: Option<Vec<u8>>,
+    /// The chain over the records an earlier backup holds, or `None` if
+    /// the log holds fewer than that.
+    held_chain: Option<Chain>,
+    header: [u8; HEADER_LEN],
+}
+
+impl fmt::Debug for Moment {
+    /// Without the keys.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Moment")
+            .field("records", &self.now.records)
+            .field("log_len", &self.now.log_len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: Storage, C: Clock> Origin for Store<S, C> {
+    fn records(&mut self) -> Result<u64, BackupError> {
+        Ok(self.log.records())
+    }
+
+    fn catch_up(&mut self) -> Result<bool, BackupError> {
+        Ok(self.log.chain_step(COPY_CHUNK as u64)?)
+    }
+
+    fn moment(&mut self, held_records: u64) -> Result<Moment, BackupError> {
         let key_file = match &self.sealer {
             Some(sealer) => Some(sealer.key_file()?),
             None => None,
         };
-        let manifest = Manifest {
-            records: self.log.records(),
-            log_len: self.log.file_len(),
-            chain: self.chain_at(self.log.records())?,
-            id: self.log.id(),
-            keys: key_file
-                .as_deref()
-                .map(|bytes| *blake3::hash(bytes).as_bytes()),
-        };
-        let held = self.start_of_copy(target)?;
-        if held.log_len == manifest.log_len {
-            // Nothing was written since, and the key file the manifest
-            // names stays as it is: a key made since has sealed nothing
-            // that is in the log yet.
-            remove_other_keys(target, &manifest)?;
-            return Ok(Backup {
-                records: manifest.records,
-                added: 0,
-                bytes: 0,
-            });
-        }
-        let mut copied = held.log_len;
-        while copied < manifest.log_len {
-            let len = usize::try_from(manifest.log_len - copied)
-                .unwrap_or(COPY_CHUNK)
-                .min(COPY_CHUNK);
-            let bytes = self.log.read_file(copied, len)?;
-            target.log_append(&bytes)?;
-            copied += bytes.len() as u64;
-        }
-        target.log_sync()?;
-        if let Some(bytes) = &key_file {
-            target.replace(&manifest.keys_name(), bytes)?;
-        }
-        target.replace(MANIFEST, &manifest.encode())?;
-        remove_other_keys(target, &manifest)?;
-        Ok(Backup {
-            records: manifest.records,
-            added: manifest.records - held.records,
-            bytes: copied - held.log_len,
+        let records = self.log.records();
+        // Asked in this order, each is a little past what the log was
+        // last asked: where the backup before ended, then now.
+        let held_chain = self.log.chain_at(held_records)?;
+        let chain = self
+            .log
+            .chain_at(records)?
+            .ok_or(BackupError::Damaged("the log lost records it had"))?;
+        Ok(Moment {
+            now: Manifest {
+                records,
+                log_len: self.log.file_len(),
+                chain,
+                id: self.log.id(),
+                keys: key_file
+                    .as_deref()
+                    .map(|bytes| *blake3::hash(bytes).as_bytes()),
+            },
+            key_file,
+            held_chain,
+            header: self.log.header_bytes(),
         })
     }
 
-    fn chain_at(&mut self, records: u64) -> Result<Chain, BackupError> {
-        self.log
-            .chain_at(records)?
-            .ok_or(BackupError::Damaged("the log lost records it had"))
+    fn log_bytes(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, BackupError> {
+        Ok(self.log.read_file(offset, len)?)
     }
+}
 
-    /// Makes the copy of the log at `target` end where its last finished
-    /// backup ended, and returns that backup's manifest: what the copy
-    /// holds, to which this store's later records are added.
-    ///
-    /// Where there is no manifest, one that holds nothing is written
-    /// before the copy is touched. From then on the copy is known to be
-    /// a backup's, whatever a power cut leaves of its first bytes; before
-    /// it, a file named `log` that is neither empty nor the start of a
-    /// log is somebody's, and is left alone.
-    fn start_of_copy(&mut self, target: &mut impl Target) -> Result<Manifest, BackupError> {
-        let held = match Manifest::read(target)? {
-            Some(held) => held,
-            None => {
-                let len = target.log_len()?.min(HEADER_LEN as u64) as usize;
-                if !log::is_start_of_a_log(&target.log_read(0, len)?) {
-                    return Err(BackupError::NotABackup);
-                }
-                let nothing = Manifest {
-                    records: 0,
-                    log_len: 0,
-                    chain: self.chain_at(0)?,
-                    id: self.log.id(),
-                    keys: None,
-                };
-                target.replace(MANIFEST, &nothing.encode())?;
-                nothing
-            }
-        };
-        if held.id != self.log.id() || self.log.chain_at(held.records)? != Some(held.chain) {
-            return Err(BackupError::AnotherLog);
-        }
-        if target.log_len()? < held.log_len {
-            return Err(BackupError::Damaged(
-                "the copy of the log is shorter than the manifest says",
-            ));
-        }
-        if held.is_started() && target.log_read(0, HEADER_LEN)? != self.log.header_bytes() {
-            return Err(BackupError::AnotherLog);
-        }
-        // Past the manifest's end is what a backup that did not finish
-        // left behind.
-        target.log_truncate(held.log_len)?;
-        Ok(held)
+impl<S: Storage, C: Clock> Store<S, C> {
+    /// Brings the backup at `target` up to what this store holds now: the
+    /// records its log has synced, and the keys as they are. See
+    /// [`back_up`].
+    pub fn backup(&mut self, target: &mut impl Target) -> Result<Backup, BackupError> {
+        back_up(self, target)
     }
+}
+
+/// Brings the backup at `target` up to what `origin` holds at one
+/// moment, taken when this begins: the records its log had synced, and
+/// the keys as they were. What is written to the store while the copy
+/// is made is left for the next backup, and so is an erasure: a key
+/// destroyed after the moment is in this backup and leaves with the
+/// next.
+///
+/// A backup of another log, or of a history this store does not have,
+/// is refused and left as it was. Stopped part way, the backup stays
+/// what it was before, and running this again finishes it.
+pub fn back_up(
+    origin: &mut (impl Origin + ?Sized),
+    target: &mut impl Target,
+) -> Result<Backup, BackupError> {
+    let (moment, held) = begin(origin, target)?;
+    let manifest = moment.now;
+    if held.log_len == manifest.log_len {
+        // Nothing was written since, and the key file the manifest
+        // names stays as it is: a key made since has sealed nothing
+        // that is in the log yet.
+        remove_other_keys(target, &manifest)?;
+        return Ok(Backup {
+            records: manifest.records,
+            added: 0,
+            bytes: 0,
+        });
+    }
+    let mut copied = held.log_len;
+    while copied < manifest.log_len {
+        let len = usize::try_from(manifest.log_len - copied)
+            .unwrap_or(COPY_CHUNK)
+            .min(COPY_CHUNK);
+        let bytes = origin.log_bytes(copied, len)?;
+        target.log_append(&bytes)?;
+        copied += bytes.len() as u64;
+    }
+    target.log_sync()?;
+    if let Some(bytes) = &moment.key_file {
+        target.replace(&manifest.keys_name(), bytes)?;
+    }
+    target.replace(MANIFEST, &manifest.encode())?;
+    remove_other_keys(target, &manifest)?;
+    Ok(Backup {
+        records: manifest.records,
+        added: manifest.records - held.records,
+        bytes: copied - held.log_len,
+    })
+}
+
+/// Whether a backup of `origin` can be kept at `target`: it is empty, or
+/// holds a backup of this store's log and history. As a backup does
+/// before it copies, this starts a first backup's place and cuts off
+/// what an unfinished backup left.
+pub fn check(
+    origin: &mut (impl Origin + ?Sized),
+    target: &mut impl Target,
+) -> Result<(), BackupError> {
+    begin(origin, target).map(drop)
+}
+
+/// Takes the moment a backup is to hold, makes the copy of the log at
+/// `target` end where its last finished backup ended, and returns that
+/// backup's manifest: what the copy holds, to which the store's later
+/// records are added.
+///
+/// Where there is no manifest, one that holds nothing is written before
+/// the copy is touched. From then on the copy is known to be a backup's,
+/// whatever a power cut leaves of its first bytes; before it, a file
+/// named `log` that is neither empty nor the start of a log is
+/// somebody's, and is left alone.
+fn begin(
+    origin: &mut (impl Origin + ?Sized),
+    target: &mut impl Target,
+) -> Result<(Moment, Manifest), BackupError> {
+    let held = Manifest::read(target)?;
+    if held.is_none() {
+        let len = target.log_len()?.min(HEADER_LEN as u64) as usize;
+        if !log::is_start_of_a_log(&target.log_read(0, len)?) {
+            return Err(BackupError::NotABackup);
+        }
+    }
+    while origin.catch_up()? {}
+    let moment = origin.moment(held.map_or(0, |held| held.records))?;
+    let held = match held {
+        Some(held) => held,
+        None => {
+            let nothing = Manifest {
+                records: 0,
+                log_len: 0,
+                chain: moment
+                    .held_chain
+                    .ok_or(BackupError::Damaged("the log lost records it had"))?,
+                id: moment.now.id,
+                keys: None,
+            };
+            target.replace(MANIFEST, &nothing.encode())?;
+            nothing
+        }
+    };
+    if held.id != moment.now.id || moment.held_chain != Some(held.chain) {
+        return Err(BackupError::AnotherLog);
+    }
+    if target.log_len()? < held.log_len {
+        return Err(BackupError::Damaged(
+            "the copy of the log is shorter than the manifest says",
+        ));
+    }
+    if held.is_started() && target.log_read(0, HEADER_LEN)? != moment.header {
+        return Err(BackupError::AnotherLog);
+    }
+    // Past the manifest's end is what a backup that did not finish
+    // left behind.
+    target.log_truncate(held.log_len)?;
+    Ok((moment, held))
 }
 
 /// Removes every key file but the manifest's own. This is where a key
@@ -460,200 +578,4 @@ pub fn restore(
     Ok(Restored {
         records: manifest.records,
     })
-}
-
-/// A backup kept in a directory of its own. The copy of the log is held
-/// open and locked, so two backups cannot write to one place at once.
-#[derive(Debug)]
-pub struct DirTarget {
-    dir: PathBuf,
-    log: File,
-}
-
-impl DirTarget {
-    /// Opens the backup in `dir`, making the directory if there is none.
-    /// A directory that holds files and no manifest is refused unless
-    /// all it holds is what a first backup left when it was stopped:
-    /// it is somebody's, and a backup would write among their files.
-    pub fn open(dir: &Path) -> io::Result<Self> {
-        std::fs::create_dir_all(dir)?;
-        let names = file_names(dir)?;
-        let is_ours = |name: &String| name == LOG || is_backup_file(name);
-        if !names.iter().any(|name| name == MANIFEST) && !names.iter().all(is_ours) {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "{} holds files that are not a backup's; name an empty directory",
-                    dir.display()
-                ),
-            ));
-        }
-        let path = dir.join(LOG);
-        let log = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-        log.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => io::Error::new(
-                io::ErrorKind::WouldBlock,
-                format!("{} is in use by another backup", dir.display()),
-            ),
-            TryLockError::Error(error) => error,
-        })?;
-        sync_parent_dir(&path)?;
-        Ok(Self {
-            dir: dir.to_owned(),
-            log,
-        })
-    }
-
-    /// A file only its owner can read on Unix: some of them hold keys.
-    fn create(path: &Path) -> io::Result<File> {
-        let mut options = OpenOptions::new();
-        options.create(true).write(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options.open(path)
-    }
-}
-
-/// Whether `name` is one of a backup's files beside the copy of the log,
-/// whole or still being written.
-fn is_backup_file(name: &str) -> bool {
-    let name = name.strip_suffix(NEW_SUFFIX).unwrap_or(name);
-    name == MANIFEST
-        || name
-            .strip_prefix(KEYS_PREFIX)
-            .is_some_and(|records| records.parse::<u64>().is_ok())
-}
-
-/// A file is written under this suffix and renamed into place.
-const NEW_SUFFIX: &str = ".new";
-
-fn file_names(dir: &Path) -> io::Result<Vec<String>> {
-    let mut names = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        // A name that is not Unicode is not one of a backup's.
-        names.push(entry?.file_name().to_string_lossy().into_owned());
-    }
-    Ok(names)
-}
-
-fn read_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn read_part(file: &mut File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-    let mut bytes = vec![0; len];
-    file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(&mut bytes)?;
-    Ok(bytes)
-}
-
-impl Source for DirTarget {
-    fn log_len(&mut self) -> io::Result<u64> {
-        Ok(self.log.metadata()?.len())
-    }
-
-    fn log_read(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        read_part(&mut self.log, offset, len)
-    }
-
-    fn read(&mut self, name: &str) -> io::Result<Option<Vec<u8>>> {
-        read_file(&self.dir.join(name))
-    }
-}
-
-/// A backup in a directory, to restore from: it is only read, nothing
-/// is made or locked there, so it can be a copy that cannot be written
-/// to, such as a snapshot.
-#[derive(Debug)]
-pub struct DirSource {
-    dir: PathBuf,
-}
-
-impl DirSource {
-    pub fn new(dir: &Path) -> Self {
-        Self {
-            dir: dir.to_owned(),
-        }
-    }
-
-    fn log(&self) -> io::Result<Option<File>> {
-        match File::open(self.dir.join(LOG)) {
-            Ok(file) => Ok(Some(file)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-}
-
-impl Source for DirSource {
-    fn log_len(&mut self) -> io::Result<u64> {
-        match self.log()? {
-            Some(file) => Ok(file.metadata()?.len()),
-            None => Ok(0),
-        }
-    }
-
-    fn log_read(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        let mut file = self
-            .log()?
-            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        read_part(&mut file, offset, len)
-    }
-
-    fn read(&mut self, name: &str) -> io::Result<Option<Vec<u8>>> {
-        read_file(&self.dir.join(name))
-    }
-}
-
-impl Target for DirTarget {
-    fn log_truncate(&mut self, len: u64) -> io::Result<()> {
-        self.log.set_len(len)
-    }
-
-    fn log_append(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.log.seek(SeekFrom::End(0))?;
-        self.log.write_all(bytes)
-    }
-
-    fn log_sync(&mut self) -> io::Result<()> {
-        self.log.sync_all()
-    }
-
-    fn replace(&mut self, name: &str, bytes: &[u8]) -> io::Result<()> {
-        let path = self.dir.join(name);
-        let new = self.dir.join(format!("{name}{NEW_SUFFIX}"));
-        let mut file = Self::create(&new)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&new, &path)?;
-        sync_parent_dir(&path)
-    }
-
-    fn remove(&mut self, name: &str) -> io::Result<()> {
-        let path = self.dir.join(name);
-        match std::fs::remove_file(&path) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => sync_parent_dir(&path),
-        }
-    }
-
-    fn names(&mut self) -> io::Result<Vec<String>> {
-        Ok(file_names(&self.dir)?
-            .into_iter()
-            .filter(|name| is_backup_file(name))
-            .collect())
-    }
 }

@@ -7,7 +7,11 @@
   since when run again; `umbrachyx restore <directory>` writes a new
   store from it and checks every record on the way. A backup stopped
   part way stays what it was before. An erasure reaches a backup with
-  the next one taken. The server has to be stopped while it runs.
+  the next one begun after it. `umbrachyx serve --backup-to <directory>
+  [--backup-every <seconds>]` keeps such a backup up to date while the
+  server runs: a backup holds the moment it began, the log is copied a
+  part at a time between writes, and no client can ask for one or name
+  the place.
 
 ## 0.2.0
 

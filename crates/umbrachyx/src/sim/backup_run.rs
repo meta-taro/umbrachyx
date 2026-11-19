@@ -1,5 +1,6 @@
 //! One simulated run of a store that is backed up while it is written to:
-//! commits and erasures, backups that run to their end and backups that
+//! commits and erasures, between backups and between the turns one backup
+//! takes of the store, backups that run to their end and backups that
 //! are stopped after some of their writes, with the power cut or the
 //! process killed where the backup is kept, all chosen by a seed. After
 //! every backup, finished or not, the backup is restored into a new store.
@@ -7,12 +8,13 @@
 //! The promises, checked at every restore:
 //! - a backup that has finished once restores, every time after;
 //! - what it restores to is the store as it was when a backup last
-//!   finished, or as it was when the backup that was stopped started,
-//!   whole, never a mix of the two;
+//!   finished, or as it was when the backup that was stopped began,
+//!   whole, never a mix of the two, and never with what was written
+//!   while the backup ran;
 //! - a subject erased before that moment reads as erased, and none of its
 //!   earlier values can be read in any history;
 //! - once a backup has finished, no file of it holds the key of a
-//!   subject erased before it;
+//!   subject erased before it began;
 //! - where no backup has finished there is none to restore, rather than
 //!   part of one.
 //!
@@ -27,7 +29,7 @@ use super::rng::Rng;
 use super::store_run::{SimClock, provenance};
 use crate::keys::{Key, KeyStorage, Keys};
 use crate::log::{Edit, Storage};
-use crate::store::backup::{BackupError, Source, Target, restore};
+use crate::store::backup::{self, BackupError, Origin, Source, Target, restore};
 use crate::store::{MAIN_BRANCH, Store};
 
 const STEPS: usize = 48;
@@ -37,6 +39,11 @@ const ERASE_PERCENT: u64 = 14;
 const BACKUP_PERCENT: u64 = 28;
 /// Out of 100, per backup: it is stopped after some of its writes.
 const STOPPED_PERCENT: u64 = 60;
+/// Out of 100, per turn a backup takes of the store: the store is
+/// written to before the next.
+const MEANWHILE_PERCENT: u64 = 50;
+/// Out of 100, per such write: it is an erasure, not a commit.
+const MEANWHILE_ERASE_PERCENT: u64 = 25;
 /// A backup makes at most this many writes: stop it before any of them.
 const MAX_WRITES: u64 = 9;
 /// Few subjects and fields, so erasures keep meeting live values and
@@ -86,6 +93,8 @@ pub struct Outcome {
     pub erasures: usize,
     pub backups_finished: usize,
     pub backups_stopped: usize,
+    /// Commits and erasures made between the turns of a backup.
+    pub written_meanwhile: usize,
     pub power_cuts: usize,
     /// Restores of a stopped backup that gave the store as it was at the
     /// backup before, and as it was when the stopped one started.
@@ -181,6 +190,8 @@ struct Run {
     target: SimTarget,
     /// The store as it is.
     now: Moment,
+    /// The store as it was when the last backup began.
+    began: Option<Moment>,
     /// The store as it was when a backup last finished.
     backed_up: Option<Moment>,
     outcome: Outcome,
@@ -198,6 +209,7 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
         store,
         target: SimTarget::default(),
         now: Moment::default(),
+        began: None,
         backed_up: None,
         outcome: Outcome::default(),
     };
@@ -290,7 +302,19 @@ impl Run {
         let stopped = self.rng.percent(STOPPED_PERCENT);
         self.target.writes_left = stopped.then(|| self.rng.below(MAX_WRITES));
         self.target.new_survives = self.rng.percent(50);
-        let result = self.store.backup(&mut self.target);
+        self.began = None;
+        let mut target = std::mem::take(&mut self.target);
+        let mut busy = Busy {
+            run: self,
+            step,
+            failed: None,
+        };
+        let result = backup::back_up(&mut busy, &mut target);
+        let failed = busy.failed;
+        self.target = target;
+        if let Some(error) = failed {
+            return Err(error);
+        }
         let ran_out = self.target.writes_left == Some(0);
         self.target.writes_left = None;
         let power = self.rng.percent(50);
@@ -302,16 +326,21 @@ impl Run {
         };
         match result {
             Ok(backup) => {
-                if backup.records != self.now.records {
+                let began = self
+                    .began
+                    .clone()
+                    .ok_or_else(|| format!("step {step}: a backup finished and never began"))?;
+                if backup.records != began.records {
                     return Err(format!(
-                        "step {step}: backed up {} records of {}",
-                        backup.records, self.now.records
+                        "step {step}: backed up {} records of the {} there were when it began",
+                        backup.records, began.records
                     ));
                 }
-                self.backed_up = Some(self.now.clone());
                 self.outcome.backups_finished += 1;
                 self.trace(step, format!("backup, then power cut: {power}"));
-                self.no_erased_key_is_kept(step)
+                self.no_erased_key_is_kept(step, &began)?;
+                self.backed_up = Some(began);
+                Ok(())
             }
             Err(BackupError::Io(_)) if ran_out => {
                 self.outcome.backups_stopped += 1;
@@ -342,17 +371,17 @@ impl Run {
         let moment = if self.backed_up.as_ref().is_some_and(is) {
             self.outcome.restored_to_before += 1;
             self.backed_up.clone().expect("checked")
-        } else if is(&self.now) {
+        } else if let Some(began) = self.began.clone().filter(is) {
             // The stopped backup had replaced the manifest: it is the
             // backup from here on.
             self.outcome.restored_to_now += 1;
-            self.backed_up = Some(self.now.clone());
-            self.now.clone()
+            self.backed_up = Some(began.clone());
+            began
         } else {
             return Err(format!(
                 "step {step}: restored {held:?}, which is neither the backup before {:?} nor \
-                 the store now {:?}",
-                self.backed_up, self.now
+                 the store when the last backup began {:?}",
+                self.backed_up, self.began
             ));
         };
         self.outcome.restores_with_erasures += usize::from(!moment.erased_values.is_empty());
@@ -360,10 +389,10 @@ impl Run {
             .map_err(|key| format!("step {step}: an erased value of {key} reads after a restore"))
     }
 
-    /// A finished backup holds no key that was destroyed before it.
-    fn no_erased_key_is_kept(&self, step: usize) -> Result<(), String> {
+    /// A finished backup holds no key that was destroyed before it began.
+    fn no_erased_key_is_kept(&self, step: usize, began: &Moment) -> Result<(), String> {
         for (name, bytes) in &self.target.files {
-            for key in &self.now.erased_keys {
+            for key in &began.erased_keys {
                 if bytes.windows(key.len()).any(|window| window == key) {
                     return Err(format!(
                         "step {step}: {name} of the backup holds an erased key"
@@ -405,6 +434,56 @@ impl Run {
 
     fn trace(&mut self, step: usize, event: String) {
         self.outcome.trace.push(format!("{step}: {event}"));
+    }
+}
+
+/// The store of a run as a backup sees it: written to, some of the
+/// time, after each turn the backup takes.
+struct Busy<'a> {
+    run: &'a mut Run,
+    step: usize,
+    /// What went wrong with a write made meanwhile, which is the run's
+    /// to report and not the backup's.
+    failed: Option<String>,
+}
+
+impl Busy<'_> {
+    fn write(&mut self) {
+        if self.failed.is_some() || !self.run.rng.percent(MEANWHILE_PERCENT) {
+            return;
+        }
+        let written = if self.run.rng.percent(MEANWHILE_ERASE_PERCENT) {
+            self.run.erase(self.step)
+        } else {
+            self.run.commit(self.step)
+        };
+        self.run.outcome.written_meanwhile += 1;
+        self.failed = written.err();
+    }
+}
+
+impl Origin for Busy<'_> {
+    fn records(&mut self) -> Result<u64, BackupError> {
+        self.run.store.records()
+    }
+
+    fn catch_up(&mut self) -> Result<bool, BackupError> {
+        let is_more = self.run.store.catch_up()?;
+        self.write();
+        Ok(is_more)
+    }
+
+    fn moment(&mut self, held_records: u64) -> Result<backup::Moment, BackupError> {
+        let moment = self.run.store.moment(held_records)?;
+        self.run.began = Some(self.run.now.clone());
+        self.write();
+        Ok(moment)
+    }
+
+    fn log_bytes(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, BackupError> {
+        let bytes = self.run.store.log_bytes(offset, len)?;
+        self.write();
+        Ok(bytes)
     }
 }
 
@@ -479,6 +558,7 @@ mod tests {
             total.erasures += outcome.erasures;
             total.backups_finished += outcome.backups_finished;
             total.backups_stopped += outcome.backups_stopped;
+            total.written_meanwhile += outcome.written_meanwhile;
             total.power_cuts += outcome.power_cuts;
             total.restored_to_before += outcome.restored_to_before;
             total.restored_to_now += outcome.restored_to_now;
@@ -500,6 +580,7 @@ mod tests {
 
         assert!(total.backups_finished >= 1_000, "{total:?}");
         assert!(total.backups_stopped >= 1_000, "{total:?}");
+        assert!(total.written_meanwhile >= 1_000, "{total:?}");
         assert!(total.power_cuts >= 1_000, "{total:?}");
         assert!(total.erasures >= 500, "{total:?}");
         assert!(total.restored_to_before >= 1_000, "{total:?}");
@@ -517,12 +598,14 @@ mod tests {
             .unwrap_or(FULL_SEEDS);
         let total = run_seeds(seeds);
         println!(
-            "backup, {seeds} seeds: {} commits, {} erasures, {} backups finished and {} \
+            "backup, {seeds} seeds: {} commits, {} erasures, {} of them made while a \
+             backup ran, {} backups finished and {} \
              stopped part way, {} power cuts where the backup is kept; restored to the \
              backup before {} times and to the stopped backup's own moment {}, {} with \
              erased subjects in it; {} restores refused before any backup had finished",
             total.commits,
             total.erasures,
+            total.written_meanwhile,
             total.backups_finished,
             total.backups_stopped,
             total.power_cuts,

@@ -17,6 +17,9 @@
 //! requires authentication, so a server should listen only on this machine,
 //! or where the network itself decides who reaches the port.
 //!
+//! The server can keep a backup of the store up to date as it serves, in
+//! a place named by whoever starts it (see `backups`).
+//!
 //! A few threads serve all the connections, each waiting on many sockets
 //! at once (see `event`). Commands sent together (pipelined) are answered
 //! together, in order. SETs sent together are written together,
@@ -26,6 +29,7 @@
 use std::fmt;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -36,6 +40,7 @@ use biscuit_auth::PublicKey;
 use crate::log::Edit;
 use crate::store::{MAIN_BRANCH, Pending, PendingPut, Reader, StoreError, Writer};
 
+mod backups;
 mod event;
 mod history;
 mod keys;
@@ -103,6 +108,8 @@ pub struct Server {
     /// The longest a put to a plain-async table is answered before it is
     /// on disk.
     sync_every: Duration,
+    /// Where the store is backed up while it is served, and how often.
+    backup: Option<(PathBuf, Duration)>,
 }
 
 impl Server {
@@ -124,6 +131,7 @@ impl Server {
             loops: default_loops(),
             queued: Arc::default(),
             sync_every: DEFAULT_SYNC_EVERY,
+            backup: None,
         })
     }
 
@@ -158,6 +166,17 @@ impl Server {
         Self { sync_every, ..self }
     }
 
+    /// Keeps a backup of the store in `dir`, brought up to date when
+    /// the server starts and then every `every`, while it serves (see
+    /// `backups`). The place is whoever starts the server's to name; no
+    /// command a client sends reads or changes it.
+    pub fn backup_to(self, dir: PathBuf, every: Duration) -> Self {
+        Self {
+            backup: Some((dir, every)),
+            ..self
+        }
+    }
+
     pub fn max_connections(self, max_connections: usize) -> Self {
         Self {
             max_connections,
@@ -182,6 +201,10 @@ impl Server {
         let queued = Arc::clone(&self.queued);
         event::spawn_writer(self.writer.clone(), queued, wakers, self.sync_every)
             .expect("the thread that writes commits starts");
+        if let Some((dir, every)) = self.backup.clone() {
+            backups::spawn(self.writer.clone(), dir, every)
+                .expect("the thread that backs the store up starts");
+        }
         let mut next = 0;
         loop {
             let (stream, peer) = match listener.accept() {

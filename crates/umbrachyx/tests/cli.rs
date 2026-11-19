@@ -357,6 +357,12 @@ fn serve_takes_a_number_of_serving_threads_and_refuses_what_is_not_one() {
 /// Starts `serve` with `extra` options and returns it with what it says
 /// on starting, read up to the line that names where it listens.
 fn serve_and_its_first_words(dir: &TempDir, extra: &[&str]) -> (Server, String) {
+    let (server, said, _) = serve_on_a_free_port(dir, extra);
+    (server, said)
+}
+
+/// As `serve_and_its_first_words`, with the port it listens on.
+fn serve_on_a_free_port(dir: &TempDir, extra: &[&str]) -> (Server, String, u16) {
     use std::io::{BufRead, BufReader};
 
     assert!(
@@ -383,7 +389,8 @@ fn serve_and_its_first_words(dir: &TempDir, extra: &[&str]) -> (Server, String) 
             break;
         }
     }
-    (server, said.replace(&format!(":{port}"), ":PORT"))
+    let said = said.replace(&format!(":{port}"), ":PORT");
+    (server, said, port.parse().expect("a port"))
 }
 
 #[test]
@@ -509,4 +516,75 @@ fn restore_refuses_to_write_over_a_store_and_leaves_nothing_where_it_fails() {
     // The store that was there reads as before.
     let read = dir.run(&["get", "main", "player/1/gems"]);
     assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), "40");
+}
+
+#[test]
+fn serve_with_backup_to_keeps_a_backup_that_restores_what_clients_wrote() {
+    let dir = TempDir::new("serve-backup");
+    let backup = dir.0.join("backup");
+    let backup = backup.to_str().expect("utf-8 path");
+    let options = ["--backup-to", backup, "--backup-every", "0.05"];
+
+    let (_server, said, port) = serve_on_a_free_port(&dir, &options);
+    let mut client = connect(port);
+    client
+        .write_all(b"*3\r\n$3\r\nSET\r\n$13\r\nplayer/1/gems\r\n$2\r\n55\r\n")
+        .expect("sends");
+    let mut reply = [0; 5];
+    client.read_exact(&mut reply).expect("reads");
+    assert_eq!(&reply, b"+OK\r\n");
+
+    assert!(
+        said.contains(&format!("backing up to {backup} every 0.05 s")),
+        "{said}"
+    );
+    let start = Instant::now();
+    loop {
+        let _ = std::fs::remove_file(dir.0.join("restored"));
+        let _ = std::fs::remove_file(dir.0.join("restored.keys"));
+        let restored = run_on(&dir, "restored", &["restore", backup]);
+        let read = run_on(&dir, "restored", &["get", BRANCH, "player/1/gems"]);
+        if restored.status.success() && String::from_utf8_lossy(&read.stdout).trim() == "55" {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "the backup never held what was written: {}",
+            String::from_utf8_lossy(&restored.stderr)
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn serve_refuses_to_start_where_its_backup_cannot_be_kept() {
+    let dir = TempDir::new("serve-backup-refused");
+    let backup = dir.0.join("backup");
+    let backup = backup.to_str().expect("utf-8 path");
+    // The place holds the backup of another store.
+    let other = run_on(&dir, "other", &["backup", backup]);
+    assert!(other.status.success());
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+
+    let another = dir.run(&["serve", BRANCH, "--backup-to", backup]);
+    let not_a_time = dir.run(&[
+        "serve",
+        BRANCH,
+        "--backup-to",
+        backup,
+        "--backup-every",
+        "0",
+    ]);
+    let nowhere = dir.run(&["serve", BRANCH, "--backup-every", "5"]);
+
+    for output in [&another, &not_a_time, &nowhere] {
+        assert_eq!(output.status.code(), Some(2));
+    }
+    assert!(String::from_utf8_lossy(&another.stderr).contains("another log"));
+    assert!(String::from_utf8_lossy(&not_a_time.stderr).contains("--backup-every"));
+    assert!(String::from_utf8_lossy(&nowhere.stderr).contains("--backup-to"));
 }

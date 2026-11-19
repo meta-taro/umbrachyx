@@ -26,6 +26,7 @@ use umbrachyx::store::{
 use umbrachyx::tree::Bytes;
 
 mod allocator;
+mod backups;
 mod tokens;
 
 const DB_ENV: &str = "UMBRACHYX_DB";
@@ -68,11 +69,12 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               everything, later runs what was written since,
                               and a subject erased since has no key in the
                               backup afterwards. Not while a server has the
-                              log open
+                              log open: serve --backup-to does it then
   restore <directory>         writes the store the backup in <directory>
                               holds to $UMBRACHYX_DB, which must not exist yet
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
         [--sync-every MS] [--public-key K [--require-auth]]
+        [--backup-to D [--backup-every S]]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history.
                               --bind listens on another address of this
@@ -88,7 +90,12 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               plain-async table is answered before it is on
                               disk, in milliseconds (default 1000): what a
                               power cut can lose of such a table. Every other
-                              SET is on disk before its answer
+                              SET is on disk before its answer.
+                              --backup-to keeps a backup in a directory, as
+                              `backup` does, brought up to date when the
+                              server starts and every --backup-every seconds
+                              (default 60) while it serves. No client can
+                              ask for a backup or say where one goes
   mcp --public-key K --token-file F
                               MCP over stdin and stdout, for one agent's token
 
@@ -160,7 +167,7 @@ impl Args {
                 "who" | "why" | "approved-by" | "from" | "limit" | "port" | "bind"
                 | "max-connections" | "threads" | "sync-every" | "key" | "subject" | "branch"
                 | "prefix" | "columns" | "column" | "operations" | "operation" | "purpose"
-                | "expires-in" | "public-key" | "token-file" => {
+                | "expires-in" | "public-key" | "token-file" | "backup-to" | "backup-every" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -559,7 +566,7 @@ fn listen_address(args: &Args) -> Result<IpAddr, String> {
 /// says otherwise. With a public
 /// key, connections may `AUTH` with a capability token; with
 /// `--require-auth`, only those may write.
-fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
+fn serve(mut store: FileStore, args: &Args) -> Result<ExitCode, String> {
     let [branch] = args.exactly()?;
     let port: u16 = match args.options.get("port") {
         Some(port) => port
@@ -603,6 +610,7 @@ fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
     if require_auth && public_key.is_none() {
         return Err("--require-auth needs --public-key, to check the tokens against".to_owned());
     }
+    let backup = backups::place(&mut store, args)?;
     let committer = Committer::start(store);
     let mut server = Server::new(branch, committer.writer(), committer.reader())
         .map_err(|e| e.to_string())?
@@ -614,6 +622,9 @@ fn serve(store: FileStore, args: &Args) -> Result<ExitCode, String> {
     }
     if let Some(threads) = threads {
         server = server.threads(threads);
+    }
+    if let Some((dir, every)) = backup {
+        server = server.backup_to(dir, every);
     }
     let listener = TcpListener::bind((address, port)).map_err(|e| e.to_string())?;
     if !address.is_loopback() {
