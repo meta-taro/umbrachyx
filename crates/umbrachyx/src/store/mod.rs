@@ -45,6 +45,7 @@ mod approvals;
 pub mod backup;
 mod committer;
 mod export;
+pub mod follow;
 mod inspect;
 mod latest;
 mod merge;
@@ -251,6 +252,11 @@ pub enum StoreError {
     Inconsistent(String),
     /// The committer stopped before the commit was written.
     Stopped,
+    /// The store follows another and takes no writes of its own.
+    ReadOnly,
+    /// The store writes for itself, so it takes in no other store's
+    /// records.
+    NotFollowing,
     Keys(KeyError),
     /// The log has values sealed under this many keys the key file does
     /// not hold. Nothing was written.
@@ -331,6 +337,14 @@ impl fmt::Display for StoreError {
             Self::BadBranchName => write!(f, "a branch name must be 1 to {MAX_BRANCH_NAME} bytes"),
             Self::Inconsistent(what) => write!(f, "the log cannot be applied: {what}"),
             Self::Stopped => write!(f, "the committer has stopped; nothing was written"),
+            Self::ReadOnly => write!(
+                f,
+                "this store follows another and takes no writes of its own; nothing was written"
+            ),
+            Self::NotFollowing => write!(
+                f,
+                "this store writes for itself and takes in no other store's records"
+            ),
             Self::Keys(error) => write!(f, "{error}"),
             Self::MissingKeys(count) => write!(
                 f,

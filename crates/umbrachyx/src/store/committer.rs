@@ -35,6 +35,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::Duration;
 
 use super::backup::{BackupError, Moment, Origin};
+use super::follow::{Ask, Chained, Feed, Follower, Held, Refusal, Sent};
 use super::{
     Clock, CommitId, CommitRequest, Inspect, Provenance, Request, Review, Store, StoreError, View,
 };
@@ -49,6 +50,10 @@ type Question<'a> = Box<dyn FnOnce(&dyn Inspect) + 'a>;
 type Decision<'a> = Box<dyn FnOnce(&mut dyn Review) + 'a>;
 /// Reads what a backup needs of the store.
 type BackupTurn<'a> = Box<dyn FnOnce(&mut dyn Origin) + 'a>;
+/// Reads what a replica is sent.
+type FeedTurn<'a> = Box<dyn FnOnce(&mut dyn Feed) + 'a>;
+/// Takes in what a primary sent.
+type FollowTurn<'a> = Box<dyn FnOnce(&mut dyn Follower) + 'a>;
 
 struct Job {
     request: Request,
@@ -173,6 +178,14 @@ trait Engine: Send + Sync {
     /// backup holds what was acknowledged, whatever waits. The caller
     /// holds the turn.
     fn back_up(&self, turn: BackupTurn<'_>) -> bool;
+    /// As `back_up`, for a replica that asks for records: it is sent
+    /// only what was acknowledged. The caller holds the turn.
+    fn feed(&self, turn: FeedTurn<'_>) -> bool;
+    /// Whether the store follows another, and so takes no writes.
+    fn is_following(&self) -> bool;
+    /// As `review`, for a store that follows another. The caller holds
+    /// the turn.
+    fn follow(&self, turn: FollowTurn<'_>) -> bool;
     /// Whether puts were answered that the log does not hold yet, as of
     /// the last group written.
     fn has_unsynced_puts(&self) -> bool;
@@ -188,6 +201,9 @@ struct Core<S: Storage, C: Clock> {
     /// `None` once stopped.
     store: Mutex<Option<Store<S, C>>>,
     published: Published,
+    /// Whether the store follows another: its records come from there,
+    /// and every write sent here is refused.
+    is_following: bool,
     /// Whether the store holds puts the log does not, kept here so that
     /// asking does not wait for the store.
     has_unsynced_puts: AtomicBool,
@@ -308,6 +324,35 @@ where
         }
     }
 
+    fn feed(&self, turn: FeedTurn<'_>) -> bool {
+        match lock(&self.store).as_mut() {
+            Some(store) => {
+                turn(store);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn is_following(&self) -> bool {
+        self.is_following
+    }
+
+    fn follow(&self, turn: FollowTurn<'_>) -> bool {
+        match lock(&self.store).as_mut() {
+            Some(store) => {
+                let before = store.log_records();
+                turn(store);
+                // Readers see the records taken in from here on.
+                if store.log_records() != before {
+                    self.publish(store);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     fn has_unsynced_puts(&self) -> bool {
         self.has_unsynced_puts.load(Ordering::Acquire)
     }
@@ -349,12 +394,26 @@ where
     C: Clock + Send + 'static,
 {
     pub fn start(store: Store<S, C>) -> Self {
+        Self::with(store, false)
+    }
+
+    /// Holds a store that follows another: its records are taken in
+    /// through a writer ([`Follower`]), and commits, puts and decisions
+    /// sent to it are refused, whoever sends them. A store that also
+    /// wrote for itself would hold records its primary does not, and
+    /// could be sent nothing more.
+    pub fn start_following(store: Store<S, C>) -> Self {
+        Self::with(store, true)
+    }
+
+    fn with(store: Store<S, C>, is_following: bool) -> Self {
         let published = Arc::new(RwLock::new(Arc::new(store.view())));
         Self {
             core: Arc::new(Core {
                 turns: Turns::default(),
                 store: Mutex::new(Some(store)),
                 published,
+                is_following,
                 has_unsynced_puts: AtomicBool::new(false),
                 lost_answered_puts: AtomicBool::new(false),
             }),
@@ -430,11 +489,15 @@ impl Writer {
 
     fn queue(&self, request: Request, len: usize) -> Pending {
         let answer = Arc::new(Slot::default());
-        lock(&self.engine.turns().queue).jobs.push_back(Job {
-            request,
-            len,
-            answer: Arc::clone(&answer),
-        });
+        if self.engine.is_following() {
+            answer.fill(Err(StoreError::ReadOnly));
+        } else {
+            lock(&self.engine.turns().queue).jobs.push_back(Job {
+                request,
+                len,
+                answer: Arc::clone(&answer),
+            });
+        }
         Pending {
             answer,
             engine: Arc::clone(&self.engine),
@@ -488,6 +551,9 @@ impl Writer {
     /// Carries out `decision` on the store once the commits sent before it
     /// are written, and publishes the view after it.
     pub fn decide<T>(&self, decision: impl FnOnce(&mut dyn Review) -> T) -> Result<T, StoreError> {
+        if self.engine.is_following() {
+            return Err(StoreError::ReadOnly);
+        }
         let mut answer = None;
         let _turn = self.engine.turns().take();
         self.engine
@@ -529,6 +595,71 @@ impl Origin for Writer {
 
     fn log_bytes(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, BackupError> {
         self.back_up(|store| store.log_bytes(offset, len))
+    }
+}
+
+impl Writer {
+    /// Whether the store behind this writer follows another, and so
+    /// refuses every write.
+    pub fn is_following(&self) -> bool {
+        self.engine.is_following()
+    }
+
+    /// One turn of answering a replica, between two groups of writes.
+    fn feed<T>(
+        &self,
+        read: impl FnOnce(&mut dyn Feed) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut answer = None;
+        let _turn = self.engine.turns().take_after_a_writer();
+        self.engine
+            .feed(Box::new(|store| answer = Some(read(store))));
+        answer.unwrap_or(Err(StoreError::Stopped))
+    }
+
+    /// One turn of a store that follows another.
+    fn follow<T>(
+        &self,
+        turn: impl FnOnce(&mut dyn Follower) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        if !self.engine.is_following() {
+            return Err(StoreError::NotFollowing);
+        }
+        let mut answer = None;
+        let _turn = self.engine.turns().take();
+        self.engine
+            .follow(Box::new(|store| answer = Some(turn(store))));
+        answer.unwrap_or(Err(StoreError::Stopped))
+    }
+}
+
+/// Whichever the store behind it is, one that feeds replicas or one that
+/// follows: its chain is worked out a turn at a time, as for a backup.
+impl Chained for Writer {
+    fn chain_step(&mut self) -> Result<bool, StoreError> {
+        self.feed(|store| store.chain_step())
+    }
+}
+
+/// A store behind a committer feeds replicas through any of its writers,
+/// while the others write. A replica is sent what was acknowledged by
+/// then; commits queued and not yet written are not waited for.
+impl Feed for Writer {
+    fn sent(&mut self, ask: &Ask) -> Result<Result<Sent, Refusal>, StoreError> {
+        self.feed(|store| store.sent(ask))
+    }
+}
+
+/// A store started with [`Committer::start_following`] takes in its
+/// primary's records through any of its writers, and readers see them
+/// once it has.
+impl Follower for Writer {
+    fn held(&mut self) -> Result<Held, StoreError> {
+        self.follow(|store| store.held())
+    }
+
+    fn take_in(&mut self, sent: &Sent) -> Result<u64, StoreError> {
+        self.follow(|store| store.take_in(sent))
     }
 }
 
@@ -647,6 +778,7 @@ fn copy(error: &StoreError) -> StoreError {
             StoreError::Log(LogError::RecordTooLarge { len: *len })
         }
         StoreError::Log(LogError::Poisoned) => StoreError::Log(LogError::Poisoned),
+        StoreError::ReadOnly => StoreError::ReadOnly,
         other => StoreError::Inconsistent(other.to_string()),
     }
 }

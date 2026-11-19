@@ -27,6 +27,7 @@ use umbrachyx::tree::Bytes;
 
 mod allocator;
 mod backups;
+mod replication;
 mod tokens;
 
 const DB_ENV: &str = "UMBRACHYX_DB";
@@ -74,7 +75,7 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               holds to $UMBRACHYX_DB, which must not exist yet
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
         [--sync-every MS] [--public-key K [--require-auth]]
-        [--backup-to D [--backup-every S]]
+        [--backup-to D [--backup-every S]] [--feed-replicas-on P] [--follow H:P]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history.
                               --bind listens on another address of this
@@ -95,7 +96,20 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               `backup` does, brought up to date when the
                               server starts and every --backup-every seconds
                               (default 60) while it serves. No client can
-                              ask for a backup or say where one goes
+                              ask for a backup or say where one goes.
+                              --feed-replicas-on hands the records of the
+                              log, every branch of it, to whoever asks on
+                              port P of the address it listens on: open it
+                              to its replicas only.
+                              --follow makes this server a replica of the
+                              one that hands its log out at H:P: it asks
+                              that server for its
+                              records, answers reads, and refuses writes
+                              with READONLY. Its store is a backup of the
+                              other, made with restore. Nothing on the way
+                              is encrypted, and keys are not sent: values
+                              of a subject first written after the backup
+                              stop it, and it says so
   mcp --public-key K --token-file F
                               MCP over stdin and stdout, for one agent's token
 
@@ -167,7 +181,8 @@ impl Args {
                 "who" | "why" | "approved-by" | "from" | "limit" | "port" | "bind"
                 | "max-connections" | "threads" | "sync-every" | "key" | "subject" | "branch"
                 | "prefix" | "columns" | "column" | "operations" | "operation" | "purpose"
-                | "expires-in" | "public-key" | "token-file" | "backup-to" | "backup-every" => {
+                | "expires-in" | "public-key" | "token-file" | "backup-to" | "backup-every"
+                | "follow" | "feed-replicas-on" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -611,7 +626,11 @@ fn serve(mut store: FileStore, args: &Args) -> Result<ExitCode, String> {
         return Err("--require-auth needs --public-key, to check the tokens against".to_owned());
     }
     let backup = backups::place(&mut store, args)?;
-    let committer = Committer::start(store);
+    let follows = replication::primary(args)?;
+    let committer = match follows {
+        Some(_) => Committer::start_following(store),
+        None => Committer::start(store),
+    };
     let mut server = Server::new(branch, committer.writer(), committer.reader())
         .map_err(|e| e.to_string())?
         .max_connections(max_connections)
@@ -625,6 +644,18 @@ fn serve(mut store: FileStore, args: &Args) -> Result<ExitCode, String> {
     }
     if let Some((dir, every)) = backup {
         server = server.backup_to(dir, every);
+    }
+    if let Some(feed_port) = replication::feed_port(args)? {
+        let feed = TcpListener::bind((address, feed_port)).map_err(|e| e.to_string())?;
+        eprintln!(
+            "handing the log to replicas that ask on {}",
+            SocketAddr::new(address, feed_port)
+        );
+        server = server.feed_replicas_on(feed);
+    }
+    if let Some(primary) = follows {
+        eprintln!("following {primary}: this server answers reads and takes no writes");
+        server = server.follow(primary);
     }
     let listener = TcpListener::bind((address, port)).map_err(|e| e.to_string())?;
     if !address.is_loopback() {

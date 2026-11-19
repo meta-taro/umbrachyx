@@ -13,7 +13,8 @@
 //!
 //! A second store follows the first as a replica would: now and then it
 //! asks for what comes after the records it holds, a few bytes at a time,
-//! and it crashes and loses power on its own. Checked at every ask, also
+//! over a network that loses answers, delivers old ones, cuts them short
+//! and flips bits in them, and it crashes and loses power on its own. Checked at every ask, also
 //! right after a sync failed on the first store and after its restarts:
 //! - the replica never holds a record the first store does not, so a
 //!   record is only ever handed out once it is synced;
@@ -29,8 +30,10 @@
 use std::collections::BTreeMap;
 
 use super::disk::{SimStorage, SyncFault};
+use super::net::{Carried, Link, Net};
 use super::rng::Rng;
 use crate::log::{Edit, Engine, LogError};
+use crate::store::follow::{FollowError, follow_once};
 use crate::store::{
     Approved, Clock, CommitId, CommitRequest, MAIN_BRANCH, Merged, Provenance, Reverted, Store,
     StoreError,
@@ -103,6 +106,8 @@ pub struct Outcome {
     pub replica_pulls: usize,
     pub replica_records: usize,
     pub replica_restarts: usize,
+    /// What the network did to the answers on their way to the replica.
+    pub carried: Carried,
 }
 
 /// A clock a seed controls. It mostly moves forward a little, and sometimes
@@ -151,6 +156,7 @@ struct Run {
     /// A store that follows `store` through its log.
     replica: Store<SimStorage, SimClock>,
     following: Rng,
+    net: Net,
 }
 
 pub fn run(seed: u64) -> Result<Outcome, String> {
@@ -175,6 +181,7 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
         rejected: BTreeMap::new(),
         replica,
         following,
+        net: Net::default(),
     };
     for step in 0..STEPS {
         run.step(step)?;
@@ -448,52 +455,51 @@ impl Run {
         Ok(())
     }
 
-    /// The replica asks for what comes after the records it holds. The
-    /// first store must hold those records too, with the same chain.
+    /// The replica asks, over the network, for what comes after the
+    /// records it holds. Whatever arrives, the first store must hold the
+    /// records the replica holds, with the same chain: it refuses to
+    /// answer otherwise, and a refusal fails the run.
     fn pull(&mut self, step: usize, max_bytes: usize) -> Result<(), String> {
-        let held = self.replica.log_records();
-        let theirs = self
-            .replica
-            .log_chain(held)
-            .map_err(|e| format!("step {step}: replica cannot read its log: {e}"))?;
-        let ours = self
-            .store
-            .log_chain(held)
-            .map_err(|e| format!("step {step}: store cannot read its log: {e}"))?;
-        if ours.is_none() || ours != theirs {
-            return Err(format!(
-                "step {step}: the replica holds {held} records and the store, with {}, does \
-                 not hold the same ones",
-                self.store.log_records()
-            ));
+        let before = self.replica.log_records();
+        let mut link = Link {
+            store: &mut self.store,
+            net: &mut self.net,
+            rng: &mut self.following,
+        };
+        match follow_once(&mut link, &mut self.replica, max_bytes) {
+            Ok(progress) => self.outcome.replica_pulls += usize::from(progress.held > before),
+            Err(FollowError::Link(_)) => {}
+            // Bytes that do not check out are refused whole.
+            Err(FollowError::Store(StoreError::Log(_))) if self.net.last_was_flipped => {
+                if self.replica.log_records() != before {
+                    return Err(format!(
+                        "step {step}: the replica kept records out of damaged bytes"
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "step {step}: the replica, with {before} records, cannot follow the store, \
+                     with {}: {error}",
+                    self.store.log_records()
+                ));
+            }
         }
-        let frames = self
-            .store
-            .log_after(held, max_bytes)
-            .map_err(|e| format!("step {step}: store cannot read its log: {e}"))?;
-        if frames.is_empty() {
-            return Ok(());
-        }
-        let taken = self
-            .replica
-            .replicate(&frames)
-            .map_err(|e| format!("step {step}: replica refuses its primary's records: {e}"))?;
-        if taken != frames.len() {
-            return Err(format!(
-                "step {step}: the replica took {taken} of {} bytes handed out",
-                frames.len()
-            ));
-        }
-        self.outcome.replica_pulls += 1;
         Ok(())
     }
 
     /// Once it has every record, the replica holds what the store holds.
     fn check_replica(&mut self) -> Result<(), String> {
-        while self.replica.log_records() < self.store.log_records() {
-            self.pull(STEPS, usize::MAX)?;
+        // The network mends: what was on its way is gone, and every
+        // answer from here on arrives as sent.
+        loop {
+            let progress = follow_once(&mut self.store, &mut self.replica, usize::MAX)
+                .map_err(|e| format!("the replica cannot follow the store to its end: {e}"))?;
+            if progress.is_caught_up() {
+                break;
+            }
         }
-        self.pull(STEPS, usize::MAX)?;
+        self.outcome.carried = self.net.carried;
         let branches: Vec<String> = self.store.branches().map(str::to_owned).collect();
         if !self
             .replica
@@ -686,6 +692,10 @@ mod tests {
             total.replica_pulls += outcome.replica_pulls;
             total.replica_records += outcome.replica_records;
             total.replica_restarts += outcome.replica_restarts;
+            total.carried.lost += outcome.carried.lost;
+            total.carried.late += outcome.carried.late;
+            total.carried.cut += outcome.carried.cut;
+            total.carried.flipped += outcome.carried.flipped;
         }
         total
     }
@@ -715,6 +725,10 @@ mod tests {
         assert!(total.replica_pulls >= 5_000, "{total:?}");
         assert!(total.replica_restarts >= 1_000, "{total:?}");
         assert!(total.replica_records >= 10_000, "{total:?}");
+        assert!(total.carried.lost >= 500, "{total:?}");
+        assert!(total.carried.late >= 200, "{total:?}");
+        assert!(total.carried.cut >= 500, "{total:?}");
+        assert!(total.carried.flipped >= 100, "{total:?}");
     }
 
     #[test]
@@ -730,7 +744,8 @@ mod tests {
              and lost {}, clock went back {} times, {} branches made, {} merges, \
              {} merges refused for conflicts, {} reverts, {} approvals ({} refused for \
              conflicts), {} rejections; a replica was sent records {} times, restarted {} \
-             times and ended with all {} records",
+             times and ended with all {} records; of the answers on their way to it {} were lost, \
+             {} arrived late in place of another, {} were cut short and {} had a bit flipped",
             total.commits,
             total.groups,
             total.restarts,
@@ -746,7 +761,11 @@ mod tests {
             total.rejections,
             total.replica_pulls,
             total.replica_restarts,
-            total.replica_records
+            total.replica_records,
+            total.carried.lost,
+            total.carried.late,
+            total.carried.cut,
+            total.carried.flipped
         );
     }
 

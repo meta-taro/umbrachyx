@@ -20,6 +20,9 @@
 //! The server can keep a backup of the store up to date as it serves, in
 //! a place named by whoever starts it (see `backups`).
 //!
+//! A server can hand its log to replicas, and a server can follow another
+//! and answer reads only (see `replication`).
+//!
 //! A few threads serve all the connections, each waiting on many sockets
 //! at once (see `event`). Commands sent together (pipelined) are answered
 //! together, in order. SETs sent together are written together,
@@ -44,6 +47,7 @@ mod backups;
 mod event;
 mod history;
 mod keys;
+mod replication;
 pub mod resp;
 mod review;
 mod session;
@@ -110,6 +114,12 @@ pub struct Server {
     sync_every: Duration,
     /// Where the store is backed up while it is served, and how often.
     backup: Option<(PathBuf, Duration)>,
+    /// Where replicas that ask are sent the log, if anywhere.
+    feeds_replicas: Option<Arc<TcpListener>>,
+    /// Where the server this one follows is, if it follows one.
+    follows: Option<String>,
+    /// How following goes, once the server serves.
+    following: Option<replication::Shared>,
 }
 
 impl Server {
@@ -132,6 +142,9 @@ impl Server {
             queued: Arc::default(),
             sync_every: DEFAULT_SYNC_EVERY,
             backup: None,
+            feeds_replicas: None,
+            follows: None,
+            following: None,
         })
     }
 
@@ -177,6 +190,28 @@ impl Server {
         }
     }
 
+    /// Answers replicas on `listener`: one that asks is sent the records
+    /// of the log, every branch, values still sealed, with no token
+    /// asked for. A port of its own, so that it can be closed to all
+    /// but the replicas; the port clients use never hands the log out.
+    pub fn feed_replicas_on(self, listener: TcpListener) -> Self {
+        Self {
+            feeds_replicas: Some(Arc::new(listener)),
+            ..self
+        }
+    }
+
+    /// Follows the server at `primary`, a host and a port: asks it for
+    /// its records as it serves, and answers reads with what it holds.
+    /// The store must have been started to follow
+    /// (`Committer::start_following`), so that it takes no writes.
+    pub fn follow(self, primary: String) -> Self {
+        Self {
+            follows: Some(primary),
+            ..self
+        }
+    }
+
     pub fn max_connections(self, max_connections: usize) -> Self {
         Self {
             max_connections,
@@ -186,7 +221,12 @@ impl Server {
 
     /// Accepts connections for as long as the process runs. A failure to
     /// accept or to start a connection's thread costs that connection only.
-    pub fn serve(self, listener: TcpListener) -> ! {
+    pub fn serve(mut self, listener: TcpListener) -> ! {
+        if let Some(primary) = self.follows.clone() {
+            let following = replication::spawn(self.writer.clone(), primary)
+                .expect("the thread that follows the primary starts");
+            self.following = Some(following);
+        }
         let loops: Vec<event::Handle> = (0..self.loops.max(1))
             .filter_map(|number| match event::spawn(self.clone(), number) {
                 Ok(handle) => Some(handle),
@@ -204,6 +244,10 @@ impl Server {
         if let Some((dir, every)) = self.backup.clone() {
             backups::spawn(self.writer.clone(), dir, every)
                 .expect("the thread that backs the store up starts");
+        }
+        if let Some(listener) = self.feeds_replicas.clone() {
+            replication::spawn_feed(self.writer.clone(), listener)
+                .expect("the thread that answers replicas starts");
         }
         let mut next = 0;
         loop {
@@ -269,6 +313,14 @@ impl Server {
                 if let Some(reply) = history::answer(&self.writer, &self.branch, &name, args) {
                     return Some(Step::Reply(reply));
                 }
+                if let Some(reply) = replication::reply(
+                    self.feeds_replicas.is_some(),
+                    self.following.as_ref(),
+                    &name,
+                    args,
+                ) {
+                    return Some(Step::Reply(reply));
+                }
                 let shown: String = name.chars().take(MAX_NAME_SHOWN).collect();
                 Reply::Error(format!("ERR unknown command '{}'", shown.escape_default()))
             }
@@ -326,8 +378,20 @@ fn is_set(command: &Command) -> bool {
 fn set_reply<T>(answer: Result<T, StoreError>) -> Reply {
     match answer {
         Ok(_) => Reply::Simple("OK"),
+        Err(StoreError::ReadOnly) => read_only(),
         Err(error) => Reply::Error(format!("ERR {error}")),
     }
+}
+
+/// What a write or a decision sent to a server that follows another is
+/// answered. The first word is the one Redis and Valkey use, which
+/// clients know.
+fn read_only() -> Reply {
+    Reply::Error(
+        "READONLY this server follows another and takes no writes; send them to the server \
+         it follows"
+            .to_owned(),
+    )
 }
 
 /// Tells a client past the limit so, and closes its connection.

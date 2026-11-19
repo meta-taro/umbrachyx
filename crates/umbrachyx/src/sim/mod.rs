@@ -3,11 +3,12 @@
 //! can be replayed exactly.
 //!
 //! The disk and the clock are simulated, and so is the place a backup is
-//! kept. There is no network yet.
+//! kept, and the network between a replica and its primary.
 
 mod backup_run;
 mod disk;
 mod key_disk;
+mod net;
 mod plain_run;
 mod rng;
 mod run;

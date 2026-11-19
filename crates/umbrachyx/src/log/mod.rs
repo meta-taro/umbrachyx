@@ -280,6 +280,24 @@ impl<S: Storage> Log<S> {
         Ok(())
     }
 
+    /// Appends frames another log wrote, whole and already checked, and
+    /// returns once they are durable: one sync for all of them. `ends`
+    /// says where each ends in `frames`. For a replica, which takes in
+    /// what its primary sends many records at a time.
+    pub(crate) fn append_frames(&mut self, frames: &[u8], ends: &[u64]) -> Result<(), LogError> {
+        if self.is_poisoned {
+            return Err(LogError::Poisoned);
+        }
+        if let Err(error) = self.write_durably(frames) {
+            self.is_poisoned = true;
+            return Err(error.into());
+        }
+        let before = self.len;
+        self.ends.extend(ends.iter().map(|end| before + end));
+        self.len += frames.len() as u64;
+        Ok(())
+    }
+
     fn write_durably(&mut self, frame: &[u8]) -> io::Result<()> {
         self.storage.append(frame)?;
         self.storage.sync()

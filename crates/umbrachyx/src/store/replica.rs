@@ -49,23 +49,28 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// many bytes they were. A record cut short at the end is left for
     /// the next call, with the bytes that complete it.
     ///
-    /// Each record is written to this store's log and synced before it is
-    /// applied, as its own records are. An erasure destroys this store's
+    /// The records are written to this store's log and synced, all with
+    /// one sync, before any is applied. An erasure destroys this store's
     /// copy of the key too. Damaged records, and records sealed under keys
     /// this store does not hold, are refused before anything is written.
     pub fn replicate(&mut self, frames: &[u8]) -> Result<usize, StoreError> {
         let scan = record::scan(frames)?;
+        if scan.records.is_empty() {
+            return Ok(0);
+        }
         if let Some(sealer) = &self.sealer {
             check_sealed(&scan.records, &sealer.ring())?;
         }
+        let whole = scan.valid_len as usize;
+        self.sync_puts()?;
+        self.log.append_frames(&frames[..whole], &scan.ends)?;
         for record in &scan.records {
-            self.append(record)?;
             self.apply(record)
                 .map_err(|error| StoreError::Inconsistent(error.to_string()))?;
             if let (Record::Erase(erase), Some(sealer)) = (record, &mut self.sealer) {
                 sealer.erase_fingerprint(&erase.key_fingerprint)?;
             }
         }
-        Ok(scan.valid_len as usize)
+        Ok(whole)
     }
 }
