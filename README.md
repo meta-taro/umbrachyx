@@ -161,7 +161,8 @@ $ umbrachyx history agent/support player/42/gems
   nothing is measured on two machines yet. Started with
   `--wait-for-replica <seconds>`, the first server answers a write only
   once a replica holds it; killed in the middle of writes, every write
-  it acknowledged was on the replica (100 rounds, 72,964 writes). Not in a released version: build from source to try it
+  it acknowledged was on the replica (100 rounds, 72,964 writes, both
+  servers on one laptop). Not in a released version: build from source to try it
   ([`docs/decisions.md`](docs/decisions.md#replication-being-built)).
 - **`umbrachyx export` prints the whole log as JSON Lines**, one record a
   line, to search with `jq` or `grep`:

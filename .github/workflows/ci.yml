@@ -86,6 +86,12 @@ jobs:
       - name: server crash test (100 rounds)
         run: cargo test -p umbrachyx --release --test server_crash --locked -- --ignored --nocapture
 
+      # Kills a primary that answers a write only once its replica holds
+      # it, while 8 clients write, and reads every acknowledged SET from
+      # the replica.
+      - name: failover test (100 rounds)
+        run: cargo test -p umbrachyx --release --test server_failover --locked -- --ignored --nocapture
+
       # Deterministic simulation over a simulated disk and clock, for the log
       # (torn sectors, failed syncs, bit flips) and for the store on top of it
       # (multi-key commits, crashes, a clock that goes back). Release mode,

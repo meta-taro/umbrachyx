@@ -1406,8 +1406,14 @@ One store that writes, and others that follow it and answer reads.
   are refused.
 - **What waits and what does not.** Commits, puts to `plain` tables,
   approvals and rejections wait. Puts to `plain-async` tables do not:
-  they are answered before they are on this server's own disk. Reads
-  see a write before a replica holds it. After a restart the primary
+  they are answered before they are on this server's own disk; while
+  writes are refused for want of a replica, they are refused with the
+  rest. Reads see a write before a replica holds it. A question about
+  the history or a decision takes the writers' turn, so one asked while
+  a write waits for a replica waits with it: a round trip to the
+  replica as a rule, and once, for as long as the limit, when the
+  replica has gone; the thread that serves it serves no other client
+  meanwhile. After a restart the primary
   counts nothing as held until a replica asks again.
 - **What waiting costs is not measured on two machines.** With both
   servers on one laptop and one disk (sync 4 ms), a `SET` from one
