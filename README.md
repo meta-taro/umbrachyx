@@ -150,6 +150,17 @@ $ umbrachyx history agent/support player/42/gems
   to date while the server runs, without holding writes for the copy.
   Neither is in a released version yet: build from source to try them
   ([`docs/decisions.md`](docs/decisions.md#backup-and-restore)).
+- **A second server can follow the first and answer reads.** Restore a
+  backup on another machine and start it with `umbrachyx serve <branch>
+  --follow <host:port>`; the first server is started with
+  `--feed-replicas`. The replica asks for the records it lacks, holds
+  the same commits under the same ids, and refuses writes with
+  `READONLY`; `UMBRA.REPLICATION` says how far it is. For trials: the
+  connection is not encrypted, keys are not sent (a subject first
+  written after the backup stops the replica, which says so), a write
+  is acknowledged before any replica has it, and nothing is measured
+  yet. Not in a released version: build from source to try it
+  ([`docs/decisions.md`](docs/decisions.md#replication-being-built)).
 - **`umbrachyx export` prints the whole log as JSON Lines**, one record a
   line, to search with `jq` or `grep`:
   `umbrachyx export | jq 'select(.who == "agent:support")'`.
@@ -217,7 +228,8 @@ that is already there before the light arrives.
 > and what it shows still needs work, is in
 > [`docs/comparison.md`](docs/comparison.md). A later version opens the
 > log this one wrote; the key file and the `UMBRA.*` commands may still
-> change. It is one node, with no replication: try
+> change. It is one node; a second server can follow it and
+> answer reads, for trials only (below): try
 > it and measure it, and do not make it the only copy of data you need.
 > The design starts at [`docs/concept.md`](docs/concept.md).
 > What each version added is in [`CHANGELOG.md`](CHANGELOG.md).
@@ -405,7 +417,8 @@ and for the encrypted store
 [`bench/results/2026-11-05-sealed/robustness.txt`](bench/results/2026-11-05-sealed/robustness.txt).
 
 Not tested yet: power cuts on real hardware (only simulated), runs longer
-than minutes, and more than one node. Umbrachyx has no replication yet.
+than minutes, and more than one machine: a replica following its
+primary is tested on one machine and in simulation, and not measured.
 A restart replays the whole log: 57.5 s after five million writes to
 tables with history, 3.3 s after as many to a plain table.
 

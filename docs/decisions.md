@@ -1345,9 +1345,33 @@ One store that writes, and others that follow it and answer reads.
   then. Sending new keys with the log needs the connection encrypted;
   until it is, replication is for measurements and trials, not for data
   that must stay secret on the network.
-- **To come:** the connection, a replica's server that answers writes
-  and decisions with `READONLY`, acknowledging a write only once a
-  replica holds it, and measurements with one
+- **A replica is a client of its primary, on the port clients use.**
+  It sends one command, `UMBRA.LOG.AFTER`, with what it holds, and is
+  answered with one value or an error whose first word names the
+  refusal. A port of its own would be a second thing to bind, protect
+  and document for no gain yet.
+- **A server hands its log out only if whoever started it said so**
+  (`serve --feed-replicas`). The command needs no token, as reads need
+  none, and answers with every branch, values still sealed; a server
+  should not answer it to whoever reaches the port by default.
+- **A replica listens whether or not its primary can be reached**
+  (`serve --follow <host:port>`), and answers reads with what it holds.
+  When no answer comes it says so once and keeps asking every second.
+  When it is refused, or cannot take in what it was sent (a key it was
+  not given, its own disk), it says why, stops asking, and goes on
+  answering reads: asking again would get the same answer.
+  `UMBRA.REPLICATION` says which of these it is and how many records it
+  and its primary hold.
+- **Writes to a replica are answered `READONLY`**, the word Redis and
+  Valkey use, which clients know.
+- **A replica that holds everything asks again after a millisecond.**
+  That, and the turn its ask waits for on the primary, is how far
+  behind it runs. Neither is measured yet; holding the ask open on the
+  primary until there is something to send is the next step if the
+  measurement asks for it.
+- **To come:** acknowledging a write only once a
+  replica holds it, an encrypted connection that keys can travel on,
+  and measurements with one
   writer and several readers next to Valkey and PostgreSQL set up the
   same way.
 

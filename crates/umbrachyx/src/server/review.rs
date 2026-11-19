@@ -242,6 +242,7 @@ fn decide(
 
 fn store_error(error: &StoreError) -> Reply {
     match error {
+        StoreError::ReadOnly => super::read_only(),
         StoreError::NotWaiting(_, why) => {
             Reply::Error(format!("NOTWAITING {} {error}", why.word()))
         }

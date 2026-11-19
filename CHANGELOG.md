@@ -12,6 +12,16 @@
   server runs: a backup holds the moment it began, the log is copied a
   part at a time between writes, and no client can ask for one or name
   the place.
+- **A server that follows another.** `umbrachyx serve <branch> --follow
+  <host:port>` serves a restored backup of another server as its
+  replica: it asks that server, started with `--feed-replicas`, for the
+  records after the ones it holds, answers reads with the same commits
+  under the same ids, and refuses writes with `READONLY`.
+  `UMBRA.REPLICATION` says how far it is, and why it stopped if it did.
+  A replica holding another log, more records than its primary, or
+  records its primary does not hold is sent nothing. For trials only:
+  nothing on the way is encrypted, keys are not sent, a write is
+  acknowledged before any replica has it, and nothing is measured yet.
 
 ## 0.2.0
 

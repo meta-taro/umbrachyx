@@ -588,3 +588,126 @@ fn serve_refuses_to_start_where_its_backup_cannot_be_kept() {
     assert!(String::from_utf8_lossy(&not_a_time.stderr).contains("--backup-every"));
     assert!(String::from_utf8_lossy(&nowhere.stderr).contains("--backup-to"));
 }
+
+/// Sends one command and returns the first line of its reply.
+fn first_line(client: &mut TcpStream, command: &[&str]) -> String {
+    use std::io::{BufRead, BufReader};
+
+    let mut out = format!("*{}\r\n", command.len());
+    for arg in command {
+        out.push_str(&format!("${}\r\n{arg}\r\n", arg.len()));
+    }
+    client.write_all(out.as_bytes()).expect("sends");
+    let mut reader = BufReader::new(client);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("reads");
+    if line.starts_with('$') && !line.starts_with("$-1") {
+        line.clear();
+        reader.read_line(&mut line).expect("reads");
+    }
+    line.trim_end().to_owned()
+}
+
+/// Asks again until the reply to `command` starts with `wanted`.
+fn wait_for(client: &mut TcpStream, command: &[&str], wanted: &str) -> String {
+    let start = Instant::now();
+    loop {
+        let reply = first_line(client, command);
+        if reply.contains(wanted) {
+            return reply;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "{command:?} was never answered with {wanted:?}, but {reply:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn serve_with_follow_answers_reads_from_a_restored_backup_of_the_server_it_follows() {
+    let dir = TempDir::new("serve-follow");
+    let backup = dir.0.join("backup");
+    let backup = backup.to_str().expect("utf-8 path");
+    let options = [
+        "--feed-replicas",
+        "--backup-to",
+        backup,
+        "--backup-every",
+        "0.05",
+    ];
+    let (_primary, said, port) = serve_on_a_free_port(&dir, &options);
+    assert!(
+        said.contains("handing the log to replicas that ask"),
+        "{said}"
+    );
+    let mut primary = connect(port);
+    assert_eq!(
+        first_line(&mut primary, &["SET", "player/1/gems", "55"]),
+        "+OK"
+    );
+    // A replica starts as a restored backup: one that holds the player.
+    let start = Instant::now();
+    loop {
+        let _ = std::fs::remove_file(dir.0.join("replica"));
+        let _ = std::fs::remove_file(dir.0.join("replica.keys"));
+        let restored = run_on(&dir, "replica", &["restore", backup]);
+        let read = run_on(&dir, "replica", &["get", BRANCH, "player/1/gems"]);
+        if restored.status.success() && String::from_utf8_lossy(&read.stdout).trim() == "55" {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "no backup");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let replica_port = free_port();
+    let follow = format!("127.0.0.1:{port}");
+    let _replica = Server(
+        dir.umbrachyx(&[
+            "serve",
+            BRANCH,
+            "--port",
+            &replica_port.to_string(),
+            "--follow",
+            &follow,
+        ])
+        .env("UMBRACHYX_DB", dir.0.join("replica"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("starts"),
+    );
+    let mut replica = connect(replica_port);
+
+    assert_eq!(
+        first_line(&mut primary, &["SET", "player/1/gems", "70"]),
+        "+OK"
+    );
+
+    wait_for(&mut replica, &["GET", "player/1/gems"], "70");
+    let refused = first_line(&mut replica, &["SET", "player/1/gems", "1"]);
+    assert!(refused.starts_with("-READONLY "), "{refused}");
+    // A player the primary first heard of after the backup: the key the
+    // values are sealed under was never given to the replica.
+    assert_eq!(
+        first_line(&mut primary, &["SET", "player/2/gems", "7"]),
+        "+OK"
+    );
+    let said = wait_for(&mut replica, &["UMBRA.REPLICATION"], "the key file lacks");
+    assert!(said.contains("\"role\":\"replica\""), "{said}");
+    assert_eq!(first_line(&mut replica, &["GET", "player/1/gems"]), "70");
+}
+
+#[test]
+fn serve_refuses_to_follow_what_is_not_a_host_and_a_port() {
+    let dir = TempDir::new("serve-follow-refused");
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+
+    let refused = dir.run(&["serve", BRANCH, "--follow", "the-primary"]);
+
+    assert!(!refused.status.success());
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(said.contains("is not a host and a port"), "{said}");
+}
