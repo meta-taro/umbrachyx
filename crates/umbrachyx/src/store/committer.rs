@@ -28,20 +28,24 @@
 //! to [`Writer::sync_puts`], or the stop. Nothing here keeps time: whoever
 //! runs the committer calls `sync_puts` as often as it promises to.
 
-use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
-use super::backup::{BackupError, Moment, Origin};
-use super::follow::{Ask, Chained, Feed, Follower, Held, Refusal, Sent};
+use super::backup::Origin;
+use super::follow::{Feed, Follower};
 use super::replicas::Replicas;
 use super::{
     Clock, CommitId, CommitRequest, Inspect, Provenance, Request, Review, Store, StoreError, View,
 };
-use crate::log::record::{BATCH_OVERHEAD, commit_len, edits_len};
-use crate::log::{Edit, LogError, MAX_PAYLOAD_LEN, Storage};
+use crate::log::record::{commit_len, edits_len};
+use crate::log::{Edit, LogError, Storage};
+
+mod copies;
+mod turns;
+
+use turns::{Job, Slot, Turn, Turns, lock};
 
 type Answer = Result<CommitId, StoreError>;
 
@@ -56,153 +60,6 @@ type FeedTurn<'a> = Box<dyn FnOnce(&mut dyn Feed) + 'a>;
 /// Takes in what a primary sent.
 type FollowTurn<'a> = Box<dyn FnOnce(&mut dyn Follower) + 'a>;
 
-struct Job {
-    request: Request,
-    /// The bytes the request adds to a group's payload.
-    len: usize,
-    answer: Arc<Slot>,
-}
-
-/// Where a commit's answer is left for whoever sent it.
-#[derive(Default)]
-struct Slot(Mutex<Option<Answer>>);
-
-impl Slot {
-    fn fill(&self, answer: Answer) {
-        *lock(&self.0) = Some(answer);
-    }
-
-    fn take(&self) -> Option<Answer> {
-        lock(&self.0).take()
-    }
-}
-
-/// A lock a panic elsewhere cannot leave unusable: what it guards is
-/// replaced whole, never left half changed.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// The commits not yet written, and whether somebody is writing.
-#[derive(Default)]
-struct Turns {
-    queue: Mutex<Queue>,
-    /// Told whenever a turn ends.
-    ended: Condvar,
-}
-
-#[derive(Default)]
-struct Queue {
-    jobs: VecDeque<Job>,
-    is_taken: bool,
-    /// Whether whoever has the turn waits for a replica to hold what it
-    /// wrote, and lets replicas be answered meanwhile.
-    is_lent: bool,
-}
-
-/// How long a backup's turn waits for a writer to take its own first.
-const LET_A_WRITER_GO: Duration = Duration::from_millis(10);
-
-/// The turn to write, held by one thread at a time. Dropping it, also by a
-/// panic, lets the next one take it.
-struct Turn<'a>(&'a Turns);
-
-impl Drop for Turn<'_> {
-    fn drop(&mut self) {
-        lock(&self.0.queue).is_taken = false;
-        self.0.ended.notify_all();
-    }
-}
-
-impl Turns {
-    /// Waits for the turn to write.
-    fn take(&self) -> Turn<'_> {
-        let mut queue = lock(&self.queue);
-        while queue.is_taken {
-            queue = self
-                .ended
-                .wait(queue)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-        queue.is_taken = true;
-        Turn(self)
-    }
-
-    /// Waits for the turn as [`Turns::take`] does, after letting whoever
-    /// is writing, or about to, have theirs: for work that takes many
-    /// turns in a row and must not keep the writers waiting through all
-    /// of them. A commit queued and never waited for has no writer
-    /// coming, so the wait for one is short.
-    fn take_after_a_writer(&self) -> Turn<'_> {
-        let queue = lock(&self.queue);
-        if queue.is_taken || !queue.jobs.is_empty() {
-            drop(
-                self.ended
-                    .wait_timeout(queue, LET_A_WRITER_GO)
-                    .unwrap_or_else(PoisonError::into_inner),
-            );
-        } else {
-            drop(queue);
-        }
-        self.take()
-    }
-
-    /// Waits for the turn as [`Turns::take_after_a_writer`] does, to
-    /// answer a replica. `None` if whoever has the turn waits for a
-    /// replica: the answer is what it waits for, and goes ahead with the
-    /// turn still taken. The store is locked for each read all the same.
-    fn take_to_feed(&self) -> Option<Turn<'_>> {
-        let mut queue = lock(&self.queue);
-        if !queue.is_lent && (queue.is_taken || !queue.jobs.is_empty()) {
-            queue = self
-                .ended
-                .wait_timeout(queue, LET_A_WRITER_GO)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
-        }
-        loop {
-            if queue.is_lent {
-                return None;
-            }
-            if !queue.is_taken {
-                queue.is_taken = true;
-                return Some(Turn(self));
-            }
-            queue = self
-                .ended
-                .wait(queue)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-    }
-
-    /// Lets replicas be answered while whoever has the turn runs `wait`.
-    fn lend_while<T>(&self, wait: impl FnOnce() -> T) -> T {
-        lock(&self.queue).is_lent = true;
-        self.ended.notify_all();
-        let waited = wait();
-        lock(&self.queue).is_lent = false;
-        waited
-    }
-
-    /// The jobs at the front of the queue whose payload fits one record,
-    /// at least one if there is any.
-    fn next_group(&self) -> Vec<Job> {
-        let mut queue = lock(&self.queue);
-        // A group of commits alone has less in front of it than a batch;
-        // counting a batch's keeps either within one record.
-        let mut len = BATCH_OVERHEAD;
-        let mut group = Vec::new();
-        while let Some(job) = queue.jobs.front() {
-            if !group.is_empty() && len + job.len > MAX_PAYLOAD_LEN {
-                break;
-            }
-            len += job.len;
-            group.extend(queue.jobs.pop_front());
-        }
-        group
-    }
-}
-
 /// The store behind the turns, with its storage and clock hidden so that
 /// writers need not name them.
 trait Engine: Send + Sync {
@@ -213,6 +70,10 @@ trait Engine: Send + Sync {
     fn write_queue(&self);
     /// Whether the store was there to ask. The caller holds the turn.
     fn inspect(&self, question: Question<'_>) -> bool;
+    /// As `inspect`, without writing the queue first and without the
+    /// turn: for a question asked while whoever has the turn waits for a
+    /// replica.
+    fn look(&self, question: Question<'_>) -> bool;
     /// As `inspect`, and publishes the view after it. Refused, the
     /// decision not carried out, if the store was not there or no
     /// replica keeps up; an error after it was carried out if no replica
@@ -398,6 +259,10 @@ where
 
     fn inspect(&self, question: Question<'_>) -> bool {
         self.write_queue();
+        self.look(question)
+    }
+
+    fn look(&self, question: Question<'_>) -> bool {
         match lock(&self.store).as_ref() {
             Some(store) => {
                 question(store);
@@ -690,11 +555,19 @@ impl Writer {
     /// are written. It waits behind their sync, so it suits a person
     /// reading the history, not a hot path; reads of live values go
     /// through a [`Reader`].
+    ///
+    /// One case differs, in a store that answers a write only once a
+    /// replica holds it. While a write waits for a replica, the question
+    /// is answered from what is written by then, that write included,
+    /// and commits queued behind it are not waited for: a replica that
+    /// has gone would hold every question as long as it holds the write.
     pub fn ask<T>(&self, question: impl FnOnce(&dyn Inspect) -> T) -> Result<T, StoreError> {
         let mut answer = None;
-        let _turn = self.engine.turns().take();
-        self.engine
-            .inspect(Box::new(|store| answer = Some(question(store))));
+        let question: Question<'_> = Box::new(|store| answer = Some(question(store)));
+        match self.engine.turns().take_to_read() {
+            Some(_turn) => self.engine.inspect(question),
+            None => self.engine.look(question),
+        };
         answer.ok_or(StoreError::Stopped)
     }
 
@@ -709,134 +582,6 @@ impl Writer {
         self.engine
             .review(Box::new(|store| answer = Some(decision(store))))?;
         answer.ok_or(StoreError::Stopped)
-    }
-}
-
-impl Writer {
-    /// One turn of a backup: what it reads of the store, between two
-    /// groups of writes.
-    fn back_up<T>(
-        &self,
-        read: impl FnOnce(&mut dyn Origin) -> Result<T, BackupError>,
-    ) -> Result<T, BackupError> {
-        let mut answer = None;
-        let _turn = self.engine.turns().take_after_a_writer();
-        self.engine
-            .back_up(Box::new(|store| answer = Some(read(store))));
-        answer.unwrap_or(Err(BackupError::Stopped))
-    }
-}
-
-/// A store behind a committer is backed up through any of its writers,
-/// while the others write: each turn of the backup waits for the group
-/// being written and holds up the next for as long as it reads.
-impl Origin for Writer {
-    fn records(&mut self) -> Result<u64, BackupError> {
-        self.back_up(|store| store.records())
-    }
-
-    fn catch_up(&mut self) -> Result<bool, BackupError> {
-        self.back_up(|store| store.catch_up())
-    }
-
-    fn moment(&mut self, held_records: u64) -> Result<Moment, BackupError> {
-        self.back_up(|store| store.moment(held_records))
-    }
-
-    fn log_bytes(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, BackupError> {
-        self.back_up(|store| store.log_bytes(offset, len))
-    }
-}
-
-impl Writer {
-    /// Whether the store behind this writer follows another, and so
-    /// refuses every write.
-    pub fn is_following(&self) -> bool {
-        self.engine.is_following()
-    }
-
-    /// Waits until the log holds more than `after` records, `at_most`
-    /// this long, and returns whether it does. For whoever answers a
-    /// replica that holds everything: the answer can wait for something
-    /// to send, so the replica has it as soon as it is written and need
-    /// not ask over and over to find out.
-    pub fn wait_for_more_records(&self, after: u64, at_most: Duration) -> bool {
-        self.engine.wait_for_records(after, at_most)
-    }
-
-    /// How many records a replica has said it holds, and whether writes
-    /// are refused because none keeps up. `None` for a store that does
-    /// not wait for replicas.
-    pub fn replicas(&self) -> Option<(u64, bool)> {
-        self.engine.replicas()
-    }
-
-    /// How many records the log held when the last write ended.
-    pub fn held_records(&self) -> u64 {
-        self.engine.records()
-    }
-
-    /// One turn of answering a replica, between two groups of writes.
-    fn feed<T>(
-        &self,
-        read: impl FnOnce(&mut dyn Feed) -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
-        let mut answer = None;
-        let _turn = self.engine.turns().take_to_feed();
-        self.engine
-            .feed(Box::new(|store| answer = Some(read(store))));
-        answer.unwrap_or(Err(StoreError::Stopped))
-    }
-
-    /// One turn of a store that follows another.
-    fn follow<T>(
-        &self,
-        turn: impl FnOnce(&mut dyn Follower) -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
-        if !self.engine.is_following() {
-            return Err(StoreError::NotFollowing);
-        }
-        let mut answer = None;
-        let _turn = self.engine.turns().take();
-        self.engine
-            .follow(Box::new(|store| answer = Some(turn(store))));
-        answer.unwrap_or(Err(StoreError::Stopped))
-    }
-}
-
-/// Whichever the store behind it is, one that feeds replicas or one that
-/// follows: its chain is worked out a turn at a time, as for a backup.
-impl Chained for Writer {
-    fn chain_step(&mut self) -> Result<bool, StoreError> {
-        self.feed(|store| store.chain_step())
-    }
-}
-
-/// A store behind a committer feeds replicas through any of its writers,
-/// while the others write. A replica is sent what was acknowledged by
-/// then; commits queued and not yet written are not waited for.
-impl Feed for Writer {
-    fn sent(&mut self, ask: &Ask) -> Result<Result<Sent, Refusal>, StoreError> {
-        let sent = self.feed(|store| store.sent(ask))?;
-        // The log's name and the chain over what the replica holds
-        // checked out: it has those records on its disk.
-        if sent.is_ok() {
-            self.engine.replica_holds(ask.held.records);
-        }
-        Ok(sent)
-    }
-}
-
-/// A store started with [`Committer::start_following`] takes in its
-/// primary's records through any of its writers, and readers see them
-/// once it has.
-impl Follower for Writer {
-    fn held(&mut self) -> Result<Held, StoreError> {
-        self.follow(|store| store.held())
-    }
-
-    fn take_in(&mut self, sent: &Sent) -> Result<u64, StoreError> {
-        self.follow(|store| store.take_in(sent))
     }
 }
 
