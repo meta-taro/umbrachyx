@@ -1372,13 +1372,56 @@ One store that writes, and others that follow it and answer reads.
   say, as no reply says where a backup is kept.
 - **Writes to a replica are answered `READONLY`**, the word Redis and
   Valkey use, which clients know.
-- **A replica that holds everything asks again after a millisecond.**
-  That, and the turn its ask waits for on the primary, is how far
-  behind it runs. Neither is measured yet; holding the ask open on the
-  primary until there is something to send is the next step if the
-  measurement asks for it.
-- **To come:** acknowledging a write only once a
-  replica holds it, an encrypted connection that keys can travel on,
+- **A primary holds the ask of a replica that has everything** until
+  something is written, a second at most, and then answers with it. A
+  replica that asked again every millisecond put up to a thousand asks
+  a second, two turns each, in front of an idle primary's writers; held,
+  it is one a second. On a laptop whose disk takes 4 ms to sync it does
+  not change how soon a replica holds a write: 4.0 to 4.1 ms after the
+  primary answered, with or without, which is the replica's own sync
+  (median of 300 writes, one client, both servers on one machine, three
+  runs each). Whether it does on a disk that syncs in a tenth of that
+  is not measured.
+- **A server can be started to answer a write only once a replica
+  holds it** (`serve --wait-for-replica <seconds>`). A replica's ask
+  says how many records it has on its disk; once the log's name and the
+  chain over them have checked out, the primary counts them as held.
+  The writer of a group waits for that count to reach its records
+  before anyone in the group is answered, and lets replicas be answered
+  while it waits. So an acknowledged write is on two disks. The test:
+  two processes, eight clients, the primary killed with SIGKILL at a
+  random moment, and every acknowledged `SET` read from the replica at
+  once; 100 rounds, 72,964 writes, none missing. Without the option the
+  same test finds a missing write in its second round.
+- **A write no replica held in time is answered `NOTREPLICATED`, and
+  the writes after it `NOREPLICA`.** The first is in the primary's log
+  and readers see it; it is sent on when a replica comes. Answering it
+  `OK` would say it is on two disks, and waiting for ever would hang
+  every client of a server whose replica is gone. The writes after it
+  are refused before they are written, so the log does not fill with
+  writes that would be answered the same way, until a replica holds
+  everything the log does. A word of its own for each lets a client
+  tell "not written" from "written here only". `UMBRA.REPLICATION` on
+  the primary says how many records a replica holds and whether writes
+  are refused.
+- **What waits and what does not.** Commits, puts to `plain` tables,
+  approvals and rejections wait. Puts to `plain-async` tables do not:
+  they are answered before they are on this server's own disk; while
+  writes are refused for want of a replica, they are refused with the
+  rest. Reads see a write before a replica holds it. A question about
+  the history or a decision takes the writers' turn, so one asked while
+  a write waits for a replica waits with it: a round trip to the
+  replica as a rule, and once, for as long as the limit, when the
+  replica has gone; the thread that serves it serves no other client
+  meanwhile. After a restart the primary
+  counts nothing as held until a replica asks again.
+- **What waiting costs is not measured on two machines.** With both
+  servers on one laptop and one disk (sync 4 ms), a `SET` from one
+  client takes 7.9 ms when the primary does not wait and 8.0 ms when it
+  does (median of 300, three runs each); alone, the server answers in
+  4.0 ms. The two servers sync to the same disk in turn, which is most
+  of that, and says little about two machines.
+- **To come:** an encrypted connection that keys can travel on,
   and measurements with one
   writer and several readers next to Valkey and PostgreSQL set up the
   same way.

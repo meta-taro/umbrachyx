@@ -157,9 +157,12 @@ $ umbrachyx history agent/support player/42/gems
   the same commits under the same ids, and refuses writes with
   `READONLY`; `UMBRA.REPLICATION` says how far it is. For trials: the
   connection is not encrypted, keys are not sent (a subject first
-  written after the backup stops the replica, which says so), a write
-  is acknowledged before any replica has it, and nothing is measured
-  yet. Not in a released version: build from source to try it
+  written after the backup stops the replica, which says so), and
+  nothing is measured on two machines yet. Started with
+  `--wait-for-replica <seconds>`, the first server answers a write only
+  once a replica holds it; killed in the middle of writes, every write
+  it acknowledged was on the replica (100 rounds, 72,964 writes, both
+  servers on one laptop). Not in a released version: build from source to try it
   ([`docs/decisions.md`](docs/decisions.md#replication-being-built)).
 - **`umbrachyx export` prints the whole log as JSON Lines**, one record a
   line, to search with `jq` or `grep`:

@@ -21,8 +21,15 @@
   `UMBRA.REPLICATION` says how far it is, and why it stopped if it did.
   A replica holding another log, more records than its primary, or
   records its primary does not hold is sent nothing. For trials only:
-  nothing on the way is encrypted, keys are not sent, a write is
-  acknowledged before any replica has it, and nothing is measured yet.
+  nothing on the way is encrypted, keys are not sent, and nothing is
+  measured on two machines yet.
+- **Answering a write only once a replica holds it.** `umbrachyx serve
+  --feed-replicas-on <port> --wait-for-replica <seconds>` holds each
+  answer until a replica has said the write is on its disk. A write no
+  replica held in time is answered `NOTREPLICATED` (it is in this
+  server's log); the writes after it are answered `NOREPLICA` and not
+  written, until a replica holds everything. Puts to `plain-async`
+  tables do not wait.
 
 ## 0.2.0
 

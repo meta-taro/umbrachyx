@@ -314,6 +314,7 @@ impl Server {
                     return Some(Step::Reply(reply));
                 }
                 if let Some(reply) = replication::reply(
+                    &self.writer,
                     self.feeds_replicas.is_some(),
                     self.following.as_ref(),
                     &name,
@@ -378,8 +379,23 @@ fn is_set(command: &Command) -> bool {
 fn set_reply<T>(answer: Result<T, StoreError>) -> Reply {
     match answer {
         Ok(_) => Reply::Simple("OK"),
-        Err(StoreError::ReadOnly) => read_only(),
-        Err(error) => Reply::Error(format!("ERR {error}")),
+        Err(error) => match unreplicated(&error) {
+            Some(reply) => reply,
+            None => Reply::Error(format!("ERR {error}")),
+        },
+    }
+}
+
+/// What a write is answered when the server could not do with it what
+/// it does with writes, with a first word of its own: a client can tell
+/// a write that was not made from one that is here and on no replica
+/// yet.
+fn unreplicated(error: &StoreError) -> Option<Reply> {
+    match error {
+        StoreError::ReadOnly => Some(read_only()),
+        StoreError::NoReplica => Some(Reply::Error(format!("NOREPLICA {error}"))),
+        StoreError::NotReplicated => Some(Reply::Error(format!("NOTREPLICATED {error}"))),
+        _ => None,
     }
 }
 

@@ -367,3 +367,89 @@ fn a_replica_started_before_its_primary_follows_it_once_it_is_there() {
     let said = replica.wait_for_replication(|said| said["unreachable"].is_null());
     assert!(said["stopped"].is_null(), "{said}");
 }
+
+/// Prints how long after a `SET` is answered by the primary a replica on
+/// the same machine answers a `GET` with it. Not a pass or fail: run
+/// with `--ignored --nocapture --release`.
+#[test]
+#[ignore = "a measurement; run with --ignored --nocapture"]
+fn measure_how_long_a_replica_takes_to_hold_what_was_written() {
+    const WRITES: usize = 300;
+    let dir = TempDir::new("measure");
+    let (mut primary, mut replica) = pair(&dir);
+    let mut waits = Vec::with_capacity(WRITES);
+
+    for round in 0..WRITES {
+        let value = round.to_string();
+        assert_eq!(primary.text(&["SET", "player/1/gems", &value]), "+OK");
+        let start = Instant::now();
+        while replica.text(&["GET", "player/1/gems"]) != value {
+            assert!(start.elapsed() < LIMIT, "the replica never held {value}");
+        }
+        waits.push(start.elapsed());
+        // The replica's next ask is out before the next write.
+        thread::sleep(Duration::from_millis(3));
+    }
+
+    waits.sort();
+    println!(
+        "replica holds a write after: median {:?}, 99th {:?}, slowest {:?} ({WRITES} writes, one \
+         client, same machine)",
+        waits[WRITES / 2],
+        waits[WRITES * 99 / 100],
+        waits[WRITES - 1]
+    );
+}
+
+/// Prints how long a `SET` takes on a primary that answers once a
+/// replica holds the write, and on one that does not wait. Not a pass or
+/// fail: run with `--ignored --nocapture --release`.
+#[test]
+#[ignore = "a measurement; run with --ignored --nocapture"]
+fn measure_a_set_that_waits_for_a_replica() {
+    const WRITES: usize = 300;
+    for waits in [false, true] {
+        let dir = TempDir::new(if waits {
+            "measure-wait"
+        } else {
+            "measure-no-wait"
+        });
+        let mut store = dir.primary();
+        let replica = dir.copy_of(&mut store);
+        let committer = if waits {
+            Committer::start_waiting_for_a_replica(store, LIMIT)
+        } else {
+            Committer::start(store)
+        };
+        let (feed, feed_address) = free_address();
+        let server = Server::new(BRANCH, committer.writer(), committer.reader())
+            .expect("serves a branch")
+            .feed_replicas_on(feed);
+        let (listener, address) = free_address();
+        thread::spawn(move || {
+            let _committer = committer;
+            server.serve(listener)
+        });
+        let _replica = Client::connect(serve_replica(replica, feed_address));
+        let mut primary = Client::connect(address);
+        let mut took = Vec::with_capacity(WRITES);
+
+        for round in 0..WRITES {
+            let start = Instant::now();
+            assert_eq!(
+                primary.text(&["SET", "player/1/gems", &round.to_string()]),
+                "+OK"
+            );
+            took.push(start.elapsed());
+        }
+
+        took.sort();
+        println!(
+            "SET, waits for a replica {waits}: median {:?}, 99th {:?}, slowest {:?} ({WRITES} \
+             writes, one client, same machine)",
+            took[WRITES / 2],
+            took[WRITES * 99 / 100],
+            took[WRITES - 1]
+        );
+    }
+}

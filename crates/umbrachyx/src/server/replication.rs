@@ -18,11 +18,21 @@
 //! A server that follows takes no writes: the store refuses them, and
 //! the client is told `READONLY`. It listens whether or not its primary
 //! can be reached, and answers with what it holds. A thread of its own
-//! asks the primary, again as soon as it is answered while it is behind,
-//! and every [`POLL`] once it holds everything. When no answer comes it
+//! asks the primary, again as soon as it is answered. A primary holds
+//! the ask of a replica that has everything until something is written,
+//! a second at most, so a replica is sent a record when it is written,
+//! not when it next asks. When no answer comes it
 //! says so once and keeps asking; when the primary refuses it, or it
 //! cannot take in what it was sent, it says why and stops asking, and
-//! goes on answering reads. `UMBRA.REPLICATION` says which of these it
+//! goes on answering reads.
+//!
+//! A server may be started to answer a write only once a replica holds
+//! it (see `store::replicas`). A write no replica held in time is
+//! answered `NOTREPLICATED`: it is in this server's log. Writes after it
+//! are answered `NOREPLICA` and not written, until a replica holds
+//! everything.
+//!
+//! `UMBRA.REPLICATION` says which of these it
 //! is, and how far behind, to any client; it does not say where the
 //! primary is, which is whoever started the server's to know.
 
@@ -37,16 +47,23 @@ use serde_json::json;
 
 use super::resp::{self, Reply};
 use crate::log::{Chain, LogId, MAX_PAYLOAD_LEN, record};
-use crate::store::Writer;
 use crate::store::follow::{
     Ask, FollowError, Held, MAX_SENT, Primary, Progress, Refusal, Sent, answer, follow_once,
 };
+use crate::store::{StoreError, Writer};
 
 const LOG_AFTER: &str = "UMBRA.LOG.AFTER";
 const REPLICATION: &str = "UMBRA.REPLICATION";
-/// How long a replica that holds everything waits before it asks again:
-/// about how far behind it is when its primary is written to.
+/// How long a replica waits before it asks again after an answer that
+/// brought nothing. A primary holds such an answer back, so this only
+/// keeps a replica from asking without pause where one does not.
 const POLL: Duration = Duration::from_millis(1);
+/// How long a primary holds the ask of a replica that holds everything
+/// before it answers that there is nothing: until then the answer is
+/// whatever is written next, as soon as it is. Shorter than a replica
+/// waits for an answer.
+const HOLD: Duration = Duration::from_secs(1);
+const _: () = assert!(HOLD.as_secs() < PATIENCE.as_secs());
 /// How long it waits after an ask that got no answer.
 const RETRY: Duration = Duration::from_secs(1);
 /// How long it waits to reach the primary, and for each answer.
@@ -86,13 +103,14 @@ fn lock(shared: &Shared) -> std::sync::MutexGuard<'_, Following> {
 /// The reply to a replication command a client may send, or `None` if
 /// `name` is none.
 pub(super) fn reply(
+    writer: &Writer,
     feeds: bool,
     following: Option<&Shared>,
     name: &str,
     args: &[Vec<u8>],
 ) -> Option<Reply> {
     match name {
-        REPLICATION if args.is_empty() => Some(status(feeds, following)),
+        REPLICATION if args.is_empty() => Some(status(writer, feeds, following)),
         REPLICATION => Some(Reply::Error(format!(
             "ERR wrong number of arguments for '{}' command",
             REPLICATION.to_ascii_lowercase()
@@ -172,18 +190,43 @@ fn feed_reply(writer: &mut Writer, command: &[Vec<u8>]) -> Reply {
     if !name.eq_ignore_ascii_case(LOG_AFTER.as_bytes()) {
         return Reply::Error(ONLY_REPLICAS.to_owned());
     }
-    match read_ask(args) {
-        Ok(ask) => match answer(writer, &ask) {
-            Ok(answer) => answer_reply(answer),
-            Err(error) => Reply::Error(format!("ERR {error}")),
-        },
+    let ask = match read_ask(args) {
+        Ok(ask) => ask,
+        Err(error) => return Reply::Error(format!("ERR {error}")),
+    };
+    match held_answer(writer, &ask) {
+        Ok(answer) => answer_reply(answer),
         Err(error) => Reply::Error(format!("ERR {error}")),
     }
 }
 
-fn status(feeds: bool, following: Option<&Shared>) -> Reply {
+/// The answer to `ask`, held back for up to [`HOLD`] while there is
+/// nothing to send.
+fn held_answer(writer: &mut Writer, ask: &Ask) -> Result<Result<Sent, Refusal>, StoreError> {
+    let first = answer(writer, ask)?;
+    let has_nothing = matches!(&first, Ok(sent) if sent.frames.is_empty());
+    if has_nothing && writer.wait_for_more_records(ask.held.records, HOLD) {
+        return answer(writer, ask);
+    }
+    Ok(first)
+}
+
+fn status(writer: &Writer, feeds: bool, following: Option<&Shared>) -> Reply {
     let status = match following {
-        None => json!({ "role": "primary", "feeds_replicas": feeds }),
+        None => {
+            // For a server that answers a write only once a replica
+            // holds it: how many records one has said it holds, and
+            // whether writes are refused because none keeps up.
+            let replicas = writer.replicas();
+            json!({
+                "role": "primary",
+                "feeds_replicas": feeds,
+                "waits_for_a_replica": replicas.is_some(),
+                "records": writer.held_records(),
+                "replica_records": replicas.map(|(held, _)| held),
+                "refuses_writes": replicas.map(|(_, is_behind)| is_behind),
+            })
+        }
         Some(shared) => {
             let following = lock(shared);
             json!({
@@ -412,9 +455,11 @@ fn follow(mut writer: Writer, primary: String, shared: &Shared) {
         primary,
         stream: None,
     };
+    let mut held = None;
     loop {
         match follow_once(&mut wire, &mut writer, MAX_SENT) {
             Ok(progress) => {
+                let brought_nothing = held.replace(progress.held) == Some(progress.held);
                 let was_unreachable = {
                     let mut following = lock(shared);
                     following.progress = Some(progress);
@@ -426,7 +471,7 @@ fn follow(mut writer: Writer, primary: String, shared: &Shared) {
                         wire.primary, progress.primary, progress.held
                     );
                 }
-                if progress.is_caught_up() {
+                if brought_nothing {
                     thread::sleep(POLL);
                 }
             }

@@ -97,6 +97,7 @@ done
 
 {
   cargo test -q -p umbrachyx --release --test server_crash -- --ignored --nocapture
+  cargo test -q -p umbrachyx --release --test server_failover -- --ignored --nocapture
   cargo test -q -p umbrachyx --test crash -- --ignored --nocapture
   cargo test -q -p umbrachyx --lib --release ten_thousand_seeds -- --ignored --nocapture
 } >"$out/robustness.txt" 2>&1

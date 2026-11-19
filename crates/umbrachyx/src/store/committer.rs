@@ -36,6 +36,7 @@ use std::time::Duration;
 
 use super::backup::{BackupError, Moment, Origin};
 use super::follow::{Ask, Chained, Feed, Follower, Held, Refusal, Sent};
+use super::replicas::Replicas;
 use super::{
     Clock, CommitId, CommitRequest, Inspect, Provenance, Request, Review, Store, StoreError, View,
 };
@@ -94,6 +95,9 @@ struct Turns {
 struct Queue {
     jobs: VecDeque<Job>,
     is_taken: bool,
+    /// Whether whoever has the turn waits for a replica to hold what it
+    /// wrote, and lets replicas be answered meanwhile.
+    is_lent: bool,
 }
 
 /// How long a backup's turn waits for a writer to take its own first.
@@ -143,6 +147,43 @@ impl Turns {
         self.take()
     }
 
+    /// Waits for the turn as [`Turns::take_after_a_writer`] does, to
+    /// answer a replica. `None` if whoever has the turn waits for a
+    /// replica: the answer is what it waits for, and goes ahead with the
+    /// turn still taken. The store is locked for each read all the same.
+    fn take_to_feed(&self) -> Option<Turn<'_>> {
+        let mut queue = lock(&self.queue);
+        if !queue.is_lent && (queue.is_taken || !queue.jobs.is_empty()) {
+            queue = self
+                .ended
+                .wait_timeout(queue, LET_A_WRITER_GO)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        loop {
+            if queue.is_lent {
+                return None;
+            }
+            if !queue.is_taken {
+                queue.is_taken = true;
+                return Some(Turn(self));
+            }
+            queue = self
+                .ended
+                .wait(queue)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Lets replicas be answered while whoever has the turn runs `wait`.
+    fn lend_while<T>(&self, wait: impl FnOnce() -> T) -> T {
+        lock(&self.queue).is_lent = true;
+        self.ended.notify_all();
+        let waited = wait();
+        lock(&self.queue).is_lent = false;
+        waited
+    }
+
     /// The jobs at the front of the queue whose payload fits one record,
     /// at least one if there is any.
     fn next_group(&self) -> Vec<Job> {
@@ -172,8 +213,16 @@ trait Engine: Send + Sync {
     fn write_queue(&self);
     /// Whether the store was there to ask. The caller holds the turn.
     fn inspect(&self, question: Question<'_>) -> bool;
-    /// As `inspect`, and publishes the view after it.
-    fn review(&self, decision: Decision<'_>) -> bool;
+    /// As `inspect`, and publishes the view after it. Refused, the
+    /// decision not carried out, if the store was not there or no
+    /// replica keeps up; an error after it was carried out if no replica
+    /// held it in time.
+    fn review(&self, decision: Decision<'_>) -> Result<(), StoreError>;
+    /// A replica said it holds this many records, and they checked out.
+    fn replica_holds(&self, held: u64);
+    /// How many records a replica has said it holds and whether writes
+    /// are refused for want of one, if the store waits for replicas.
+    fn replicas(&self) -> Option<(u64, bool)>;
     /// As `inspect`, for a backup, without writing the queue first: a
     /// backup holds what was acknowledged, whatever waits. The caller
     /// holds the turn.
@@ -186,6 +235,11 @@ trait Engine: Send + Sync {
     /// As `review`, for a store that follows another. The caller holds
     /// the turn.
     fn follow(&self, turn: FollowTurn<'_>) -> bool;
+    /// Waits until the log holds more than `after` records, `at_most`
+    /// this long, and returns whether it does. Needs no turn.
+    fn wait_for_records(&self, after: u64, at_most: Duration) -> bool;
+    /// How many records the log held when the last write ended.
+    fn records(&self) -> u64;
     /// Whether puts were answered that the log does not hold yet, as of
     /// the last group written.
     fn has_unsynced_puts(&self) -> bool;
@@ -209,20 +263,53 @@ struct Core<S: Storage, C: Clock> {
     has_unsynced_puts: AtomicBool,
     /// Whether the log refused puts that were already answered.
     lost_answered_puts: AtomicBool,
+    /// How many records the log holds, kept here so that whoever waits
+    /// for more does not hold the store while waiting.
+    records: Mutex<u64>,
+    /// Told whenever `records` grows.
+    grew: Condvar,
+    /// What replicas hold, if a write is answered only once one holds
+    /// it.
+    replicas: Option<Replicas>,
 }
 
 impl<S: Storage, C: Clock> Core<S, C> {
     fn write(&self, group: Vec<Job>) {
-        match lock(&self.store).as_mut() {
-            Some(store) => {
-                write_group(store, group, &self.published);
-                self.note_unsynced(store);
+        if self.replicas.as_ref().is_some_and(Replicas::is_behind) {
+            for job in group {
+                job.answer.fill(Err(StoreError::NoReplica));
             }
-            None => {
-                for job in group {
-                    job.answer.fill(Err(StoreError::Stopped));
-                }
+            return;
+        }
+        let mut store = lock(&self.store);
+        let Some(held) = store.as_mut() else {
+            for job in group {
+                job.answer.fill(Err(StoreError::Stopped));
             }
+            return;
+        };
+        let before = held.log_records();
+        let answers = write_group(held, group, &self.published);
+        self.note_unsynced(held);
+        let after = held.log_records();
+        // Not held while waiting: answering a replica reads the store.
+        drop(store);
+        let is_held = after == before || self.wait_for_a_replica(after);
+        for (slot, answer) in answers {
+            slot.fill(match answer {
+                Ok(_) if !is_held => Err(StoreError::NotReplicated),
+                answer => answer,
+            });
+        }
+    }
+
+    /// Waits until a replica holds the first `records` records, if the
+    /// store waits for replicas, and returns whether one does. The
+    /// caller holds the turn and not the store.
+    fn wait_for_a_replica(&self, records: u64) -> bool {
+        match &self.replicas {
+            Some(replicas) => self.turns.lend_while(|| replicas.wait_for(records)),
+            None => true,
         }
     }
 
@@ -245,7 +332,27 @@ impl<S: Storage, C: Clock> Core<S, C> {
             .unwrap_or_else(PoisonError::into_inner) = view;
     }
 
+    /// Tells whoever waits for more records how many there are now.
+    fn note_records(&self, store: &Store<S, C>) {
+        let now = store.log_records();
+        let mut records = lock(&self.records);
+        if *records != now {
+            *records = now;
+            self.grew.notify_all();
+        }
+    }
+
+    fn wait_for_records(&self, after: u64, at_most: Duration) -> bool {
+        let records = lock(&self.records);
+        let (records, _) = self
+            .grew
+            .wait_timeout_while(records, at_most, |records| *records <= after)
+            .unwrap_or_else(PoisonError::into_inner);
+        *records > after
+    }
+
     fn note_unsynced(&self, store: &Store<S, C>) {
+        self.note_records(store);
         self.has_unsynced_puts
             .store(store.has_unsynced_puts(), Ordering::Release);
         self.lost_answered_puts
@@ -300,18 +407,37 @@ where
         }
     }
 
-    fn review(&self, decision: Decision<'_>) -> bool {
+    fn review(&self, decision: Decision<'_>) -> Result<(), StoreError> {
         self.write_queue();
-        match lock(&self.store).as_mut() {
-            Some(store) => {
-                decision(store);
-                // An approval moves main; readers see it from here on.
-                self.publish(store);
-                self.note_unsynced(store);
-                true
-            }
-            None => false,
+        if self.replicas.as_ref().is_some_and(Replicas::is_behind) {
+            return Err(StoreError::NoReplica);
         }
+        let mut store = lock(&self.store);
+        let held = store.as_mut().ok_or(StoreError::Stopped)?;
+        let before = held.log_records();
+        decision(held);
+        // An approval moves main; readers see it from here on.
+        self.publish(held);
+        self.note_unsynced(held);
+        let after = held.log_records();
+        drop(store);
+        if after == before || self.wait_for_a_replica(after) {
+            Ok(())
+        } else {
+            Err(StoreError::NotReplicated)
+        }
+    }
+
+    fn replica_holds(&self, held: u64) {
+        if let Some(replicas) = &self.replicas {
+            replicas.holds(held, *lock(&self.records));
+        }
+    }
+
+    fn replicas(&self) -> Option<(u64, bool)> {
+        self.replicas
+            .as_ref()
+            .map(|replicas| (replicas.held(), replicas.is_behind()))
     }
 
     fn back_up(&self, turn: BackupTurn<'_>) -> bool {
@@ -346,11 +472,20 @@ where
                 // Readers see the records taken in from here on.
                 if store.log_records() != before {
                     self.publish(store);
+                    self.note_records(store);
                 }
                 true
             }
             None => false,
         }
+    }
+
+    fn wait_for_records(&self, after: u64, at_most: Duration) -> bool {
+        Core::wait_for_records(self, after, at_most)
+    }
+
+    fn records(&self) -> u64 {
+        *lock(&self.records)
     }
 
     fn has_unsynced_puts(&self) -> bool {
@@ -394,7 +529,18 @@ where
     C: Clock + Send + 'static,
 {
     pub fn start(store: Store<S, C>) -> Self {
-        Self::with(store, false)
+        Self::with(store, false, None)
+    }
+
+    /// Holds a store that answers a commit, a put to a table that is
+    /// synced, or a decision only once a replica has said it holds it,
+    /// and waits `limit` for that. A write nobody held in time is
+    /// answered [`StoreError::NotReplicated`]: it is in this store's log
+    /// all the same. Writes after it are refused unwritten
+    /// ([`StoreError::NoReplica`]) until a replica holds everything.
+    /// Puts answered before they are on disk do not wait.
+    pub fn start_waiting_for_a_replica(store: Store<S, C>, limit: Duration) -> Self {
+        Self::with(store, false, Some(Replicas::new(limit)))
     }
 
     /// Holds a store that follows another: its records are taken in
@@ -403,11 +549,12 @@ where
     /// wrote for itself would hold records its primary does not, and
     /// could be sent nothing more.
     pub fn start_following(store: Store<S, C>) -> Self {
-        Self::with(store, true)
+        Self::with(store, true, None)
     }
 
-    fn with(store: Store<S, C>, is_following: bool) -> Self {
+    fn with(store: Store<S, C>, is_following: bool, replicas: Option<Replicas>) -> Self {
         let published = Arc::new(RwLock::new(Arc::new(store.view())));
+        let records = store.log_records();
         Self {
             core: Arc::new(Core {
                 turns: Turns::default(),
@@ -416,6 +563,9 @@ where
                 is_following,
                 has_unsynced_puts: AtomicBool::new(false),
                 lost_answered_puts: AtomicBool::new(false),
+                records: Mutex::new(records),
+                grew: Condvar::new(),
+                replicas,
             }),
         }
     }
@@ -557,7 +707,7 @@ impl Writer {
         let mut answer = None;
         let _turn = self.engine.turns().take();
         self.engine
-            .review(Box::new(|store| answer = Some(decision(store))));
+            .review(Box::new(|store| answer = Some(decision(store))))?;
         answer.ok_or(StoreError::Stopped)
     }
 }
@@ -605,13 +755,34 @@ impl Writer {
         self.engine.is_following()
     }
 
+    /// Waits until the log holds more than `after` records, `at_most`
+    /// this long, and returns whether it does. For whoever answers a
+    /// replica that holds everything: the answer can wait for something
+    /// to send, so the replica has it as soon as it is written and need
+    /// not ask over and over to find out.
+    pub fn wait_for_more_records(&self, after: u64, at_most: Duration) -> bool {
+        self.engine.wait_for_records(after, at_most)
+    }
+
+    /// How many records a replica has said it holds, and whether writes
+    /// are refused because none keeps up. `None` for a store that does
+    /// not wait for replicas.
+    pub fn replicas(&self) -> Option<(u64, bool)> {
+        self.engine.replicas()
+    }
+
+    /// How many records the log held when the last write ended.
+    pub fn held_records(&self) -> u64 {
+        self.engine.records()
+    }
+
     /// One turn of answering a replica, between two groups of writes.
     fn feed<T>(
         &self,
         read: impl FnOnce(&mut dyn Feed) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         let mut answer = None;
-        let _turn = self.engine.turns().take_after_a_writer();
+        let _turn = self.engine.turns().take_to_feed();
         self.engine
             .feed(Box::new(|store| answer = Some(read(store))));
         answer.unwrap_or(Err(StoreError::Stopped))
@@ -646,7 +817,13 @@ impl Chained for Writer {
 /// then; commits queued and not yet written are not waited for.
 impl Feed for Writer {
     fn sent(&mut self, ask: &Ask) -> Result<Result<Sent, Refusal>, StoreError> {
-        self.feed(|store| store.sent(ask))
+        let sent = self.feed(|store| store.sent(ask))?;
+        // The log's name and the chain over what the replica holds
+        // checked out: it has those records on its disk.
+        if sent.is_ok() {
+            self.engine.replica_holds(ask.held.records);
+        }
+        Ok(sent)
     }
 }
 
@@ -744,7 +921,7 @@ fn write_group<S: Storage, C: Clock>(
     store: &mut Store<S, C>,
     group: Vec<Job>,
     published: &Published,
-) {
+) -> Vec<(Arc<Slot>, Answer)> {
     let (requests, slots): (Vec<_>, Vec<_>) = group
         .into_iter()
         .map(|job| (job.request, job.answer))
@@ -755,15 +932,12 @@ fn write_group<S: Storage, C: Clock>(
             // answer must be able to read its write.
             let view = Arc::new(store.view());
             *published.write().unwrap_or_else(PoisonError::into_inner) = view;
-            for (slot, answer) in slots.into_iter().zip(answers) {
-                slot.fill(answer);
-            }
+            slots.into_iter().zip(answers).collect()
         }
-        Err(error) => {
-            for slot in slots {
-                slot.fill(Err(copy(&error)));
-            }
-        }
+        Err(error) => slots
+            .into_iter()
+            .map(|slot| (slot, Err(copy(&error))))
+            .collect(),
     }
 }
 

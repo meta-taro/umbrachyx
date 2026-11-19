@@ -75,7 +75,7 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               holds to $UMBRACHYX_DB, which must not exist yet
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
         [--sync-every MS] [--public-key K [--require-auth]]
-        [--backup-to D [--backup-every S]] [--feed-replicas-on P] [--follow H:P]
+        [--backup-to D [--backup-every S]] [--feed-replicas-on P [--wait-for-replica S]] [--follow H:P]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history.
                               --bind listens on another address of this
@@ -101,6 +101,14 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               log, every branch of it, to whoever asks on
                               port P of the address it listens on: open it
                               to its replicas only.
+                              --wait-for-replica answers a write only once
+                              a replica has said it holds it, waiting S
+                              seconds at most. A write no replica held in
+                              time is answered NOTREPLICATED: it is in this
+                              server's log. The writes after it are
+                              answered NOREPLICA and not written, until a
+                              replica holds everything. SETs to plain-async
+                              tables do not wait.
                               --follow makes this server a replica of the
                               one that hands its log out at H:P: it asks
                               that server for its
@@ -182,7 +190,7 @@ impl Args {
                 | "max-connections" | "threads" | "sync-every" | "key" | "subject" | "branch"
                 | "prefix" | "columns" | "column" | "operations" | "operation" | "purpose"
                 | "expires-in" | "public-key" | "token-file" | "backup-to" | "backup-every"
-                | "follow" | "feed-replicas-on" => {
+                | "follow" | "feed-replicas-on" | "wait-for-replica" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -627,9 +635,16 @@ fn serve(mut store: FileStore, args: &Args) -> Result<ExitCode, String> {
     }
     let backup = backups::place(&mut store, args)?;
     let follows = replication::primary(args)?;
-    let committer = match follows {
-        Some(_) => Committer::start_following(store),
-        None => Committer::start(store),
+    let committer = match (&follows, replication::wait(args)?) {
+        (Some(_), _) => Committer::start_following(store),
+        (None, Some(limit)) => {
+            eprintln!(
+                "answering a write only once a replica holds it, waiting {} s at most",
+                limit.as_secs_f64()
+            );
+            Committer::start_waiting_for_a_replica(store, limit)
+        }
+        (None, None) => Committer::start(store),
     };
     let mut server = Server::new(branch, committer.writer(), committer.reader())
         .map_err(|e| e.to_string())?
