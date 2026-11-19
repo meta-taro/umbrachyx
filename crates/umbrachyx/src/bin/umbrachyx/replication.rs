@@ -1,5 +1,5 @@
-//! What `serve` is told about replicas: whether it hands its log to
-//! them, and which server it follows itself.
+//! What `serve` is told about replicas: where it hands its log to them,
+//! and which server it follows itself.
 
 use crate::Args;
 
@@ -21,7 +21,13 @@ pub fn primary(args: &Args) -> Result<Option<String>, String> {
     Ok(Some(primary.clone()))
 }
 
-/// Whether `--feed-replicas` was given.
-pub fn feeds(args: &Args) -> bool {
-    args.options.contains_key("feed-replicas")
+/// The port `--feed-replicas-on` names, or `None` without it.
+pub fn feed_port(args: &Args) -> Result<Option<u16>, String> {
+    args.options
+        .get("feed-replicas-on")
+        .map(|port| {
+            port.parse()
+                .map_err(|_| format!("--feed-replicas-on {port:?} is not a port"))
+        })
+        .transpose()
 }

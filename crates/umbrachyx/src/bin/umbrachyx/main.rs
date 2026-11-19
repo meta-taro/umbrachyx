@@ -75,7 +75,7 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               holds to $UMBRACHYX_DB, which must not exist yet
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
         [--sync-every MS] [--public-key K [--require-auth]]
-        [--backup-to D [--backup-every S]] [--feed-replicas] [--follow H:P]
+        [--backup-to D [--backup-every S]] [--feed-replicas-on P] [--follow H:P]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history.
                               --bind listens on another address of this
@@ -97,13 +97,13 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               server starts and every --backup-every seconds
                               (default 60) while it serves. No client can
                               ask for a backup or say where one goes.
-                              --feed-replicas hands the records of the log,
-                              every branch of it, to whoever asks on this
-                              port: only where nothing but its replicas
-                              reaches it.
+                              --feed-replicas-on hands the records of the
+                              log, every branch of it, to whoever asks on
+                              port P of the address it listens on: open it
+                              to its replicas only.
                               --follow makes this server a replica of the
-                              one at H:P, which was started with
-                              --feed-replicas: it asks that server for its
+                              one that hands its log out at H:P: it asks
+                              that server for its
                               records, answers reads, and refuses writes
                               with READONLY. Its store is a backup of the
                               other, made with restore. Nothing on the way
@@ -147,7 +147,7 @@ fn main() -> ExitCode {
 const LOG_RESERVE: u64 = 16 * 1024 * 1024;
 
 /// Options that take no value.
-const FLAGS: &[&str] = &["require-auth", "feed-replicas"];
+const FLAGS: &[&str] = &["require-auth"];
 
 struct Args {
     positional: Vec<String>,
@@ -182,7 +182,7 @@ impl Args {
                 | "max-connections" | "threads" | "sync-every" | "key" | "subject" | "branch"
                 | "prefix" | "columns" | "column" | "operations" | "operation" | "purpose"
                 | "expires-in" | "public-key" | "token-file" | "backup-to" | "backup-every"
-                | "follow" => {
+                | "follow" | "feed-replicas-on" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -645,9 +645,13 @@ fn serve(mut store: FileStore, args: &Args) -> Result<ExitCode, String> {
     if let Some((dir, every)) = backup {
         server = server.backup_to(dir, every);
     }
-    if replication::feeds(args) {
-        server = server.feed_replicas(true);
-        eprintln!("handing the log to replicas that ask");
+    if let Some(feed_port) = replication::feed_port(args)? {
+        let feed = TcpListener::bind((address, feed_port)).map_err(|e| e.to_string())?;
+        eprintln!(
+            "handing the log to replicas that ask on {}",
+            SocketAddr::new(address, feed_port)
+        );
+        server = server.feed_replicas_on(feed);
     }
     if let Some(primary) = follows {
         eprintln!("following {primary}: this server answers reads and takes no writes");

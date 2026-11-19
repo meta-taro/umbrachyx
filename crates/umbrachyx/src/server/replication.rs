@@ -1,14 +1,19 @@
 //! Replication between servers: one that hands its log to replicas, and
 //! one that follows another and answers reads.
 //!
-//! A replica is a client of its primary. It sends one command,
-//! `UMBRA.LOG.AFTER <log> <records> <chain> <max bytes>`, which says what
-//! it holds, and is answered with the records after those, or with why
-//! it is sent none (see `store::follow`). Nothing is encrypted and no
-//! token is asked for, as for reads: the records hold every branch, with
-//! values still sealed. So a server answers that command only when
-//! whoever started it said so, and should be reached only by its
-//! replicas.
+//! A replica is a client of its primary, on a port kept for replicas. It
+//! sends one command, `UMBRA.LOG.AFTER <log> <records> <chain> <max
+//! bytes>`, which says what it holds, and is answered with the records
+//! after those, or with why it is sent none (see `store::follow`).
+//! Nothing is encrypted and no token is asked for, as for reads: the
+//! records hold every branch, with values still sealed. So a server
+//! listens for replicas only when whoever started it named the port,
+//! which only its replicas should reach.
+//!
+//! Each replica has a thread of its own on the primary. An answer waits
+//! for a turn between writes, and the threads that serve clients never
+//! wait for one: a replica that asks all the time would hold up every
+//! client served by the thread that answered it.
 //!
 //! A server that follows takes no writes: the store refuses them, and
 //! the client is told `READONLY`. It listens whether or not its primary
@@ -18,18 +23,20 @@
 //! says so once and keeps asking; when the primary refuses it, or it
 //! cannot take in what it was sent, it says why and stops asking, and
 //! goes on answering reads. `UMBRA.REPLICATION` says which of these it
-//! is, and how far behind.
+//! is, and how far behind, to any client; it does not say where the
+//! primary is, which is whoever started the server's to know.
 
 use std::io::{self, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
 use serde_json::json;
 
-use super::resp::Reply;
-use crate::log::{Chain, LogId};
+use super::resp::{self, Reply};
+use crate::log::{Chain, LogId, MAX_PAYLOAD_LEN, record};
 use crate::store::Writer;
 use crate::store::follow::{
     Ask, FollowError, Held, MAX_SENT, Primary, Progress, Refusal, Sent, answer, follow_once,
@@ -46,14 +53,22 @@ const RETRY: Duration = Duration::from_secs(1);
 const PATIENCE: Duration = Duration::from_secs(10);
 /// `after` and `records`, in front of the frames of an answer.
 const ANSWER_HEAD: usize = 16;
-const NOT_FEEDING: &str = "ERR this server hands its log to no replica; start it with \
-                           --feed-replicas where only its replicas reach it";
+/// The longest answer: a record is never cut, so one larger than a
+/// primary otherwise sends is an answer on its own, and a record is at
+/// most this long.
+const MAX_ANSWER: usize = ANSWER_HEAD + record::HEADER_LEN + MAX_PAYLOAD_LEN;
+const _: () = assert!(MAX_SENT <= record::HEADER_LEN + MAX_PAYLOAD_LEN);
+/// How long a replica's connection may say nothing before the primary
+/// closes it. A replica asks every millisecond, and one that went
+/// without closing would keep its place among the few answered.
+const QUIET: Duration = Duration::from_secs(60);
+/// Replicas answered at once. One more is told so and closed.
+const MAX_REPLICAS: usize = 16;
+const ONLY_REPLICAS: &str = "ERR this port answers replicas only: UMBRA.LOG.AFTER";
 
 /// What a server that follows knows of how that is going.
 #[derive(Debug, Default)]
 pub(super) struct Following {
-    /// Where the primary is, as whoever started the server wrote it.
-    primary: String,
     /// The last answer taken in.
     progress: Option<Progress>,
     /// Why the last ask got no answer, if it got none.
@@ -68,29 +83,101 @@ fn lock(shared: &Shared) -> std::sync::MutexGuard<'_, Following> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The reply to a replication command, or `None` if `name` is none.
+/// The reply to a replication command a client may send, or `None` if
+/// `name` is none.
 pub(super) fn reply(
-    writer: &Writer,
     feeds: bool,
     following: Option<&Shared>,
     name: &str,
     args: &[Vec<u8>],
 ) -> Option<Reply> {
     match name {
-        LOG_AFTER if !feeds => Some(Reply::Error(NOT_FEEDING.to_owned())),
-        LOG_AFTER => Some(match read_ask(args) {
-            Ok(ask) => match answer(&mut writer.clone(), &ask) {
-                Ok(answer) => answer_reply(answer),
-                Err(error) => Reply::Error(format!("ERR {error}")),
-            },
-            Err(error) => Reply::Error(format!("ERR {error}")),
-        }),
         REPLICATION if args.is_empty() => Some(status(feeds, following)),
         REPLICATION => Some(Reply::Error(format!(
             "ERR wrong number of arguments for '{}' command",
             REPLICATION.to_ascii_lowercase()
         ))),
         _ => None,
+    }
+}
+
+/// Starts the thread that takes replicas' connections on `listener`,
+/// and gives each a thread that answers it.
+pub(super) fn spawn_feed(writer: Writer, listener: Arc<TcpListener>) -> io::Result<()> {
+    let replicas = Arc::new(AtomicUsize::new(0));
+    thread::Builder::new()
+        .name("feed".to_owned())
+        .spawn(move || {
+            loop {
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) => {
+                        eprintln!("umbrachyx: accept from a replica: {error}");
+                        thread::sleep(RETRY);
+                        continue;
+                    }
+                };
+                let slot = super::Slot::take(&replicas, MAX_REPLICAS);
+                let writer = writer.clone();
+                let started = thread::Builder::new()
+                    .name("feed a replica".to_owned())
+                    .spawn(move || match slot {
+                        Some(_slot) => feed(stream, writer),
+                        None => super::refuse(stream),
+                    });
+                if let Err(error) = started {
+                    eprintln!("umbrachyx: a replica's thread could not start: {error}");
+                }
+            }
+        })
+        .map(drop)
+}
+
+/// Answers one replica until it goes, or sends what is no command.
+fn feed(mut stream: TcpStream, mut writer: Writer) {
+    // An answer goes out when it is ready, not when more follows.
+    let _ = stream.set_nodelay(true);
+    if stream.set_read_timeout(Some(QUIET)).is_err() {
+        return;
+    }
+    let mut input = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        let command = match resp::parse(&input) {
+            Ok(Some((command, len))) => {
+                input.drain(..len);
+                command
+            }
+            Ok(None) => match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(read) => {
+                    input.extend_from_slice(&chunk[..read]);
+                    continue;
+                }
+            },
+            Err(_) => return,
+        };
+        let mut out = Vec::new();
+        feed_reply(&mut writer, &command).write_to(&mut out);
+        if stream.write_all(&out).is_err() {
+            return;
+        }
+    }
+}
+
+fn feed_reply(writer: &mut Writer, command: &[Vec<u8>]) -> Reply {
+    let Some((name, args)) = command.split_first() else {
+        return Reply::Error(ONLY_REPLICAS.to_owned());
+    };
+    if !name.eq_ignore_ascii_case(LOG_AFTER.as_bytes()) {
+        return Reply::Error(ONLY_REPLICAS.to_owned());
+    }
+    match read_ask(args) {
+        Ok(ask) => match answer(writer, &ask) {
+            Ok(answer) => answer_reply(answer),
+            Err(error) => Reply::Error(format!("ERR {error}")),
+        },
+        Err(error) => Reply::Error(format!("ERR {error}")),
     }
 }
 
@@ -102,7 +189,6 @@ fn status(feeds: bool, following: Option<&Shared>) -> Reply {
             json!({
                 "role": "replica",
                 "feeds_replicas": feeds,
-                "primary": following.primary,
                 "records": following.progress.map(|progress| progress.held),
                 "primary_records": following.progress.map(|progress| progress.primary),
                 "unreachable": following.unreachable,
@@ -224,7 +310,7 @@ fn read_answer(input: &[u8]) -> Result<Arrived, String> {
         }
         b'$' => {
             let len: usize = number(line)
-                .filter(|&len| (ANSWER_HEAD..=ANSWER_HEAD + MAX_SENT).contains(&len))
+                .filter(|&len| (ANSWER_HEAD..=MAX_ANSWER).contains(&len))
                 .ok_or("the answer is not one a primary sends")?;
             let start = line_end + 2;
             // With the line end after it, or the next answer on this
@@ -313,10 +399,7 @@ impl Primary for Wire {
 /// Starts the thread that follows the server at `primary`, and returns
 /// what it knows of how that is going.
 pub(super) fn spawn(writer: Writer, primary: String) -> io::Result<Shared> {
-    let shared = Shared::new(Mutex::new(Following {
-        primary: primary.clone(),
-        ..Following::default()
-    }));
+    let shared = Shared::default();
     let told = Arc::clone(&shared);
     thread::Builder::new()
         .name("follow".to_owned())
@@ -465,11 +548,11 @@ mod tests {
     #[test]
     fn a_reply_that_is_no_answer_is_said_as_it_came() {
         let mut out = Vec::new();
-        Reply::Error(NOT_FEEDING.to_owned()).write_to(&mut out);
+        Reply::Error(ONLY_REPLICAS.to_owned()).write_to(&mut out);
 
         let said = read_answer(&out).err();
 
-        assert_eq!(said.as_deref(), Some(NOT_FEEDING));
+        assert_eq!(said.as_deref(), Some(ONLY_REPLICAS));
         assert!(read_answer(b"+OK\r\n").is_err());
         assert!(read_answer(b"$3\r\nabc\r\n").is_err());
     }

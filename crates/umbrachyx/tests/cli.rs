@@ -629,8 +629,10 @@ fn serve_with_follow_answers_reads_from_a_restored_backup_of_the_server_it_follo
     let dir = TempDir::new("serve-follow");
     let backup = dir.0.join("backup");
     let backup = backup.to_str().expect("utf-8 path");
+    let feed_port = free_port().to_string();
     let options = [
-        "--feed-replicas",
+        "--feed-replicas-on",
+        &feed_port,
         "--backup-to",
         backup,
         "--backup-every",
@@ -638,7 +640,9 @@ fn serve_with_follow_answers_reads_from_a_restored_backup_of_the_server_it_follo
     ];
     let (_primary, said, port) = serve_on_a_free_port(&dir, &options);
     assert!(
-        said.contains("handing the log to replicas that ask"),
+        said.contains(&format!(
+            "handing the log to replicas that ask on 127.0.0.1:{feed_port}"
+        )),
         "{said}"
     );
     let mut primary = connect(port);
@@ -660,7 +664,7 @@ fn serve_with_follow_answers_reads_from_a_restored_backup_of_the_server_it_follo
         thread::sleep(Duration::from_millis(50));
     }
     let replica_port = free_port();
-    let follow = format!("127.0.0.1:{port}");
+    let follow = format!("127.0.0.1:{feed_port}");
     let _replica = Server(
         dir.umbrachyx(&[
             "serve",

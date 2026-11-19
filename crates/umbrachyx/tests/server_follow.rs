@@ -91,18 +91,24 @@ fn free_address() -> (TcpListener, SocketAddr) {
     (listener, address)
 }
 
-/// Serves `store` as a primary on `listener`.
-fn serve_primary(store: FileStore, listener: TcpListener, feeds: bool) {
+/// Serves `store` as a primary on `listener`, and returns where it
+/// answers replicas, if it does.
+fn serve_primary(store: FileStore, listener: TcpListener, feeds: bool) -> Option<SocketAddr> {
     let committer = Committer::start(store);
-    let server = Server::new(BRANCH, committer.writer(), committer.reader())
-        .expect("serves a branch")
-        .feed_replicas(feeds);
+    let mut server =
+        Server::new(BRANCH, committer.writer(), committer.reader()).expect("serves a branch");
+    let feed = feeds.then(free_address);
+    let feed_address = feed.as_ref().map(|(_, address)| *address);
+    if let Some((feed, _)) = feed {
+        server = server.feed_replicas_on(feed);
+    }
     thread::spawn(move || {
         // Kept for as long as the server runs: stopping it would end
         // the store under the server.
         let _committer = committer;
         server.serve(listener)
     });
+    feed_address
 }
 
 /// Serves `store` as a replica of the server at `primary`, and returns
@@ -125,8 +131,8 @@ fn pair(dir: &TempDir) -> (Client, Client) {
     let mut store = dir.primary();
     let replica = dir.copy_of(&mut store);
     let (listener, primary) = free_address();
-    serve_primary(store, listener, true);
-    let replica = serve_replica(replica, primary);
+    let feed = serve_primary(store, listener, true).expect("feeds");
+    let replica = serve_replica(replica, feed);
     (Client::connect(primary), Client::connect(replica))
 }
 
@@ -252,27 +258,62 @@ fn a_replica_says_how_far_it_is_and_a_primary_that_it_is_one() {
 }
 
 #[test]
-fn a_server_hands_its_log_to_nobody_unless_it_was_started_to() {
+fn the_log_is_handed_out_on_the_port_kept_for_replicas_and_nowhere_else() {
+    let dir = TempDir::new("ports");
+    let (listener, address) = free_address();
+    let feed = serve_primary(dir.primary(), listener, true).expect("feeds");
+    let zeros = "0".repeat(64);
+    let ask = ["UMBRA.LOG.AFTER", &zeros[..32], "0", &zeros, "1024"];
+
+    let from_clients_port = Client::connect(address).text(&ask);
+    let another_log = Client::connect(feed).text(&ask);
+    let not_an_ask = Client::connect(feed).text(&["GET", "player/1/gems"]);
+
+    assert!(
+        from_clients_port.starts_with("-ERR unknown command"),
+        "{from_clients_port}"
+    );
+    assert!(another_log.starts_with("-ANOTHERLOG "), "{another_log}");
+    assert!(
+        not_an_ask.starts_with("-ERR this port answers replicas only"),
+        "{not_an_ask}"
+    );
+}
+
+#[test]
+fn a_replica_of_a_server_that_hands_its_log_to_nobody_says_so_and_answers() {
     let dir = TempDir::new("not-feeding");
     let mut store = dir.primary();
     let replica = dir.copy_of(&mut store);
     let (listener, address) = free_address();
-    serve_primary(store, listener, false);
-    let mut primary = Client::connect(address);
-    let zeros = "0".repeat(64);
+    assert_eq!(serve_primary(store, listener, false), None);
 
-    let refused = primary.text(&["UMBRA.LOG.AFTER", &zeros[..32], "0", &zeros, "1024"]);
-
-    assert!(
-        refused.starts_with("-ERR this server hands its log to no replica"),
-        "{refused}"
-    );
-    // A replica of it says so, and answers with what it holds.
+    // It asks on the port clients use, which hands nothing out.
     let mut replica = Client::connect(serve_replica(replica, address));
+
     let said = replica.wait_for_replication(|said| !said["unreachable"].is_null());
     let why = said["unreachable"].as_str().expect("says why");
-    assert!(why.contains("hands its log to no replica"), "{why}");
+    assert!(why.contains("unknown command"), "{why}");
     assert_eq!(replica.text(&["GET", "player/1/gems"]), "100");
+}
+
+#[test]
+fn a_record_larger_than_one_answer_usually_is_still_sent_whole() {
+    let dir = TempDir::new("large");
+    let mut store = dir.primary();
+    let replica = dir.copy_of(&mut store);
+    // More than a primary puts in one answer when it has the choice: a
+    // record is never cut, so this one is an answer on its own.
+    let large = "g".repeat(3 * 1024 * 1024);
+    commit(&mut store, "player/1/gems", &large);
+    commit(&mut store, "player/2/gems", "7");
+    let (listener, _) = free_address();
+    let feed = serve_primary(store, listener, true).expect("feeds");
+
+    let mut replica = Client::connect(serve_replica(replica, feed));
+
+    replica.wait_for(&["GET", "player/2/gems"], "7");
+    assert_eq!(replica.text(&["GET", "player/1/gems"]), large);
 }
 
 #[test]
@@ -283,10 +324,10 @@ fn a_replica_written_to_apart_stops_following_and_keeps_answering() {
     commit(&mut replica, "player/1/gems", "written here");
     commit(&mut store, "player/1/gems", "written there");
     commit(&mut store, "player/2/gems", "7");
-    let (listener, address) = free_address();
-    serve_primary(store, listener, true);
+    let (listener, _) = free_address();
+    let feed = serve_primary(store, listener, true).expect("feeds");
 
-    let mut replica = Client::connect(serve_replica(replica, address));
+    let mut replica = Client::connect(serve_replica(replica, feed));
 
     let said = replica.wait_for_replication(|said| !said["stopped"].is_null());
     let why = said["stopped"].as_str().expect("says why");
@@ -302,14 +343,22 @@ fn a_replica_started_before_its_primary_follows_it_once_it_is_there() {
     let replica = dir.copy_of(&mut store);
     commit(&mut store, "player/1/gems", "150");
     // Nothing listens there yet.
-    let (listener, address) = free_address();
-    drop(listener);
-    let mut replica = Client::connect(serve_replica(replica, address));
+    let (feed, feed_address) = free_address();
+    drop(feed);
+    let mut replica = Client::connect(serve_replica(replica, feed_address));
     replica.wait_for_replication(|said| !said["unreachable"].is_null());
     assert_eq!(replica.text(&["GET", "player/1/gems"]), "100");
 
-    let listener = TcpListener::bind(address).expect("the address is still free");
-    serve_primary(store, listener, true);
+    let feed = TcpListener::bind(feed_address).expect("the address is still free");
+    let committer = Committer::start(store);
+    let server = Server::new(BRANCH, committer.writer(), committer.reader())
+        .expect("serves a branch")
+        .feed_replicas_on(feed);
+    let (listener, _) = free_address();
+    thread::spawn(move || {
+        let _committer = committer;
+        server.serve(listener)
+    });
 
     replica.wait_for(&["GET", "player/1/gems"], "150");
     let said = replica.wait_for_replication(|said| said["unreachable"].is_null());

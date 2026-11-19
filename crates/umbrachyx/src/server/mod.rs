@@ -114,8 +114,8 @@ pub struct Server {
     sync_every: Duration,
     /// Where the store is backed up while it is served, and how often.
     backup: Option<(PathBuf, Duration)>,
-    /// Whether replicas that ask are sent the log.
-    feeds_replicas: bool,
+    /// Where replicas that ask are sent the log, if anywhere.
+    feeds_replicas: Option<Arc<TcpListener>>,
     /// Where the server this one follows is, if it follows one.
     follows: Option<String>,
     /// How following goes, once the server serves.
@@ -142,7 +142,7 @@ impl Server {
             queued: Arc::default(),
             sync_every: DEFAULT_SYNC_EVERY,
             backup: None,
-            feeds_replicas: false,
+            feeds_replicas: None,
             follows: None,
             following: None,
         })
@@ -190,12 +190,13 @@ impl Server {
         }
     }
 
-    /// Whether a replica that asks is sent the records of the log: every
-    /// branch, values still sealed, to whoever reaches the port. Off
-    /// unless whoever starts the server says so.
-    pub fn feed_replicas(self, feeds_replicas: bool) -> Self {
+    /// Answers replicas on `listener`: one that asks is sent the records
+    /// of the log, every branch, values still sealed, with no token
+    /// asked for. A port of its own, so that it can be closed to all
+    /// but the replicas; the port clients use never hands the log out.
+    pub fn feed_replicas_on(self, listener: TcpListener) -> Self {
         Self {
-            feeds_replicas,
+            feeds_replicas: Some(Arc::new(listener)),
             ..self
         }
     }
@@ -243,6 +244,10 @@ impl Server {
         if let Some((dir, every)) = self.backup.clone() {
             backups::spawn(self.writer.clone(), dir, every)
                 .expect("the thread that backs the store up starts");
+        }
+        if let Some(listener) = self.feeds_replicas.clone() {
+            replication::spawn_feed(self.writer.clone(), listener)
+                .expect("the thread that answers replicas starts");
         }
         let mut next = 0;
         loop {
@@ -309,8 +314,7 @@ impl Server {
                     return Some(Step::Reply(reply));
                 }
                 if let Some(reply) = replication::reply(
-                    &self.writer,
-                    self.feeds_replicas,
+                    self.feeds_replicas.is_some(),
                     self.following.as_ref(),
                     &name,
                     args,

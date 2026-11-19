@@ -153,7 +153,7 @@ $ umbrachyx history agent/support player/42/gems
 - **A second server can follow the first and answer reads.** Restore a
   backup on another machine and start it with `umbrachyx serve <branch>
   --follow <host:port>`; the first server is started with
-  `--feed-replicas`. The replica asks for the records it lacks, holds
+  `--feed-replicas-on <port>`, a port to open to its replicas only. The replica asks for the records it lacks, holds
   the same commits under the same ids, and refuses writes with
   `READONLY`; `UMBRA.REPLICATION` says how far it is. For trials: the
   connection is not encrypted, keys are not sent (a subject first

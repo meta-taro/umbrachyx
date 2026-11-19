@@ -14,7 +14,8 @@
   the place.
 - **A server that follows another.** `umbrachyx serve <branch> --follow
   <host:port>` serves a restored backup of another server as its
-  replica: it asks that server, started with `--feed-replicas`, for the
+  replica: it asks that server, on the port it was given with
+  `--feed-replicas-on <port>`, for the
   records after the ones it holds, answers reads with the same commits
   under the same ids, and refuses writes with `READONLY`.
   `UMBRA.REPLICATION` says how far it is, and why it stopped if it did.

@@ -1324,7 +1324,9 @@ One store that writes, and others that follow it and answer reads.
   while its primary writes many with each.
 - **Answering a replica takes turns between writes**, as a backup does:
   the chain is worked out a megabyte a turn, an answer is at most a
-  megabyte, and each turn first lets a waiting writer go.
+  megabyte unless one record is longer (a record is never cut, so it is
+  then an answer on its own), and each turn first lets a waiting writer
+  go.
 - **The network is in the simulation.** Between the simulated replica
   and its primary, answers are lost, arrive late in place of another,
   are cut short and have bits flipped, while both stores crash and lose
@@ -1345,15 +1347,20 @@ One store that writes, and others that follow it and answer reads.
   then. Sending new keys with the log needs the connection encrypted;
   until it is, replication is for measurements and trials, not for data
   that must stay secret on the network.
-- **A replica is a client of its primary, on the port clients use.**
-  It sends one command, `UMBRA.LOG.AFTER`, with what it holds, and is
-  answered with one value or an error whose first word names the
-  refusal. A port of its own would be a second thing to bind, protect
-  and document for no gain yet.
-- **A server hands its log out only if whoever started it said so**
-  (`serve --feed-replicas`). The command needs no token, as reads need
-  none, and answers with every branch, values still sealed; a server
-  should not answer it to whoever reaches the port by default.
+- **A replica is a client of its primary, on a port kept for
+  replicas** (`serve --feed-replicas-on <port>`). It sends one command,
+  `UMBRA.LOG.AFTER`, with what it holds, and is answered with one value
+  or an error whose first word names the refusal. Two reasons for a
+  port of its own. The command needs no token and answers with every
+  branch, values still sealed, so it should be open to the replicas
+  and nobody else, which a port can be and a command cannot; a server
+  not started with the option hands its log to nobody. And an answer
+  waits for a turn between writes, which the threads that serve
+  clients never do: a replica asks all the time, and answered there it
+  would hold up every client of the thread that answered. Each replica
+  has a thread of its own, sixteen at most; one that says nothing for a
+  minute is closed, so a replica that went without closing does not
+  keep its place.
 - **A replica listens whether or not its primary can be reached**
   (`serve --follow <host:port>`), and answers reads with what it holds.
   When no answer comes it says so once and keeps asking every second.
@@ -1361,7 +1368,8 @@ One store that writes, and others that follow it and answer reads.
   not given, its own disk), it says why, stops asking, and goes on
   answering reads: asking again would get the same answer.
   `UMBRA.REPLICATION` says which of these it is and how many records it
-  and its primary hold.
+  and its primary hold, to any client; where the primary is it does not
+  say, as no reply says where a backup is kept.
 - **Writes to a replica are answered `READONLY`**, the word Redis and
   Valkey use, which clients know.
 - **A replica that holds everything asks again after a millisecond.**
