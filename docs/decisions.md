@@ -1372,11 +1372,16 @@ One store that writes, and others that follow it and answer reads.
   say, as no reply says where a backup is kept.
 - **Writes to a replica are answered `READONLY`**, the word Redis and
   Valkey use, which clients know.
-- **A replica that holds everything asks again after a millisecond.**
-  That, and the turn its ask waits for on the primary, is how far
-  behind it runs. Neither is measured yet; holding the ask open on the
-  primary until there is something to send is the next step if the
-  measurement asks for it.
+- **A primary holds the ask of a replica that has everything** until
+  something is written, a second at most, and then answers with it. A
+  replica that asked again every millisecond put up to a thousand asks
+  a second, two turns each, in front of an idle primary's writers; held,
+  it is one a second. On a laptop whose disk takes 4 ms to sync it does
+  not change how soon a replica holds a write: 4.0 to 4.1 ms after the
+  primary answered, with or without, which is the replica's own sync
+  (median of 300 writes, one client, both servers on one machine, three
+  runs each). Whether it does on a disk that syncs in a tenth of that
+  is not measured.
 - **To come:** acknowledging a write only once a
   replica holds it, an encrypted connection that keys can travel on,
   and measurements with one

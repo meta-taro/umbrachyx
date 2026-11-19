@@ -367,3 +367,36 @@ fn a_replica_started_before_its_primary_follows_it_once_it_is_there() {
     let said = replica.wait_for_replication(|said| said["unreachable"].is_null());
     assert!(said["stopped"].is_null(), "{said}");
 }
+
+/// Prints how long after a `SET` is answered by the primary a replica on
+/// the same machine answers a `GET` with it. Not a pass or fail: run
+/// with `--ignored --nocapture --release`.
+#[test]
+#[ignore = "a measurement; run with --ignored --nocapture"]
+fn measure_how_long_a_replica_takes_to_hold_what_was_written() {
+    const WRITES: usize = 300;
+    let dir = TempDir::new("measure");
+    let (mut primary, mut replica) = pair(&dir);
+    let mut waits = Vec::with_capacity(WRITES);
+
+    for round in 0..WRITES {
+        let value = round.to_string();
+        assert_eq!(primary.text(&["SET", "player/1/gems", &value]), "+OK");
+        let start = Instant::now();
+        while replica.text(&["GET", "player/1/gems"]) != value {
+            assert!(start.elapsed() < LIMIT, "the replica never held {value}");
+        }
+        waits.push(start.elapsed());
+        // The replica's next ask is out before the next write.
+        thread::sleep(Duration::from_millis(3));
+    }
+
+    waits.sort();
+    println!(
+        "replica holds a write after: median {:?}, 99th {:?}, slowest {:?} ({WRITES} writes, one \
+         client, same machine)",
+        waits[WRITES / 2],
+        waits[WRITES * 99 / 100],
+        waits[WRITES - 1]
+    );
+}

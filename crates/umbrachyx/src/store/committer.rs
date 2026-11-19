@@ -186,6 +186,11 @@ trait Engine: Send + Sync {
     /// As `review`, for a store that follows another. The caller holds
     /// the turn.
     fn follow(&self, turn: FollowTurn<'_>) -> bool;
+    /// Waits until the log holds more than `after` records, `at_most`
+    /// this long, and returns whether it does. Needs no turn.
+    fn wait_for_records(&self, after: u64, at_most: Duration) -> bool;
+    /// How many records the log held when the last write ended.
+    fn records(&self) -> u64;
     /// Whether puts were answered that the log does not hold yet, as of
     /// the last group written.
     fn has_unsynced_puts(&self) -> bool;
@@ -209,6 +214,11 @@ struct Core<S: Storage, C: Clock> {
     has_unsynced_puts: AtomicBool,
     /// Whether the log refused puts that were already answered.
     lost_answered_puts: AtomicBool,
+    /// How many records the log holds, kept here so that whoever waits
+    /// for more does not hold the store while waiting.
+    records: Mutex<u64>,
+    /// Told whenever `records` grows.
+    grew: Condvar,
 }
 
 impl<S: Storage, C: Clock> Core<S, C> {
@@ -245,7 +255,27 @@ impl<S: Storage, C: Clock> Core<S, C> {
             .unwrap_or_else(PoisonError::into_inner) = view;
     }
 
+    /// Tells whoever waits for more records how many there are now.
+    fn note_records(&self, store: &Store<S, C>) {
+        let now = store.log_records();
+        let mut records = lock(&self.records);
+        if *records != now {
+            *records = now;
+            self.grew.notify_all();
+        }
+    }
+
+    fn wait_for_records(&self, after: u64, at_most: Duration) -> bool {
+        let records = lock(&self.records);
+        let (records, _) = self
+            .grew
+            .wait_timeout_while(records, at_most, |records| *records <= after)
+            .unwrap_or_else(PoisonError::into_inner);
+        *records > after
+    }
+
     fn note_unsynced(&self, store: &Store<S, C>) {
+        self.note_records(store);
         self.has_unsynced_puts
             .store(store.has_unsynced_puts(), Ordering::Release);
         self.lost_answered_puts
@@ -346,11 +376,20 @@ where
                 // Readers see the records taken in from here on.
                 if store.log_records() != before {
                     self.publish(store);
+                    self.note_records(store);
                 }
                 true
             }
             None => false,
         }
+    }
+
+    fn wait_for_records(&self, after: u64, at_most: Duration) -> bool {
+        Core::wait_for_records(self, after, at_most)
+    }
+
+    fn records(&self) -> u64 {
+        *lock(&self.records)
     }
 
     fn has_unsynced_puts(&self) -> bool {
@@ -408,6 +447,7 @@ where
 
     fn with(store: Store<S, C>, is_following: bool) -> Self {
         let published = Arc::new(RwLock::new(Arc::new(store.view())));
+        let records = store.log_records();
         Self {
             core: Arc::new(Core {
                 turns: Turns::default(),
@@ -416,6 +456,8 @@ where
                 is_following,
                 has_unsynced_puts: AtomicBool::new(false),
                 lost_answered_puts: AtomicBool::new(false),
+                records: Mutex::new(records),
+                grew: Condvar::new(),
             }),
         }
     }
@@ -603,6 +645,20 @@ impl Writer {
     /// refuses every write.
     pub fn is_following(&self) -> bool {
         self.engine.is_following()
+    }
+
+    /// Waits until the log holds more than `after` records, `at_most`
+    /// this long, and returns whether it does. For whoever answers a
+    /// replica that holds everything: the answer can wait for something
+    /// to send, so the replica has it as soon as it is written and need
+    /// not ask over and over to find out.
+    pub fn wait_for_more_records(&self, after: u64, at_most: Duration) -> bool {
+        self.engine.wait_for_records(after, at_most)
+    }
+
+    /// How many records the log held when the last write ended.
+    pub fn held_records(&self) -> u64 {
+        self.engine.records()
     }
 
     /// One turn of answering a replica, between two groups of writes.

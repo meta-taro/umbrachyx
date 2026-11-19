@@ -333,3 +333,35 @@ fn a_primary_feeds_a_replica_while_others_write_to_it() {
     );
     assert_same(&replica.stop(), &primary.stop());
 }
+
+#[test]
+fn whoever_waits_for_more_records_is_told_when_one_is_written_and_not_before() {
+    use std::time::{Duration, Instant};
+
+    let dir = TempDir::new("waits");
+    let store = Committer::start(primary(&dir));
+    let waiter = store.writer();
+    let held = store.writer().held_records();
+
+    let nothing = waiter.wait_for_more_records(held, Duration::from_millis(50));
+
+    assert!(!nothing, "nothing was written");
+    let writer = store.writer();
+    let writing = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        writer
+            .commit(MAIN_BRANCH, vec![set("player/1/gems", "150")], by("a", "b"))
+            .expect("commits");
+    });
+    let start = Instant::now();
+    let more = waiter.wait_for_more_records(held, Duration::from_secs(30));
+    assert!(more, "a record was written");
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+    // One that is there already is not waited for.
+    assert!(waiter.wait_for_more_records(held, Duration::ZERO));
+    writing.join().expect("writer finishes");
+}
