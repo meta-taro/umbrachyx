@@ -51,6 +51,9 @@ impl TempDir {
         let backup = self.0.join("backup");
         let mut target = DirTarget::open(&backup).expect("opens the backup");
         from.backup(&mut target).expect("backs up");
+        // The place is locked while it is written to, and on Windows
+        // nothing reads it until that ends.
+        drop(target);
         let path = self.0.join("replica");
         let mut log = FileStorage::open(&path).expect("opens file");
         restore(&mut DirSource::new(&backup), &mut log, None).expect("restores");
