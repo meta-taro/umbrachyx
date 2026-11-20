@@ -153,6 +153,31 @@ jobs:
       - name: Memory
         run: bench/memory.sh | tee bench-memory.csv
 
+      # bench/replicated.sh is written for a primary, its replicas and a
+      # client on machines of their own, which cost money by the hour.
+      # Here all three roles run on this one machine with a small load,
+      # so the script is never tried for the first time there. The
+      # numbers mean nothing: both ends share one disk.
+      - name: Replicated benchmark, rehearsed on one machine
+        run: |
+          dir="$RUNNER_TEMP/replicated"
+          mkdir -p "$dir/p" "$dir/r"
+          export UMBRACHYX_BENCH_KEYS=20000 UMBRACHYX_BENCH_SECONDS=2 UMBRACHYX_BENCH_OUT="$dir/out"
+          bench/replicated.sh primary 127.0.0.1 "$dir/p" >"$dir/primary.out" 2>&1 &
+          UMBRACHYX_BENCH_REPLICA_OFFSET=1000 bench/replicated.sh replica 127.0.0.1 127.0.0.1 "$dir/r" \
+            >"$dir/replica.out" 2>&1 &
+          said() { tail -n 40 "$dir"/*.out "$dir"/p/*.log "$dir"/r/*.log 2>/dev/null; }
+          for _ in $(seq 600); do [ -e "$dir/p/seed/complete" ] && break; sleep 0.5; done
+          [ -e "$dir/p/seed/complete" ] || { said; exit 1; }
+          cp -R "$dir/p/seed" "$dir/r/seed"
+          UMBRACHYX_BENCH_REPLICA_OFFSET=1000 timeout 900 bench/replicated.sh client 127.0.0.1 127.0.0.1 \
+            || { said; exit 1; }
+          cat "$dir/out/run.txt" "$dir/out/lag.csv" "$dir/out/load.csv" | tee bench-replicated-rehearsal.txt
+          # Every pair wrote its last row, PostgreSQL's included.
+          for pair in u-history u-waits u-current valkey "valkey, WAITAOF 1 1" postgres "postgres, a synchronous replica"; do
+            grep -q "^\"$pair, writes only\",\"256\"" "$dir/out/load.csv" || { echo "no rows of $pair"; said; exit 1; }
+          done
+
       # What one write costs the store with the disk and the network taken
       # out, on a million keys, written 1, 64 and 3,200 to a sync: how much
       # of a write over the server is the store's own work, and how much
@@ -177,7 +202,7 @@ jobs:
         run: |
           {
             echo "### Benchmarks (shared runner, compare runs of this job only)"
-            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv bench-memory.csv bench-commit-cost.txt bench-commit-cost-small-pages.txt; do
+            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv bench-memory.csv bench-replicated-rehearsal.txt bench-commit-cost.txt bench-commit-cost-small-pages.txt; do
               echo
               echo "\`$file\`"
               echo
