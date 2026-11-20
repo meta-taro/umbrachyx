@@ -701,6 +701,94 @@ fn serve_with_follow_answers_reads_from_a_restored_backup_of_the_server_it_follo
 }
 
 #[test]
+fn serve_that_follows_can_keep_current_values_only_and_says_so_when_asked_about_the_past() {
+    let dir = TempDir::new("serve-current");
+    let backup = dir.0.join("backup");
+    let backup = backup.to_str().expect("utf-8 path");
+    let feed_port = free_port().to_string();
+    let options = [
+        "--feed-replicas-on",
+        &feed_port,
+        "--backup-to",
+        backup,
+        "--backup-every",
+        "0.05",
+    ];
+    let (_primary, _, port) = serve_on_a_free_port(&dir, &options);
+    let mut primary = connect(port);
+    assert_eq!(
+        first_line(&mut primary, &["SET", "player/1/gems", "55"]),
+        "+OK"
+    );
+    let start = Instant::now();
+    loop {
+        let _ = std::fs::remove_file(dir.0.join("replica"));
+        let _ = std::fs::remove_file(dir.0.join("replica.keys"));
+        let restored = run_on(&dir, "replica", &["restore", backup]);
+        let read = run_on(&dir, "replica", &["get", BRANCH, "player/1/gems"]);
+        if restored.status.success() && String::from_utf8_lossy(&read.stdout).trim() == "55" {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "no backup");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let replica_port = free_port();
+    let follow = format!("127.0.0.1:{feed_port}");
+    let _replica = Server(
+        dir.umbrachyx(&[
+            "serve",
+            BRANCH,
+            "--port",
+            &replica_port.to_string(),
+            "--follow",
+            &follow,
+            "--current-values-only",
+        ])
+        .env("UMBRACHYX_DB", dir.0.join("replica"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("starts"),
+    );
+    let mut replica = connect(replica_port);
+
+    assert_eq!(
+        first_line(&mut primary, &["SET", "player/1/gems", "70"]),
+        "+OK"
+    );
+
+    wait_for(&mut replica, &["GET", "player/1/gems"], "70");
+    let past = first_line(&mut replica, &["UMBRA.HISTORY", BRANCH, "player/1/gems"]);
+    assert!(
+        past.starts_with("-NOHISTORY this server keeps current values only"),
+        "{past}"
+    );
+    let said = first_line(&mut replica, &["UMBRA.REPLICATION"]);
+    assert!(said.contains("\"holds\":\"current values\""), "{said}");
+}
+
+#[test]
+fn serve_keeps_current_values_only_for_a_server_that_follows() {
+    let dir = TempDir::new("serve-current-refused");
+    assert!(
+        dir.run(&["branch", BRANCH, "--from", "main"])
+            .status
+            .success()
+    );
+
+    let alone = dir.run(&["serve", BRANCH, "--current-values-only"]);
+    let another_command = dir.run(&["log", BRANCH, "--current-values-only"]);
+
+    for refused in [&alone, &another_command] {
+        assert!(!refused.status.success());
+        let said = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            said.contains("is for a server that follows another"),
+            "{said}"
+        );
+    }
+}
+
+#[test]
 fn serve_refuses_to_follow_what_is_not_a_host_and_a_port() {
     let dir = TempDir::new("serve-follow-refused");
     assert!(

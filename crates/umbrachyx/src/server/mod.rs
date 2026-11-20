@@ -120,6 +120,8 @@ pub struct Server {
     feeds_replicas: Option<Arc<TcpListener>>,
     /// Where the server this one follows is, if it follows one.
     follows: Option<String>,
+    /// Whether the store keeps its history, or current values only.
+    keeps_history: bool,
     /// With it, replicas are answered and the primary is asked over
     /// TLS, each end showing a certificate, and keys travel.
     identity: Option<tls::Configs>,
@@ -135,6 +137,9 @@ impl Server {
         if !reader.view().has_branch(branch) {
             return Err(ServerError::UnknownBranch(branch.to_owned()));
         }
+        // Asked once: a store is opened to keep its history or not, and
+        // stays so.
+        let keeps_history = writer.ask(|store| store.keeps_history()).unwrap_or(true);
         Ok(Self {
             branch: Arc::from(branch),
             writer,
@@ -149,6 +154,7 @@ impl Server {
             backup: None,
             feeds_replicas: None,
             follows: None,
+            keeps_history,
             identity: None,
             following: None,
         })
@@ -338,6 +344,7 @@ impl Server {
                     &self.writer,
                     self.feeds_replicas.is_some(),
                     self.identity.is_some(),
+                    self.keeps_history,
                     self.following.as_ref(),
                     &name,
                     args,

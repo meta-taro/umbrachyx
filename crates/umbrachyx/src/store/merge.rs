@@ -70,6 +70,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         from: Option<&CommitId>,
         to: Option<&CommitId>,
     ) -> Result<Vec<ValueChange>, StoreError> {
+        self.check_keeps_history()?;
         let mut changes = self.changes(from, to)?;
         if let Some(latest) = self.latest_changes(from, to) {
             changes.extend(latest);

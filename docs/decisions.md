@@ -1516,6 +1516,53 @@ One store that writes, and others that follow it and answer reads.
   does (median of 300, three runs each); alone, the server answers in
   4.0 ms. The two servers sync to the same disk in turn, which is most
   of that, and says little about two machines.
+- **A replica can be started to keep current values only**
+  (`serve --follow --current-values-only`): every value on every branch
+  as it is now, no tree and no record of commits. What a replica that
+  keeps the history holds grows with every write to its primary, and
+  most of it is the past, which a server that only answers `GET` never
+  reads. On a laptop, both servers on it, after two passes of a million
+  SETs over a million keys such a replica held 193 MB where one that
+  keeps the history held 1,432 MB, 40 bytes for each SET of the second
+  pass against 676, and answered again 3.2 s after a restart against
+  9.3 s ([`bench/results/2026-11-20-laptop-replica-memory/`](../bench/results/2026-11-20-laptop-replica-memory/)).
+  Reads are no faster: 460 to 510 ns from either, in the process. That
+  agrees with the entry above that found a hash index beside the tree
+  not worth having; this is taken for the memory, not for the read.
+- **It is a way of opening a log, not another kind of log.** The
+  replica's log on disk is whole, and the same files opened without the
+  option hold the history, with the same commits under the same ids. So
+  the role is put on and taken off by restarting, nothing is converted,
+  and such a replica can still be made the primary. Its restart still
+  reads the whole log, and takes the memory for that while it does: what
+  is bounded is what it holds afterwards.
+- **Only a store that follows may be opened so.** Merging, finding a
+  conflict and carrying out an approval need the tree, so a store that
+  holds current values only refuses every write of its own before
+  anything is made or written, and the option is refused without
+  `--follow`.
+- **Asked about the past, it says it keeps none**: `UMBRA.HISTORY`,
+  `UMBRA.LOG`, `UMBRA.DIFF`, `UMBRA.CELLS`, `UMBRA.PENDING` and
+  `UMBRA.DECISIONS` are answered `NOHISTORY`. Without that it would
+  answer from an empty tree that a key has no history, which reads as
+  nothing having happened. Inside the store, the reads that can refuse
+  do (`NoHistory`); those that return a list return an empty one, so
+  whoever builds on the store asks `keeps_history` first, as the server
+  does. `UMBRA.REPLICATION` and `UMBRA.TABLES` say
+  what the server holds, and `UMBRA.BRANCHES` still names each branch's
+  head, which is known without a record of the commit.
+- **How it is held**: every key as a table declared `latest` holds its
+  keys, in the map beside the tree, whatever the table was declared;
+  tables with no history at all stay as they are. Reads go to the tree
+  first and then to that map, as before, so no reader changed. One
+  thing a client can see: `SCAN` walks that map in no order, where it
+  walks the tree of a table with history in key order, so on such a
+  replica a walk during writes may return a key twice or miss one, as it
+  already may for tables with no history. In the
+  simulation every other replica runs this way, with and without
+  encryption: it reads what its primary reads key by key, erased
+  subjects included, and opened as any store at the end it holds the
+  same history and decisions.
 - **To come:** the one shape that still stops a replica; what
   TLS costs a write that waits for its replica, which is not measured;
   and measurements with one

@@ -39,6 +39,14 @@
   (`TOOFAR`), and an erased subject written again in the same answer as
   one erased for good; either stops the replica, which then has to be
   made again from a new backup.
+- **A replica that keeps current values only.** `umbrachyx serve
+  <branch> --follow <host:port> --current-values-only` holds in memory
+  every value as it is now and nothing of the past, so what it holds
+  does not grow with every write: 40 bytes for a SET to a key it
+  already has, against 676 for a replica that keeps the history (one
+  laptop). It answers `GET` and `SCAN` as before and every question
+  about the past with `NOHISTORY`. Its log on disk is whole: started
+  without the option it answers those too.
 - **Answering a write only once a replica holds it.** `umbrachyx serve
   --feed-replicas-on <port> --wait-for-replica <seconds>` holds each
   answer until a replica has said the write is on its disk. A write no

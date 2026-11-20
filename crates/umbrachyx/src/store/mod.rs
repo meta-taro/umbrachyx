@@ -258,6 +258,9 @@ pub enum StoreError {
     /// The store writes for itself, so it takes in no other store's
     /// records.
     NotFollowing,
+    /// Asked about the past, of a store that holds current values only
+    /// ([`Store::open_current_values`]).
+    NoHistory,
     /// The store answers a write only once a replica holds it, and no
     /// replica is keeping up. Nothing was written.
     NoReplica,
@@ -379,6 +382,10 @@ impl fmt::Display for StoreError {
                  new backup"
             ),
             Self::NotSealed => write!(f, "the log holds values written without encryption"),
+            Self::NoHistory => write!(
+                f,
+                "this store keeps current values only and nothing of the past"
+            ),
             Self::NoKeys => write!(f, "values are not encrypted, so nothing can be erased"),
             Self::BadTableName => write!(f, "a table name must be one part of a key, without '/'"),
             Self::TableInUse(name) => write!(
@@ -501,6 +508,10 @@ pub struct Store<S: Storage, C: Clock> {
     plain: Arc<plain::PlainMap>,
     /// Puts answered before they are on disk, until the log has them.
     unsynced: unsynced::Unsynced,
+    /// Whether this store holds current values and nothing else: no
+    /// tree, no record of commits. Only a replica does; see
+    /// [`Store::open_current_values`].
+    current_only: bool,
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
@@ -520,6 +531,52 @@ impl<S: Storage, C: Clock> Store<S, C> {
         Self::open_with(storage, clock, Some(Sealer::new(keys)))
     }
 
+    /// Opens the log to hold current values only, as a replica may that
+    /// answers reads and nothing about the past: every value on every
+    /// branch as it is now, with no tree and no record of commits, so
+    /// what the store holds in memory does not grow with every write.
+    /// With `keys`, as [`Self::open_sealed`].
+    ///
+    /// Such a store takes in its primary's records and writes none of
+    /// its own: merges, conflicts and approvals need the tree. Its log
+    /// is whole all the same, and opened in any other way the same file
+    /// holds the history. Ask [`Self::keeps_history`] before asking it
+    /// about the past: it holds none, which is not the same as nothing
+    /// having happened.
+    pub fn open_current_values(
+        storage: S,
+        keys: Option<Keys<Box<dyn KeyStorage + Send>>>,
+        clock: C,
+    ) -> Result<Self, StoreError> {
+        Self::replay_as(storage, clock, keys.map(Sealer::new), false, true).map(|(store, _)| store)
+    }
+
+    /// Whether this store can answer about the past. One opened with
+    /// [`Self::open_current_values`] cannot.
+    pub fn keeps_history(&self) -> bool {
+        !self.current_only
+    }
+
+    /// Refuses a question about the past if this store keeps none. For
+    /// the reads that can refuse; those that return a list cannot, and
+    /// return an empty one, which is why [`Self::keeps_history`] is to be
+    /// asked first.
+    pub(crate) fn check_keeps_history(&self) -> Result<(), StoreError> {
+        if self.current_only {
+            return Err(StoreError::NoHistory);
+        }
+        Ok(())
+    }
+
+    /// Refuses a write of this store's own if it holds current values
+    /// only.
+    fn check_writes_for_itself(&self) -> Result<(), StoreError> {
+        if self.current_only {
+            return Err(StoreError::ReadOnly);
+        }
+        Ok(())
+    }
+
     fn open_with(storage: S, clock: C, sealer: Option<Sealer>) -> Result<Self, StoreError> {
         Self::replay(storage, clock, sealer, false).map(|(store, _)| store)
     }
@@ -531,6 +588,16 @@ impl<S: Storage, C: Clock> Store<S, C> {
         clock: C,
         sealer: Option<Sealer>,
         keep: bool,
+    ) -> Result<(Self, Vec<Replayed>), StoreError> {
+        Self::replay_as(storage, clock, sealer, keep, false)
+    }
+
+    fn replay_as(
+        storage: S,
+        clock: C,
+        sealer: Option<Sealer>,
+        keep: bool,
+        current_only: bool,
     ) -> Result<(Self, Vec<Replayed>), StoreError> {
         let (log, records) = Log::open(storage)?;
         if let Some(sealer) = &sealer {
@@ -565,6 +632,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             decisions: Vec::new(),
             plain: Arc::new(plain::PlainMap::new()),
             unsynced: unsynced::Unsynced::default(),
+            current_only,
         };
         let mut replayed = Vec::new();
         for (before, record) in records.into_iter().enumerate() {
@@ -600,6 +668,9 @@ impl<S: Storage, C: Clock> Store<S, C> {
         edits: Vec<Edit>,
         provenance: Provenance,
     ) -> Result<CommitId, StoreError> {
+        // Before a key is made for a subject this store would be the
+        // first to write.
+        self.check_writes_for_itself()?;
         let edits = self.seal(edits)?;
         self.commit_with(branch, edits, provenance, None)
     }
@@ -630,6 +701,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         requests: Vec<Request>,
         may_answer_early: bool,
     ) -> Result<Vec<Result<CommitId, StoreError>>, StoreError> {
+        self.check_writes_for_itself()?;
         let time = self.next_time();
         if let Some(sealer) = &mut self.sealer {
             let written = requests
@@ -767,6 +839,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// the key is destroyed is finished when the store next opens. Returns
     /// whether the subject had a key.
     pub fn erase(&mut self, subject: &[u8], provenance: Provenance) -> Result<bool, StoreError> {
+        self.check_writes_for_itself()?;
         let time = self.next_time();
         let sealer = self.sealer.as_mut().ok_or(StoreError::NoKeys)?;
         let Some(key_fingerprint) = sealer.fingerprint_of(subject) else {
@@ -853,6 +926,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         if commits.is_empty() && puts.is_empty() {
             return Ok(Vec::new());
         }
+        self.check_writes_for_itself()?;
         let len: usize =
             BATCH_OVERHEAD + edits_len(&puts) + commits.iter().map(written_len).sum::<usize>();
         if self.unsynced.len + len > MAX_PAYLOAD_LEN {
@@ -893,6 +967,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// Appends a record of any other kind, after the puts answered
     /// before it, so the log keeps the order things were answered in.
     fn append(&mut self, record: &Record) -> Result<(), StoreError> {
+        self.check_writes_for_itself()?;
         self.sync_puts()?;
         Ok(self.log.append(record)?)
     }
@@ -958,6 +1033,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// no past, so for its keys only the head of a branch can answer; any
     /// other commit is refused rather than read as holding nothing.
     pub fn get_at(&self, commit: &CommitId, key: &[u8]) -> Result<Option<Bytes>, StoreError> {
+        self.check_keeps_history()?;
         if !self.commits.contains_key(commit) {
             return Err(StoreError::UnknownCommit(*commit));
         }
@@ -1190,6 +1266,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// commit id in hex, at least `MIN_ID_PREFIX` characters and matching
     /// one commit only.
     pub fn resolve(&self, name: &str) -> Result<CommitId, StoreError> {
+        self.check_keeps_history()?;
         let (branch, back) = match name.rsplit_once('~') {
             Some((branch, n)) => match n.parse::<usize>() {
                 Ok(n) => (branch, n),
@@ -1309,6 +1386,10 @@ impl<S: Storage, C: Clock> Store<S, C> {
             }
             Record::Reject(reject) => {
                 self.require_branch(&reject.branch)?;
+                if self.current_only {
+                    self.last_time = self.last_time.max(reject.time);
+                    return Ok(Vec::new());
+                }
                 self.decisions.push(Decision {
                     decided: Decided::Rejected,
                     branch: reject.branch.clone(),
@@ -1348,14 +1429,17 @@ impl<S: Storage, C: Clock> Store<S, C> {
             .get_mut(&commit.branch)
             .ok_or_else(|| StoreError::UnknownBranch(commit.branch.clone()))?;
         let id = commit_id(head.commit, commit);
-        let is_latest = |key: &[u8]| tables.engine_of(key) == Engine::Latest;
+        // Holding current values only, every key is held as a table
+        // that keeps its latest value holds it.
+        let current_only = self.current_only;
+        let is_latest = |key: &[u8]| current_only || tables.engine_of(key) == Engine::Latest;
         let all_cells = cells_of(head, commit, &id, &is_latest);
         let touched: Vec<Bytes> = all_cells.iter().map(|(key, _)| key.clone()).collect();
         let (latest_cells, cells): (Vec<_>, Vec<_>) =
             all_cells.into_iter().partition(|(key, _)| is_latest(key));
         let commits = &self.commits;
         let written = written_over(&cells, |key| head.held_shared(key, commits));
-        let latest_written = if commit.branch == MAIN_BRANCH {
+        let latest_written = if commit.branch == MAIN_BRANCH || current_only {
             Vec::new()
         } else {
             written_over(&latest_cells, |key| head.latest.get(key).cloned())
@@ -1373,6 +1457,17 @@ impl<S: Storage, C: Clock> Store<S, C> {
                     latest.remove(&key)
                 }
             });
+        // What follows is the record of the commit, which a store that
+        // holds current values only does not keep, or make.
+        if current_only {
+            head.commit = Some(id);
+            head.latest = latest;
+            for key in &touched {
+                self.tables.note_written(key);
+            }
+            self.last_time = self.last_time.max(commit.time);
+            return Ok(id);
+        }
         let depth = head
             .commit
             .and_then(|parent| self.commits.get(&parent))

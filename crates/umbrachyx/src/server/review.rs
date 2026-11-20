@@ -11,6 +11,7 @@
 //! writes is never issued the right to approve, so an agent cannot pass
 //! its own change.
 
+use super::history::CURRENT_VALUES_ONLY;
 use std::time::SystemTime;
 
 use biscuit_auth::PublicKey;
@@ -82,17 +83,20 @@ enum Decision {
 }
 
 fn pending(writer: &Writer) -> Reply {
-    match writer.ask(|store| store.pending()) {
-        Ok(Ok(changes)) => Reply::Array(changes.iter().map(element).collect()),
-        Ok(Err(error)) | Err(error) => Reply::Error(format!("ERR {error}")),
+    match writer.ask(|store| store.keeps_history().then(|| store.pending())) {
+        Ok(None) => Reply::Error(CURRENT_VALUES_ONLY.to_owned()),
+        Ok(Some(Ok(changes))) => Reply::Array(changes.iter().map(element).collect()),
+        Ok(Some(Err(error))) => Reply::Error(format!("ERR {error}")),
+        Err(error) => Reply::Error(format!("ERR {error}")),
     }
 }
 
 /// The newest decisions, each one flat array of field names and values.
 fn decisions(writer: &Writer, limit: usize) -> Reply {
     let bulk = |text: &str| Reply::Bulk(Some(text.as_bytes().to_vec()));
-    match writer.ask(move |store| store.decisions(limit)) {
-        Ok(decisions) => Reply::Array(
+    match writer.ask(move |store| store.keeps_history().then(|| store.decisions(limit))) {
+        Ok(None) => Reply::Error(CURRENT_VALUES_ONLY.to_owned()),
+        Ok(Some(decisions)) => Reply::Array(
             decisions
                 .iter()
                 .map(|decision| {
@@ -245,6 +249,7 @@ fn store_error(error: &StoreError) -> Reply {
         StoreError::ReadOnly | StoreError::NoReplica | StoreError::NotReplicated => {
             super::unreplicated(error).unwrap_or_else(|| Reply::Error(format!("ERR {error}")))
         }
+        StoreError::NoHistory => Reply::Error(CURRENT_VALUES_ONLY.to_owned()),
         StoreError::NotWaiting(_, why) => {
             Reply::Error(format!("NOTWAITING {} {error}", why.word()))
         }

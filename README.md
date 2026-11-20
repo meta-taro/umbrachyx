@@ -162,7 +162,13 @@ $ umbrachyx history agent/support player/42/gems
   certificate that authority did not sign, and the replica is sent the
   keys of subjects first written after its backup. Without them nothing
   between the servers is encrypted and no key is sent: such a subject
-  stops the replica, which says so. Still for trials: a replica far behind can
+  stops the replica, which says so. Started with
+  `--current-values-only` as well, a replica keeps in memory only the
+  values as they are now: after two million SETs over a million keys it
+  held 193 MB where one that keeps the history held 1,432 MB (one
+  laptop, both servers on it), and it answers questions about the past
+  with `NOHISTORY`; its log on disk is whole all the same. Still for
+  trials: a replica far behind can
   still be stopped for good by erasures it missed (16 MiB or more
   between a value and its erasure, or an erased subject written again
   next to one erased for good), and

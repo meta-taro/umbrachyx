@@ -14,6 +14,10 @@ use crate::tree::Bytes;
 
 /// The reads of [`Store`] that do not depend on its storage or clock.
 pub trait Inspect {
+    /// [`Store::keeps_history`]. Whoever answers about the past asks
+    /// this first: a store that keeps none would answer that nothing
+    /// happened.
+    fn keeps_history(&self) -> bool;
     fn branches(&self) -> Vec<&str>;
     fn head(&self, branch: &str) -> Option<CommitId>;
     fn commit_info(&self, id: &CommitId) -> Option<&CommitInfo>;
@@ -143,6 +147,10 @@ impl<S: Storage, C: Clock> Store<S, C> {
 }
 
 impl<S: Storage, C: Clock> Inspect for Store<S, C> {
+    fn keeps_history(&self) -> bool {
+        Store::keeps_history(self)
+    }
+
     fn branches(&self) -> Vec<&str> {
         Store::branches(self).collect()
     }

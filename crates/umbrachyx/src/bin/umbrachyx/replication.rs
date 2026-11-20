@@ -120,3 +120,20 @@ fn warn_if_others_can_read(key: &Path) {
 
 #[cfg(not(unix))]
 fn warn_if_others_can_read(_key: &Path) {}
+
+/// Whether `--current-values-only` was given, which is for `serve` with
+/// `--follow` only: a store that keeps no tree cannot merge, find a
+/// conflict or carry out an approval, so it takes no writes of its own.
+pub fn holds_current_values_only(command: &str, args: &Args) -> Result<bool, String> {
+    if !args.options.contains_key("current-values-only") {
+        return Ok(false);
+    }
+    if command != "serve" || !args.options.contains_key("follow") {
+        return Err(
+            "--current-values-only is for a server that follows another: it needs serve and \
+             --follow"
+                .to_owned(),
+        );
+    }
+    Ok(true)
+}
