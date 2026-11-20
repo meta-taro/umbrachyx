@@ -1342,13 +1342,90 @@ One store that writes, and others that follow it and answer reads.
   it is: an erasure is finished on the primary at once and on each
   replica when the record arrives. Which replicas have not had it yet is
   to be shown, not waited for.
-- **Keys do not travel yet.** Values stay sealed on the way, and a
-  replica refuses records sealed under keys it lacks, rather than take
-  them in unreadable, which would look erased. For now a replica is
-  given the key file by hand, which only covers subjects that existed
-  then. Sending new keys with the log needs the connection encrypted;
-  until it is, replication is for measurements and trials, not for data
-  that must stay secret on the network.
+- **A key travels when a replica asks for it, never with the records.**
+  The log holds no key, so that destroying a key erases, and a copy of
+  the log stays unreadable without the key file. A replica that is sent
+  records sealed under keys it lacks asks for those keys by their
+  fingerprints, which the sealed values carry. It keeps a key only if
+  its fingerprint is one it asked for, under the subject the records
+  name, and has it synced in its key file before it writes the records:
+  the other order could leave records on its disk that it can never
+  read. Every answer says which key it is about, so one that arrives in
+  place of another is seen to be and asked for again. Asking costs a
+  second exchange, only for answers that bring a subject the replica
+  has not seen.
+- **Keys travel only between servers that show each other
+  certificates** (`serve --replication-cert --replication-key
+  --replication-ca`, three PEM files). The servers then speak TLS 1.3 on
+  the replicas' port. A primary answers only a replica whose certificate
+  the named authority signed; a replica asks only a primary whose
+  certificate it signed for the host given to `--follow`, so following
+  by address needs the address in the certificate. Neither check can be
+  switched off, there is no older protocol to fall back to, and a
+  server given certificates does not talk to one without. Whoever runs
+  the servers makes the certificates and their keys; the server only
+  reads the files.
+- **That keys go nowhere else is in how the code is built, not in a
+  setting.** The command that asks for keys is answered only on a
+  connection that holds the proof of a finished handshake, which nothing
+  but the handshake makes; a replica sends it only on such a connection.
+  On a port without certificates the command does not exist, and the
+  replica stops at the first record whose key it lacks, as before keys
+  travelled. Telling the server "this network is safe, send keys anyway"
+  was the alternative, for use inside a tunnel: the server could not
+  check it, and a wrong word would put keys on the network in the clear.
+- **Without certificates replication still runs, for measurements and
+  trials**: nothing between the servers is encrypted, which `serve` says
+  when it starts, and the replica is given the key file by hand, which
+  covers the subjects that existed then. The port clients use is not
+  encrypted either way; that is a decision of its own.
+- **A connection that fails its handshake is closed without a word**,
+  and so is one more replica than the sixteen answered: a reason would
+  go out in the clear to whoever connected. A replica has ten seconds to
+  show its certificate, from its first byte to its last, since its place
+  among the sixteen is taken from the moment it connects; a limit on
+  each read alone would let sixteen connections that send a byte now
+  and then keep every replica out.
+- **Every certificate the authority signed is a replica's, with every
+  key.** A primary does not tell one certificate from another: whoever
+  shows one the authority signed is sent the log and any key asked for.
+  So the authority named to `--replication-ca` is to sign these servers'
+  certificates and nothing else, and a certificate that leaks is ended
+  by replacing the authority; nothing here reads a list of revoked
+  ones. Naming which certificates may ask is with the roles to come.
+- **A key destroyed before the replica had it stops the replica.** A
+  subject first written after the replica was made, and erased before
+  the replica caught up: the primary no longer has the key to give, and
+  says so from its log, which holds the erasure. If the erasure comes in
+  the same answer as the values, the replica takes both, never able to
+  read what nobody can. If the key was destroyed after the primary
+  answered and before it was asked for the key, the replica asks once
+  more and is then sent the erasure with the values. If the erasure is
+  further on than one answer reaches (a megabyte), the replica
+  stops and takes nothing: records without their key and without their
+  erasure would not open again after a restart, since a store that
+  opens checks that it holds every key its log needs. Started again it asks
+  again, which helps only if the answers are larger by then; otherwise
+  it is to be made again from a new backup. In the simulation (10,000
+  runs of 64 steps, answers of at most 2 KB and often one record, a
+  subject erased in 8% of steps) a replica met this in 1,041 runs, and
+  in 390 it was still stopped when sent everything at once. Taking such records in
+  durably, so that this is no stop, is to come.
+- **A subject erased and written again has two keys on the way.** A
+  subject has one key in a key file, so a replica that still holds the
+  old one cannot keep the new one until the erasure is in. When both
+  come in one answer it takes in the records up to the erasure, and is
+  sent the rest again. It cuts nowhere else: before an erasure the
+  records might need a key destroyed further on.
+- **The simulation carries keys over its network too.** Answers that
+  hold keys are lost, arrive in place of others, are cut short and have
+  bits flipped, while the replica crashes, loses power and fails to
+  write its key file. Checked: it opens again every time, keeps no key
+  but the one asked for, and stops only for a key that was destroyed.
+  It found that a replica whose key file failed while finishing an
+  erasure left the records after that erasure in its log and out of its
+  memory; every record taken in is now applied, and the key file is
+  finished when the store next opens.
 - **A replica is a client of its primary, on a port kept for
   replicas** (`serve --feed-replicas-on <port>`). It sends one command,
   `UMBRA.LOG.AFTER`, with what it holds, and is answered with one value
@@ -1426,7 +1503,8 @@ One store that writes, and others that follow it and answer reads.
   does (median of 300, three runs each); alone, the server answers in
   4.0 ms. The two servers sync to the same disk in turn, which is most
   of that, and says little about two machines.
-- **To come:** an encrypted connection that keys can travel on,
+- **To come:** taking in records whose key was destroyed first; what
+  TLS costs a write that waits for its replica, which is not measured;
   and measurements with one
   writer and several readers next to Valkey and PostgreSQL set up the
   same way.

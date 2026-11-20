@@ -76,6 +76,7 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
         [--sync-every MS] [--public-key K [--require-auth]]
         [--backup-to D [--backup-every S]] [--feed-replicas-on P [--wait-for-replica S]] [--follow H:P]
+        [--replication-cert F --replication-key F --replication-ca F]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history.
                               --bind listens on another address of this
@@ -114,10 +115,28 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               that server for its
                               records, answers reads, and refuses writes
                               with READONLY. Its store is a backup of the
-                              other, made with restore. Nothing on the way
-                              is encrypted, and keys are not sent: values
-                              of a subject first written after the backup
-                              stop it, and it says so
+                              other, made with restore.
+                              --replication-cert, --replication-key and
+                              --replication-ca name three PEM files: this
+                              server's certificate, the private key of it,
+                              and the certificate of the authority that
+                              signed the other servers'. With them the
+                              servers speak TLS 1.3 to each other, a
+                              primary answers only replicas that show a
+                              certificate that authority signed, a replica
+                              asks only a primary that shows one for the
+                              host in --follow (an address there needs the
+                              address in the certificate), and a replica
+                              is sent the keys of subjects first written
+                              after its backup. Give them to both servers.
+                              Whoever holds a certificate that authority
+                              signed is sent every record and every key:
+                              use an authority that signs nothing else.
+                              Without them nothing between the servers is
+                              encrypted and keys are not sent: values of a
+                              subject first written after the backup stop
+                              the replica, and it says so. The port
+                              clients use is not encrypted either way
   mcp --public-key K --token-file F
                               MCP over stdin and stdout, for one agent's token
 
@@ -190,7 +209,8 @@ impl Args {
                 | "max-connections" | "threads" | "sync-every" | "key" | "subject" | "branch"
                 | "prefix" | "columns" | "column" | "operations" | "operation" | "purpose"
                 | "expires-in" | "public-key" | "token-file" | "backup-to" | "backup-every"
-                | "follow" | "feed-replicas-on" | "wait-for-replica" => {
+                | "follow" | "feed-replicas-on" | "wait-for-replica" | "replication-cert"
+                | "replication-key" | "replication-ca" => {
                     parsed.options.insert(name.to_owned(), value);
                 }
                 _ => return Err(format!("unknown option --{name}\n\n{USAGE}")),
@@ -574,6 +594,12 @@ fn revert(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
 const BEYOND_THIS_MACHINE: &str = "listening beyond this machine: anyone who can reach the port \
     reads every value and its history without a token, and nothing is encrypted";
 
+/// What `serve` says when it feeds replicas or follows a server with no
+/// certificates given.
+const REPLICATION_IN_THE_CLEAR: &str = "nothing between this server and its replicas or \
+    primary is encrypted, and keys are not sent: give --replication-cert, --replication-key \
+    and --replication-ca to change that";
+
 /// Where `serve` listens: this machine only, unless `--bind` names another
 /// of its addresses.
 fn listen_address(args: &Args) -> Result<IpAddr, String> {
@@ -635,6 +661,7 @@ fn serve(mut store: FileStore, args: &Args) -> Result<ExitCode, String> {
     }
     let backup = backups::place(&mut store, args)?;
     let follows = replication::primary(args)?;
+    let has_replication = follows.is_some() || args.options.contains_key("feed-replicas-on");
     let committer = match (&follows, replication::wait(args)?) {
         (Some(_), _) => Committer::start_following(store),
         (None, Some(limit)) => {
@@ -671,6 +698,17 @@ fn serve(mut store: FileStore, args: &Args) -> Result<ExitCode, String> {
     if let Some(primary) = follows {
         eprintln!("following {primary}: this server answers reads and takes no writes");
         server = server.follow(primary);
+    }
+    match replication::identity(args)? {
+        Some(identity) => {
+            server = server.replicate_as(&identity).map_err(|e| e.to_string())?;
+            eprintln!(
+                "replication is over TLS, each server showing a certificate; keys are sent to \
+                 replicas"
+            );
+        }
+        None if has_replication => eprintln!("umbrachyx: {REPLICATION_IN_THE_CLEAR}"),
+        None => {}
     }
     let listener = TcpListener::bind((address, port)).map_err(|e| e.to_string())?;
     if !address.is_loopback() {

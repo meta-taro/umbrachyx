@@ -8,6 +8,7 @@
 mod backup_run;
 mod disk;
 mod key_disk;
+mod keys_run;
 mod net;
 mod plain_run;
 mod rng;

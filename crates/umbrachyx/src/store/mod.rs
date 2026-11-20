@@ -268,6 +268,10 @@ pub enum StoreError {
     /// The log has values sealed under this many keys the key file does
     /// not hold. Nothing was written.
     MissingKeys(usize),
+    /// Records a replica was sent are sealed under this many keys its
+    /// primary destroyed before the replica had them, and the erasure is
+    /// not among those records. Nothing was written.
+    KeysErased(usize),
     /// Opened with a key file, the log holds a value that is not sealed.
     NotSealed,
     /// Erasing needs encrypted values; the store was opened without keys.
@@ -366,6 +370,13 @@ impl fmt::Display for StoreError {
             Self::MissingKeys(count) => write!(
                 f,
                 "the key file lacks {count} key(s) the log needs; nothing was written"
+            ),
+            Self::KeysErased(count) => write!(
+                f,
+                "the primary destroyed {count} key(s) before this replica had them, and the \
+                 records it was sent need them without holding the erasure; nothing was \
+                 written. If it stops here again when started again, make the replica again \
+                 from a new backup"
             ),
             Self::NotSealed => write!(f, "the log holds values written without encryption"),
             Self::NoKeys => write!(f, "values are not encrypted, so nothing can be erased"),
@@ -477,6 +488,8 @@ pub struct Store<S: Storage, C: Clock> {
     /// Present when values are encrypted.
     sealer: Option<Sealer>,
     erasures: Vec<Erasure>,
+    /// The fingerprint of every key an erasure in the log destroyed.
+    erased_keys: HashSet<Fingerprint>,
     tables: Tables,
     /// Per branch, the last change rejected on it.
     rejections: BTreeMap<String, Rejection>,
@@ -545,6 +558,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             last_time: 0,
             sealer,
             erasures: Vec::new(),
+            erased_keys: HashSet::new(),
             tables: Tables::default(),
             rejections: BTreeMap::new(),
             decisions: Vec::new(),
@@ -1255,6 +1269,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
                     },
                     time: erase.time,
                 });
+                self.erased_keys.insert(erase.key_fingerprint);
                 self.last_time = self.last_time.max(erase.time);
                 Ok(Vec::new())
             }
@@ -1605,8 +1620,21 @@ fn reveal(ring: Option<&Ring>, key: &[u8], value: Option<Bytes>) -> Option<Bytes
 /// Checked before anything is written, since a write could cut a key file
 /// that only looks torn.
 fn check_sealed(records: &[Record], ring: &Ring) -> Result<(), StoreError> {
+    match keys_lacked(records, ring)?.len() {
+        0 => Ok(()),
+        missing => Err(StoreError::MissingKeys(missing)),
+    }
+}
+
+/// The keys `records` are sealed under that `ring` lacks, each with the
+/// subject it belongs to, in order of fingerprint. A key the records
+/// themselves erase is not lacked: nothing reads under it afterwards.
+fn keys_lacked(
+    records: &[Record],
+    ring: &Ring,
+) -> Result<BTreeMap<Fingerprint, Vec<u8>>, StoreError> {
     let ring = ring.read();
-    let mut missing = HashSet::new();
+    let mut missing = BTreeMap::new();
     let erased: HashSet<Fingerprint> = records
         .iter()
         .filter_map(|record| match record {
@@ -1627,19 +1655,16 @@ fn check_sealed(records: &[Record], ring: &Ring) -> Result<(), StoreError> {
         Record::Puts(puts) | Record::Batch { puts, .. } => puts.as_slice(),
         _ => &[][..],
     });
-    for value in commits
-        .flat_map(|c| &c.changes)
-        .chain(puts)
-        .filter_map(|e| e.value.as_ref())
-    {
+    for edit in commits.flat_map(|c| &c.changes).chain(puts) {
+        let Some(value) = edit.value.as_ref() else {
+            continue;
+        };
         let fingerprint = seal::key_fingerprint(value).ok_or(StoreError::NotSealed)?;
         if !ring.contains_key(&fingerprint) && !erased.contains(&fingerprint) {
-            missing.insert(fingerprint);
+            missing
+                .entry(fingerprint)
+                .or_insert_with(|| seal::subject(&edit.key).to_vec());
         }
     }
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(StoreError::MissingKeys(missing.len()))
-    }
+    Ok(missing)
 }

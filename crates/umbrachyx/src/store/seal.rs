@@ -122,6 +122,25 @@ impl Sealer {
 }
 
 impl Sealer {
+    /// The key with this fingerprint, if the key file holds it.
+    pub(crate) fn key_of(&self, fingerprint: &Fingerprint) -> Option<&Key> {
+        self.keys.by_fingerprint(fingerprint)
+    }
+
+    /// Keeps keys another store made, durable before any is in the ring:
+    /// records sealed under them are written only after. A subject that
+    /// has a key keeps it.
+    pub(crate) fn take_keys(&mut self, keys: &[(&[u8], Key)]) -> Result<(), KeyError> {
+        self.keys.put_keys(keys)?;
+        let mut ring = self.ring.write();
+        for (subject, key) in keys {
+            if self.keys.get(subject) == Some(key) {
+                ring.insert(fingerprint(key), *key);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn fingerprint_of(&self, subject: &[u8]) -> Option<Fingerprint> {
         self.keys.get(subject).map(fingerprint)
     }

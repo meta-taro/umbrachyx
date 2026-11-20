@@ -21,8 +21,22 @@
   `UMBRA.REPLICATION` says how far it is, and why it stopped if it did.
   A replica holding another log, more records than its primary, or
   records its primary does not hold is sent nothing. For trials only:
-  nothing on the way is encrypted, keys are not sent, and nothing is
-  measured on two machines yet.
+  nothing is measured on two machines yet.
+- **TLS between a server and its replicas, and keys that travel on
+  it.** `--replication-cert`, `--replication-key` and `--replication-ca`
+  name three PEM files: the server's certificate, its private key, and
+  the certificate of the authority that signed the other servers'. Given
+  to both, the servers speak TLS 1.3 on the replicas' port, each shows
+  its certificate, and neither answers one whose certificate that
+  authority did not sign; a replica also requires its primary's to name
+  the host in `--follow`. On such a connection a replica is sent the
+  keys of subjects first written after its backup, and reads them.
+  Without the options nothing between the servers is encrypted, no key
+  is sent, and `serve` says so when it starts. `UMBRA.REPLICATION` has
+  `encrypted`. Not yet handled: a subject written and erased while the
+  replica was behind, with the erasure more than one answer (a megabyte
+  of records) after the values, stops the replica, which then has to be
+  made again from a new backup.
 - **Answering a write only once a replica holds it.** `umbrachyx serve
   --feed-replicas-on <port> --wait-for-replica <seconds>` holds each
   answer until a replica has said the write is on its disk. A write no

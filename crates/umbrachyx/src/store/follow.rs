@@ -14,11 +14,19 @@
 //!
 //! A replica starts as a restored backup of its primary. That gives it
 //! the log's name, without which a primary sends nothing, and the keys
-//! the values were sealed under.
+//! the values were sealed under by then.
+//!
+//! The key of a subject first written later is not among the records:
+//! the log never holds a key. A replica that is sent records sealed
+//! under keys it lacks asks for those keys by their fingerprints, over a
+//! link that carries keys ([`Primary::keys`]; most carry none, and then
+//! the replica stops where it is). It keeps a key only if it is the one
+//! the records name, and has it on its disk before the records.
 
 use std::fmt;
 
 use super::{Clock, Store, StoreError};
+use crate::keys::{Fingerprint, Key, fingerprint};
 use crate::log::{Chain, LogError, LogId, Storage};
 
 /// The most a primary sends in one answer, whatever is asked for.
@@ -93,6 +101,39 @@ impl fmt::Display for Refusal {
     }
 }
 
+/// What a primary says of a key a replica asked for. Each says which
+/// key it is about, so one that arrives in place of another is seen to
+/// be: a key by what it is, the others by the fingerprint asked for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum KeyAnswer {
+    Key(Key),
+    /// Its log holds the erasure that destroyed the key.
+    Erased(Fingerprint),
+    /// It never held such a key.
+    Unknown(Fingerprint),
+}
+
+impl KeyAnswer {
+    /// The fingerprint of the key this is about.
+    pub fn fingerprint(&self) -> Fingerprint {
+        match self {
+            Self::Key(key) => fingerprint(key),
+            Self::Erased(about) | Self::Unknown(about) => *about,
+        }
+    }
+}
+
+/// Never the key itself.
+impl fmt::Debug for KeyAnswer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Key(_) => "Key(..)",
+            Self::Erased(_) => "Erased",
+            Self::Unknown(_) => "Unknown",
+        })
+    }
+}
+
 /// A log whose chain is worked out a part at a time, so that asking for
 /// it holds nobody up for as long as hashing a whole log takes.
 pub trait Chained {
@@ -104,6 +145,10 @@ pub trait Chained {
 pub trait Feed: Chained {
     /// The answer to `ask`, in one turn.
     fn sent(&mut self, ask: &Ask) -> Result<Result<Sent, Refusal>, StoreError>;
+    /// What this store says of the key with each of these fingerprints,
+    /// in the same order. Only whoever may read every value is to be
+    /// answered.
+    fn keys(&mut self, wanted: &[Fingerprint]) -> Result<Vec<KeyAnswer>, StoreError>;
 }
 
 /// The store a replica keeps.
@@ -112,6 +157,12 @@ pub trait Follower: Chained {
     /// Takes in what was sent, if it starts where this store's log ends,
     /// and returns how many records the store holds then.
     fn take_in(&mut self, sent: &Sent) -> Result<u64, StoreError>;
+    /// The fingerprints of the keys this store lacks to take in `sent`.
+    /// None if it would leave `sent` anyway.
+    fn lacks(&mut self, sent: &Sent) -> Result<Vec<Fingerprint>, StoreError>;
+    /// Keeps those of `keys` that `sent` needs and this store lacks,
+    /// durable before this returns.
+    fn take_keys(&mut self, sent: &Sent, keys: &[Key]) -> Result<(), StoreError>;
 }
 
 /// The way to a primary.
@@ -119,6 +170,30 @@ pub trait Primary {
     /// Asks, and returns the answer or why none came. Having no answer
     /// is not a refusal: the replica asks again.
     fn ask(&mut self, ask: &Ask) -> Result<Result<Sent, Refusal>, String>;
+
+    /// Asks for the keys with these fingerprints. `None` if keys do not
+    /// travel this way, which is so unless the way is one nobody else
+    /// can read or write on.
+    fn keys(&mut self, _wanted: &[Fingerprint]) -> Result<Option<Vec<KeyAnswer>>, String> {
+        Ok(None)
+    }
+}
+
+/// A store in the same process, asked directly, keys included: for where
+/// nothing lies between the two stores.
+pub struct WithKeys<'a, F: Feed>(pub &'a mut F);
+
+impl<F: Feed> Primary for WithKeys<'_, F> {
+    fn ask(&mut self, ask: &Ask) -> Result<Result<Sent, Refusal>, String> {
+        self.0.ask(ask)
+    }
+
+    fn keys(&mut self, wanted: &[Fingerprint]) -> Result<Option<Vec<KeyAnswer>>, String> {
+        match self.0.keys(wanted) {
+            Ok(answers) => Ok(Some(answers)),
+            Err(error) => Err(error.to_string()),
+        }
+    }
 }
 
 /// Answers a replica from `feed`.
@@ -130,7 +205,8 @@ pub fn answer(
     feed.sent(ask)
 }
 
-/// A store in the same process is asked directly.
+/// A store in the same process is asked directly. Keys are not handed
+/// over this way; see [`WithKeys`].
 impl<F: Feed> Primary for F {
     fn ask(&mut self, ask: &Ask) -> Result<Result<Sent, Refusal>, String> {
         answer(self, ask).map_err(|error| error.to_string())
@@ -191,15 +267,76 @@ pub fn follow_once(
 ) -> Result<Progress, FollowError> {
     while follower.chain_step()? {}
     let held = follower.held()?;
-    let sent = primary
-        .ask(&Ask { held, max_bytes })
+    let ask = Ask { held, max_bytes };
+    let mut sent = primary
+        .ask(&ask)
         .map_err(FollowError::Link)?
         .map_err(FollowError::Refused)?;
+    // A key destroyed since the primary answered: the erasure is in its
+    // log by now, and asked again it may send the erasure with the
+    // values, which then need no key. If not, the erasure is further on
+    // than one answer reaches, and the second ask says so too.
+    match fetch_keys(primary, follower, &sent) {
+        Err(FollowError::Store(StoreError::KeysErased(_))) => {
+            sent = primary
+                .ask(&ask)
+                .map_err(FollowError::Link)?
+                .map_err(FollowError::Refused)?;
+            fetch_keys(primary, follower, &sent)?;
+        }
+        fetched => fetched?,
+    }
     let now = follower.take_in(&sent)?;
     Ok(Progress {
         held: now,
         primary: sent.records,
     })
+}
+
+/// Asks `primary` for the keys `follower` lacks to take in `sent`, and
+/// has it keep them. Over a link that carries no keys this does nothing,
+/// and taking in `sent` then says which keys are missing.
+fn fetch_keys(
+    primary: &mut (impl Primary + ?Sized),
+    follower: &mut (impl Follower + ?Sized),
+    sent: &Sent,
+) -> Result<(), FollowError> {
+    let wanted = follower.lacks(sent)?;
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let Some(answers) = primary.keys(&wanted).map_err(FollowError::Link)? else {
+        return Ok(());
+    };
+    // An answer that does not fit the ask did not come from the store
+    // that was asked, or not whole: ask again, and keep nothing of it.
+    if answers.len() != wanted.len() {
+        return Err(FollowError::Link(format!(
+            "asked for {} key(s) and was answered for {}",
+            wanted.len(),
+            answers.len()
+        )));
+    }
+    let mut keys = Vec::new();
+    let mut erased = 0;
+    for (wanted, answer) in wanted.iter().zip(&answers) {
+        if answer.fingerprint() != *wanted {
+            return Err(FollowError::Link(
+                "was answered about a key other than the one asked for".to_owned(),
+            ));
+        }
+        match answer {
+            KeyAnswer::Key(key) => keys.push(*key),
+            KeyAnswer::Erased(_) => erased += 1,
+            // Taking in what was sent says how many are missing.
+            KeyAnswer::Unknown(_) => {}
+        }
+    }
+    if erased > 0 {
+        return Err(StoreError::KeysErased(erased).into());
+    }
+    follower.take_keys(sent, &keys)?;
+    Ok(())
 }
 
 impl<S: Storage, C: Clock> Chained for Store<S, C> {
@@ -230,6 +367,10 @@ impl<S: Storage, C: Clock> Feed for Store<S, C> {
             frames,
         }))
     }
+
+    fn keys(&mut self, wanted: &[Fingerprint]) -> Result<Vec<KeyAnswer>, StoreError> {
+        Ok(self.keys_wanted(wanted))
+    }
 }
 
 impl<S: Storage, C: Clock> Follower for Store<S, C> {
@@ -252,5 +393,19 @@ impl<S: Storage, C: Clock> Follower for Store<S, C> {
             self.replicate(&sent.frames)?;
         }
         Ok(self.log.records())
+    }
+
+    fn lacks(&mut self, sent: &Sent) -> Result<Vec<Fingerprint>, StoreError> {
+        if sent.after != self.log.records() {
+            return Ok(Vec::new());
+        }
+        Ok(self.keys_lacked_for(&sent.frames)?.into_keys().collect())
+    }
+
+    fn take_keys(&mut self, sent: &Sent, keys: &[Key]) -> Result<(), StoreError> {
+        if sent.after != self.log.records() {
+            return Ok(());
+        }
+        self.keep_keys_for(&sent.frames, keys)
     }
 }
