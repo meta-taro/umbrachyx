@@ -51,6 +51,7 @@ mod replication;
 pub mod resp;
 mod review;
 mod session;
+mod tls;
 
 pub use history::MAX_PAGE;
 use resp::{Command, Reply};
