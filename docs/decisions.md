@@ -1354,16 +1354,45 @@ One store that writes, and others that follow it and answer reads.
   place of another is seen to be and asked for again. Asking costs a
   second exchange, only for answers that bring a subject the replica
   has not seen.
-- **Keys travel only on a link that says it carries them.** The call
-  that asks for keys answers "none travel here" unless the link is made
-  to carry them, and a replica without the key then stops where it is,
-  as it did before keys travelled. Between two servers no link carries
-  them yet: that is for the connection where both ends show a
-  certificate (`rustls` in the table above), which is not yet wired to
-  the replicas' port. Until it is, a replica is given the key file by
-  hand, which covers the subjects that existed then, and replication is
-  for measurements and trials, not for data that must stay secret on the
-  network.
+- **Keys travel only between servers that show each other
+  certificates** (`serve --replication-cert --replication-key
+  --replication-ca`, three PEM files). The servers then speak TLS 1.3 on
+  the replicas' port. A primary answers only a replica whose certificate
+  the named authority signed; a replica asks only a primary whose
+  certificate it signed for the host given to `--follow`, so following
+  by address needs the address in the certificate. Neither check can be
+  switched off, there is no older protocol to fall back to, and a
+  server given certificates does not talk to one without. Whoever runs
+  the servers makes the certificates and their keys; the server only
+  reads the files.
+- **That keys go nowhere else is in how the code is built, not in a
+  setting.** The command that asks for keys is answered only on a
+  connection that holds the proof of a finished handshake, which nothing
+  but the handshake makes; a replica sends it only on such a connection.
+  On a port without certificates the command does not exist, and the
+  replica stops at the first record whose key it lacks, as before keys
+  travelled. Telling the server "this network is safe, send keys anyway"
+  was the alternative, for use inside a tunnel: the server could not
+  check it, and a wrong word would put keys on the network in the clear.
+- **Without certificates replication still runs, for measurements and
+  trials**: nothing between the servers is encrypted, which `serve` says
+  when it starts, and the replica is given the key file by hand, which
+  covers the subjects that existed then. The port clients use is not
+  encrypted either way; that is a decision of its own.
+- **A connection that fails its handshake is closed without a word**,
+  and so is one more replica than the sixteen answered: a reason would
+  go out in the clear to whoever connected. A replica has ten seconds to
+  show its certificate, from its first byte to its last, since its place
+  among the sixteen is taken from the moment it connects; a limit on
+  each read alone would let sixteen connections that send a byte now
+  and then keep every replica out.
+- **Every certificate the authority signed is a replica's, with every
+  key.** A primary does not tell one certificate from another: whoever
+  shows one the authority signed is sent the log and any key asked for.
+  So the authority named to `--replication-ca` is to sign these servers'
+  certificates and nothing else, and a certificate that leaks is ended
+  by replacing the authority; nothing here reads a list of revoked
+  ones. Naming which certificates may ask is with the roles to come.
 - **A key destroyed before the replica had it stops the replica.** A
   subject first written after the replica was made, and erased before
   the replica caught up: the primary no longer has the key to give, and
@@ -1470,9 +1499,9 @@ One store that writes, and others that follow it and answer reads.
   does (median of 300, three runs each); alone, the server answers in
   4.0 ms. The two servers sync to the same disk in turn, which is most
   of that, and says little about two machines.
-- **To come:** the connection with certificates wired to the replicas'
-  port, so that keys travel between servers; taking in records whose key
-  was destroyed first; and measurements with one
+- **To come:** taking in records whose key was destroyed first; what
+  TLS costs a write that waits for its replica, which is not measured;
+  and measurements with one
   writer and several readers next to Valkey and PostgreSQL set up the
   same way.
 

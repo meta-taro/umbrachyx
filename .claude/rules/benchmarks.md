@@ -52,7 +52,7 @@ bench/restart.sh              # 500万回書いたあとの再起動の時間と
 cargo run --release -p umbrachyx --example compare -- 1000000 <dir>   # 差分と読み込み（Dolt と同じデータ）
 bench/dolt.sh <dir>           # Dolt の差分と読み込み（Dolt 2.6.2 のリリース版）
 cargo test -p umbrachyx --release --test server_crash -- --ignored --nocapture
-cargo test -p umbrachyx --release --test server_failover -- --ignored --nocapture   # 主を強制終了し、確定済みの書き込みを従から読む（100回）
+cargo test -p umbrachyx --release --test server_failover -- --ignored --nocapture   # 主を強制終了し、確定済みの書き込みを従から読む（100回。平文と、証明書つきの TLS で毎回新しい鍵が要る書き込みの2通り）
 cargo test -p umbrachyx --test crash -- --ignored --nocapture
 cargo test -p umbrachyx --lib --release ten_thousand_seeds -- --ignored --nocapture
 bench/colocated.sh <dir>      # 同居試験：ほかのプログラムが CPU・ディスク・メモリ・ネットワークを使う横で、応答・強制終了100回・メモリ不足

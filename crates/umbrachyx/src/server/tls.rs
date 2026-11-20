@@ -10,21 +10,161 @@
 //! The three are read from PEM files that whoever runs the server made
 //! and placed. Nothing here makes a key or a certificate.
 
-// Until the replicas' port is given these, only the tests below use them.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the replicas' port takes these next")
-)]
-
 use std::fmt;
+use std::io;
+use std::net::TcpStream;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
 use rustls::version::TLS13;
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::{
+    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
+};
+
+/// What a server shows its replicas, or its primary, and what it asks
+/// of them: its certificate, the private key of it, and the certificate
+/// of the authority whose signature the other end's certificate needs.
+pub struct Identity {
+    certificate: Vec<u8>,
+    key: Vec<u8>,
+    authority: Vec<u8>,
+}
+
+/// Never what the files hold.
+impl fmt::Debug for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Identity(..)")
+    }
+}
+
+impl Identity {
+    /// Reads the three PEM files. Whoever runs the server made them and
+    /// put them there.
+    pub fn read(certificate: &Path, key: &Path, authority: &Path) -> Result<Self, TlsError> {
+        let read = |path: &Path, what: &str| {
+            std::fs::read(path)
+                .map_err(|error| TlsError(format!("{what}, {}: {error}", path.display())))
+        };
+        Ok(Self {
+            certificate: read(certificate, "the certificate")?,
+            key: read(key, "the private key")?,
+            authority: read(authority, "the authority's certificate")?,
+        })
+    }
+
+    /// From the bytes of the three PEM files.
+    pub fn from_pem(certificate: &[u8], key: &[u8], authority: &[u8]) -> Self {
+        Self {
+            certificate: certificate.to_vec(),
+            key: key.to_vec(),
+            authority: authority.to_vec(),
+        }
+    }
+
+    fn pems(&self) -> Pems<'_> {
+        Pems {
+            certificate: &self.certificate,
+            key: &self.key,
+            authority: &self.authority,
+        }
+    }
+}
+
+/// Both ways a server uses its [`Identity`]: answering replicas, and
+/// asking a primary.
+#[derive(Debug, Clone)]
+pub(super) struct Configs {
+    pub(super) server: Arc<ServerConfig>,
+    pub(super) client: Arc<ClientConfig>,
+}
+
+impl Configs {
+    pub(super) fn new(identity: &Identity) -> Result<Self, TlsError> {
+        Ok(Self {
+            server: server(identity.pems())?,
+            client: client(identity.pems())?,
+        })
+    }
+}
+
+/// That a connection is one nobody else reads or writes on, and that
+/// the other end showed a certificate the authority signed. Only a
+/// handshake that finished makes one, and keys travel only where there
+/// is one.
+#[derive(Debug)]
+pub(super) struct Private(());
+
+pub(super) type FromReplica = StreamOwned<ServerConnection, TcpStream>;
+pub(super) type ToPrimary = StreamOwned<ClientConnection, TcpStream>;
+
+/// Does the handshake on `stream`, in `within` at most from start to
+/// end: an end that sends a little now and then would otherwise be
+/// waited on for ever.
+fn handshake<Side>(
+    connection: &mut rustls::ConnectionCommon<Side>,
+    stream: &mut TcpStream,
+    within: Duration,
+) -> io::Result<()> {
+    let started = Instant::now();
+    while connection.is_handshaking() {
+        let left = within
+            .checked_sub(started.elapsed())
+            .filter(|left| !left.is_zero())
+            .ok_or(io::ErrorKind::TimedOut)?;
+        stream.set_read_timeout(Some(left))?;
+        stream.set_write_timeout(Some(left))?;
+        // One read or write at a time, so the time left is looked at
+        // between them: `complete_io` reads until the handshake moves
+        // on, however little each read brings.
+        if connection.wants_write() {
+            connection.write_tls(stream)?;
+        } else if connection.read_tls(stream)? == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        } else if let Err(error) = connection.process_new_packets() {
+            // Tells the other end why, if it can still be told.
+            let _ = connection.write_tls(stream);
+            return Err(io::Error::other(error));
+        }
+    }
+    Ok(())
+}
+
+/// Does the handshake with a replica that connected, in `within` at
+/// most. An error if it showed no certificate the authority signed, did
+/// not speak TLS, or took longer. The stream's timeouts are the
+/// caller's to set afterwards.
+pub(super) fn accept(
+    config: &Arc<ServerConfig>,
+    mut stream: TcpStream,
+    within: Duration,
+) -> io::Result<(FromReplica, Private)> {
+    let mut connection = ServerConnection::new(Arc::clone(config)).map_err(io::Error::other)?;
+    handshake(&mut connection, &mut stream, within)?;
+    Ok((StreamOwned::new(connection, stream), Private(())))
+}
+
+/// Does the handshake with the primary at the other end of `stream`,
+/// in `within` at most. The primary must show a certificate the
+/// authority signed for `host`: a name or an address, as the replica
+/// was told to follow it. The stream's timeouts are the caller's to set
+/// afterwards.
+pub(super) fn connect(
+    config: &Arc<ClientConfig>,
+    host: &str,
+    mut stream: TcpStream,
+    within: Duration,
+) -> io::Result<(ToPrimary, Private)> {
+    let name = ServerName::try_from(host.to_owned()).map_err(io::Error::other)?;
+    let mut connection =
+        ClientConnection::new(Arc::clone(config), name).map_err(io::Error::other)?;
+    handshake(&mut connection, &mut stream, within)?;
+    Ok((StreamOwned::new(connection, stream), Private(())))
+}
 
 /// What one end holds, as the bytes of its PEM files.
 #[derive(Clone, Copy)]
@@ -40,7 +180,7 @@ pub(super) struct Pems<'a> {
 /// Why what was given cannot be used. Says which of the three, and never
 /// any of a key's bytes.
 #[derive(Debug)]
-pub(super) struct TlsError(String);
+pub struct TlsError(String);
 
 impl fmt::Display for TlsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -131,10 +271,9 @@ mod tests {
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
-    use rustls::pki_types::ServerName;
-    use rustls::{ClientConnection, ServerConnection, StreamOwned};
 
     use super::*;
 
@@ -372,6 +511,36 @@ mod tests {
         plain.write_all(b"*1\r\n$4\r\nPING\r\n").unwrap();
 
         assert!(served.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn a_handshake_fed_a_byte_at_a_time_ends_when_its_time_is_up() {
+        let authority = Authority::new();
+        let primary = authority.sign("localhost");
+        let config = server(pems(&primary, &authority)).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // The start of a TLS record that never ends, a byte at a time:
+        // each read gets something, so no single read times out.
+        let slow = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            for byte in [0x16, 0x03, 0x01, 0x40, 0x00].into_iter().chain([0; 200]) {
+                if stream.write_all(&[byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let limit = Duration::from_millis(300);
+
+        let started = Instant::now();
+        let accepted = accept(&config, stream, limit);
+
+        assert!(accepted.is_err());
+        assert!(started.elapsed() < limit * 4, "{:?}", started.elapsed());
+        drop(accepted);
+        slow.join().unwrap();
     }
 
     #[test]

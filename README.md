@@ -155,14 +155,21 @@ $ umbrachyx history agent/support player/42/gems
   --follow <host:port>`; the first server is started with
   `--feed-replicas-on <port>`, a port to open to its replicas only. The replica asks for the records it lacks, holds
   the same commits under the same ids, and refuses writes with
-  `READONLY`; `UMBRA.REPLICATION` says how far it is. For trials: the
-  connection is not encrypted, keys are not sent (a subject first
-  written after the backup stops the replica, which says so), and
+  `READONLY`; `UMBRA.REPLICATION` says how far it is. Given a
+  certificate, its key and an authority's certificate each
+  (`--replication-cert`, `--replication-key`, `--replication-ca`, PEM
+  files you make), the two servers speak TLS 1.3, answer nobody whose
+  certificate that authority did not sign, and the replica is sent the
+  keys of subjects first written after its backup. Without them nothing
+  between the servers is encrypted and no key is sent: such a subject
+  stops the replica, which says so. Still for trials: a subject written
+  and erased before the replica caught up can stop it for good, and
   nothing is measured on two machines yet. Started with
   `--wait-for-replica <seconds>`, the first server answers a write only
   once a replica holds it; killed in the middle of writes, every write
   it acknowledged was on the replica (100 rounds, 72,964 writes, both
-  servers on one laptop). Not in a released version: build from source to try it
+  servers on one laptop; over TLS with every write to a new subject,
+  100 rounds, 23,596 writes). Not in a released version: build from source to try it
   ([`docs/decisions.md`](docs/decisions.md#replication-being-built)).
 - **`umbrachyx export` prints the whole log as JSON Lines**, one record a
   line, to search with `jq` or `grep`:

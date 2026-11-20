@@ -57,6 +57,7 @@ pub use history::MAX_PAGE;
 use resp::{Command, Reply};
 use session::Session;
 pub use session::UNAUTHENTICATED;
+pub use tls::{Identity, TlsError};
 
 /// Connections served at once unless set otherwise. One more is told so
 /// and closed.
@@ -119,6 +120,9 @@ pub struct Server {
     feeds_replicas: Option<Arc<TcpListener>>,
     /// Where the server this one follows is, if it follows one.
     follows: Option<String>,
+    /// With it, replicas are answered and the primary is asked over
+    /// TLS, each end showing a certificate, and keys travel.
+    identity: Option<tls::Configs>,
     /// How following goes, once the server serves.
     following: Option<replication::Shared>,
 }
@@ -145,6 +149,7 @@ impl Server {
             backup: None,
             feeds_replicas: None,
             follows: None,
+            identity: None,
             following: None,
         })
     }
@@ -213,6 +218,19 @@ impl Server {
         }
     }
 
+    /// Speaks TLS to replicas and to the server this one follows, with
+    /// each end showing a certificate the authority in `identity`
+    /// signed. On such a connection a replica is given the keys of
+    /// subjects it has not seen; without it nothing between the servers
+    /// is encrypted and no key is sent. The port clients use is not
+    /// changed by this.
+    pub fn replicate_as(self, identity: &Identity) -> Result<Self, TlsError> {
+        Ok(Self {
+            identity: Some(tls::Configs::new(identity)?),
+            ..self
+        })
+    }
+
     pub fn max_connections(self, max_connections: usize) -> Self {
         Self {
             max_connections,
@@ -224,7 +242,8 @@ impl Server {
     /// accept or to start a connection's thread costs that connection only.
     pub fn serve(mut self, listener: TcpListener) -> ! {
         if let Some(primary) = self.follows.clone() {
-            let following = replication::spawn(self.writer.clone(), primary)
+            let tls = self.identity.as_ref().map(|tls| tls.client.clone());
+            let following = replication::spawn(self.writer.clone(), primary, tls)
                 .expect("the thread that follows the primary starts");
             self.following = Some(following);
         }
@@ -247,7 +266,8 @@ impl Server {
                 .expect("the thread that backs the store up starts");
         }
         if let Some(listener) = self.feeds_replicas.clone() {
-            replication::spawn_feed(self.writer.clone(), listener)
+            let tls = self.identity.as_ref().map(|tls| tls.server.clone());
+            replication::spawn_feed(self.writer.clone(), listener, tls)
                 .expect("the thread that answers replicas starts");
         }
         let mut next = 0;
@@ -317,6 +337,7 @@ impl Server {
                 if let Some(reply) = replication::reply(
                     &self.writer,
                     self.feeds_replicas.is_some(),
+                    self.identity.is_some(),
                     self.following.as_ref(),
                     &name,
                     args,
