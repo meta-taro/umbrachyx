@@ -86,6 +86,16 @@ impl Drop for Server {
     }
 }
 
+/// One test of this file at a time: each picks free ports and then
+/// starts servers on them, and two doing that at once can pick the same.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn alone() -> std::sync::MutexGuard<'static, ()> {
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
     listener.local_addr().expect("has an address").port()
@@ -170,6 +180,7 @@ fn wait_for(client: &mut TcpStream, command: &[&str], wanted: &str) -> String {
 
 #[test]
 fn two_servers_given_certificates_send_a_new_players_key_to_the_replica() {
+    let _alone = alone();
     let dir = TempDir::new("pair");
     let certificates = dir.certificates();
     let certificates: Vec<&str> = certificates.iter().map(String::as_str).collect();
@@ -229,6 +240,7 @@ fn two_servers_given_certificates_send_a_new_players_key_to_the_replica() {
 
 #[test]
 fn serve_without_certificates_says_that_nothing_between_servers_is_encrypted() {
+    let _alone = alone();
     let dir = TempDir::new("clear");
     assert!(
         dir.run("primary", &["branch", BRANCH, "--from", "main"])
@@ -254,6 +266,7 @@ fn serve_without_certificates_says_that_nothing_between_servers_is_encrypted() {
 
 #[test]
 fn serve_refuses_certificates_it_cannot_use() {
+    let _alone = alone();
     let dir = TempDir::new("refused");
     let certificates = dir.certificates();
     let [cert, cert_file, key, key_file, ca, ca_file] = certificates.each_ref().map(String::as_str);
