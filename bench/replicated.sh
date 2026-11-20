@@ -246,8 +246,12 @@ pgbench_said() {
 # One row of PostgreSQL: <label> <writers> <readers for each replica>
 # <primary> <replica>..., with what a commit waits for in PGOPTIONS.
 postgres_row() {
-  local label="$1" writers="$2" readers="$3" primary_address="$4" address pids=() n=0
+  local label="$1" writers="$2" readers="$3" primary_address="$4" address pids=() n=0 read_from=0
   shift 4
+  # As the other rows say it: the replicas read from, none if none is.
+  if [ "$readers" -gt 0 ]; then
+    read_from="$#"
+  fi
   if [ "$writers" -gt 0 ]; then
     pgbench_run "$primary_address" "$postgres_port" set "$writers" "$out/pg-writes" &
     pids+=($!)
@@ -263,7 +267,7 @@ postgres_row() {
   # Every replica's reads together.
   cat "$out"/pg-reads-*.* >"$out/pg-reads.all" 2>/dev/null || true
   rm -f "$out"/pg-reads-*.*
-  echo "\"$label\",\"$writers\",\"$((readers * $#))\",\"$#\",$(pgbench_said "$out/pg-writes"),$(pgbench_said "$out/pg-reads")" \
+  echo "\"$label\",\"$writers\",\"$((readers * $#))\",\"$read_from\",$(pgbench_said "$out/pg-writes"),$(pgbench_said "$out/pg-reads")" \
     >>"$out/load.csv"
 }
 
