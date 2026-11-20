@@ -381,6 +381,49 @@ fn push_field(payload: &mut Vec<u8>, field: &[u8]) {
 /// One case cannot be told apart: damage inside the last acknowledged frame
 /// looks exactly like a torn write of it.
 pub fn scan(bytes: &[u8]) -> Result<Scan, LogError> {
+    scan_keeping(bytes)
+}
+
+/// As [`scan`], with every frame's length and checksum checked the same
+/// and no payload decoded: where each frame ends, and how far the whole
+/// ones reach. For a log about to be read a record at a time with
+/// [`decode_frame`], which is where a payload that does not decode is
+/// then found. All of a log's records decoded at once take several times
+/// the bytes they were read from.
+pub(crate) fn scan_frames(bytes: &[u8]) -> Result<Scan, LogError> {
+    let mut ends = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let rest = &bytes[offset..];
+        match frame_len(rest) {
+            Ok(len) => {
+                offset += len;
+                ends.push(offset as u64);
+            }
+            Err(reason) if has_whole_frame_after_start(rest) => {
+                return Err(LogError::Corrupt {
+                    offset: offset as u64,
+                    reason,
+                });
+            }
+            Err(_) => break,
+        }
+    }
+    Ok(Scan {
+        records: Vec::new(),
+        ends,
+        valid_len: offset as u64,
+    })
+}
+
+/// The record in `frame`, the bytes of one whole frame whose checksum a
+/// scan has checked, or `None` if its payload does not decode: written
+/// whole, and not readable by this version or at all.
+pub(crate) fn decode_frame(frame: &[u8]) -> Option<Record> {
+    decode_payload(frame.get(HEADER_LEN..)?)
+}
+
+fn scan_keeping(bytes: &[u8]) -> Result<Scan, LogError> {
     let mut records = Vec::new();
     let mut ends = Vec::new();
     let mut offset = 0;
@@ -430,6 +473,13 @@ fn read_frame(rest: &[u8], offset: u64) -> Result<Frame, LogError> {
 /// The frame at the start of `rest`, or why there is none. `Ok(None)` is a
 /// frame whose checksum holds but whose payload does not decode.
 fn check_frame(rest: &[u8]) -> Result<Option<Frame>, &'static str> {
+    let end = frame_len(rest)?;
+    Ok(decode_payload(&rest[HEADER_LEN..end]).map(|record| Frame::Whole { record, len: end }))
+}
+
+/// How long the frame at the start of `rest` is, header and payload, if
+/// its length is one a frame can have and its checksum holds.
+fn frame_len(rest: &[u8]) -> Result<usize, &'static str> {
     if rest.len() < HEADER_LEN {
         return Err("header cut short");
     }
@@ -442,7 +492,7 @@ fn check_frame(rest: &[u8]) -> Result<Option<Frame>, &'static str> {
     if crc32fast::hash(payload) != read_u32(rest, LEN_PREFIX) {
         return Err("checksum mismatch");
     }
-    Ok(decode_payload(payload).map(|record| Frame::Whole { record, len: end }))
+    Ok(end)
 }
 
 /// Whether a whole, checked frame starts anywhere after the first byte.
