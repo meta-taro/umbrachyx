@@ -1393,30 +1393,43 @@ One store that writes, and others that follow it and answer reads.
   certificates and nothing else, and a certificate that leaks is ended
   by replacing the authority; nothing here reads a list of revoked
   ones. Naming which certificates may ask is with the roles to come.
-- **A key destroyed before the replica had it stops the replica.** A
-  subject first written after the replica was made, and erased before
-  the replica caught up: the primary no longer has the key to give, and
-  says so from its log, which holds the erasure. If the erasure comes in
-  the same answer as the values, the replica takes both, never able to
-  read what nobody can. If the key was destroyed after the primary
-  answered and before it was asked for the key, the replica asks once
-  more and is then sent the erasure with the values. If the erasure is
-  further on than one answer reaches (a megabyte), the replica
-  stops and takes nothing: records without their key and without their
-  erasure would not open again after a restart, since a store that
-  opens checks that it holds every key its log needs. Started again it asks
-  again, which helps only if the answers are larger by then; otherwise
-  it is to be made again from a new backup. In the simulation (10,000
-  runs of 64 steps, answers of at most 2 KB and often one record, a
-  subject erased in 8% of steps) a replica met this in 1,041 runs, and
-  in 390 it was still stopped when sent everything at once. Taking such records in
-  durably, so that this is no stop, is to come.
+- **A key destroyed before the replica had it: the replica is sent
+  everything through the erasure.** A subject first written after the
+  replica was made, and erased before the replica caught up: the
+  primary has no key to give. Its log holds the erasure, so it says
+  where, and the replica asks again for all the records through it,
+  beyond the megabyte an answer otherwise holds. Values and erasure
+  then go to the replica's disk with one write, never readable there,
+  as they no longer are anywhere. Taking the values alone would leave
+  records without key or erasure, which would not open again after a
+  restart, since a store that opens checks that it holds every key its
+  log needs; a note on the replica's disk saying "destroyed" would be a
+  second thing for that check to trust, and a change to the key file.
+  This needs neither.
+- **Up to 16 MiB at once, and past that the replica is refused.** The
+  primary reads such an answer in one turn between writes, and both
+  ends hold it in memory. A value and its erasure further apart than
+  that, with the replica behind both, is answered `TOOFAR`: the replica
+  stops, and is to be made again from a new backup. An answer that
+  does not reach the erasure it was asked through did not arrive whole,
+  and is asked for again.
 - **A subject erased and written again has two keys on the way.** A
   subject has one key in a key file, so a replica that still holds the
   old one cannot keep the new one until the erasure is in. When both
   come in one answer it takes in the records up to the erasure, and is
   sent the rest again. It cuts nowhere else: before an erasure the
   records might need a key destroyed further on.
+- **One shape still stops a replica**: that cut cannot be made, because
+  the records before it hold values of another subject whose key was
+  destroyed first and whose erasure comes after. The replica then
+  needs the new key before the old one's erasure, and a key file holds
+  one key a subject. It takes nothing in and says a key was destroyed.
+  In the simulation (10,000 runs of 64 steps over twelve subjects, an
+  erasure in 8% of steps, erased subjects written again all the time) a
+  replica ended this way in 185 runs; before it asked through erasures,
+  in 1,575. Letting a replica hold a subject's old and new key for the
+  moment between is what would end it, and changes what a key file may
+  hold.
 - **The simulation carries keys over its network too.** Answers that
   hold keys are lost, arrive in place of others, are cut short and have
   bits flipped, while the replica crashes, loses power and fails to
@@ -1503,7 +1516,7 @@ One store that writes, and others that follow it and answer reads.
   does (median of 300, three runs each); alone, the server answers in
   4.0 ms. The two servers sync to the same disk in turn, which is most
   of that, and says little about two machines.
-- **To come:** taking in records whose key was destroyed first; what
+- **To come:** the one shape that still stops a replica; what
   TLS costs a write that waits for its replica, which is not measured;
   and measurements with one
   writer and several readers next to Valkey and PostgreSQL set up the

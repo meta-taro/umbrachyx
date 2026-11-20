@@ -207,6 +207,7 @@ fn an_answer_that_comes_twice_or_late_changes_nothing() {
     let ask = Ask {
         held: replica.held().expect("reads its log"),
         max_bytes: 1,
+        through: None,
     };
     let first: Sent = primary.sent(&ask).expect("reads its log").expect("answers");
     let after_first = replica.take_in(&first).expect("takes it in");

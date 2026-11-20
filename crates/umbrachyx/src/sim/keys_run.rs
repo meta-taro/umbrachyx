@@ -11,8 +11,11 @@
 //!   before the key it is sealed under;
 //! - it never holds a record its primary does not;
 //! - it keeps no key but the one the records name, whatever arrives;
-//! - it stops for good only when its primary destroyed a key before the
-//!   replica had it, and then keeps nothing of what needed the key;
+//! - sent values whose key its primary destroyed before the replica had
+//!   it, it asks for everything through the erasure and takes that in;
+//! - it stops for good only in one shape: such values in the same answer
+//!   as a subject erased and written again, whose new key it cannot keep
+//!   while it holds the old. It then keeps nothing of that answer;
 //! - once it has every record, it reads every value its primary reads,
 //!   and none of an erased subject.
 
@@ -352,6 +355,7 @@ mod tests {
             total.same += outcome.same;
             total.carried.keys += outcome.carried.keys;
             total.carried.keys_spoiled += outcome.carried.keys_spoiled;
+            total.carried.asked_through += outcome.carried.asked_through;
             total.carried.lost += outcome.carried.lost;
             total.carried.late += outcome.carried.late;
             total.carried.cut += outcome.carried.cut;
@@ -375,9 +379,8 @@ mod tests {
         assert!(total.carried.keys >= 2_000, "{total:?}");
         assert!(total.carried.keys_spoiled >= 500, "{total:?}");
         assert!(total.key_faults >= 50, "{total:?}");
-        assert!(total.same >= 100, "{total:?}");
-        assert!(total.stopped >= 10, "{total:?}");
-        assert!(total.stopped_at_end >= 5, "{total:?}");
+        assert!(total.carried.asked_through >= 40, "{total:?}");
+        assert!(total.same >= 250, "{total:?}");
     }
 
     #[test]
@@ -391,7 +394,8 @@ mod tests {
         println!(
             "keys that travel, {seeds} seeds: {} commits, {} erasures; a replica took records \
              in {} times and restarted {} times; keys were sent {} times, {} of them lost, \
-             late, cut short or damaged; {} writes to its key file failed; it read what its \
+             late, cut short or damaged; {} writes to its key file failed; it asked {} times for everything \
+             through an erasure; it read what its \
              primary reads at the end of {} runs; it stopped for a key destroyed first in {}, \
              and was still stopped in {} when sent everything at once",
             total.commits,
@@ -401,6 +405,7 @@ mod tests {
             total.carried.keys,
             total.carried.keys_spoiled,
             total.key_faults,
+            total.carried.asked_through,
             total.same,
             total.stopped,
             total.stopped_at_end

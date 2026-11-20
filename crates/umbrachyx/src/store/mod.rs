@@ -269,8 +269,8 @@ pub enum StoreError {
     /// not hold. Nothing was written.
     MissingKeys(usize),
     /// Records a replica was sent are sealed under this many keys its
-    /// primary destroyed before the replica had them, and the erasure is
-    /// not among those records. Nothing was written.
+    /// primary destroyed before the replica had them, and they cannot
+    /// be taken in up to the erasure either. Nothing was written.
     KeysErased(usize),
     /// Opened with a key file, the log holds a value that is not sealed.
     NotSealed,
@@ -374,9 +374,9 @@ impl fmt::Display for StoreError {
             Self::KeysErased(count) => write!(
                 f,
                 "the primary destroyed {count} key(s) before this replica had them, and the \
-                 records it was sent need them without holding the erasure; nothing was \
-                 written. If it stops here again when started again, make the replica again \
-                 from a new backup"
+                 records it was sent cannot be taken in without them; nothing was written. \
+                 If it stops here again when started again, make the replica again from a \
+                 new backup"
             ),
             Self::NotSealed => write!(f, "the log holds values written without encryption"),
             Self::NoKeys => write!(f, "values are not encrypted, so nothing can be erased"),
@@ -488,8 +488,9 @@ pub struct Store<S: Storage, C: Clock> {
     /// Present when values are encrypted.
     sealer: Option<Sealer>,
     erasures: Vec<Erasure>,
-    /// The fingerprint of every key an erasure in the log destroyed.
-    erased_keys: HashSet<Fingerprint>,
+    /// The fingerprint of every key an erasure in the log destroyed,
+    /// with how many records the log held once it held the erasure.
+    erased_keys: HashMap<Fingerprint, u64>,
     tables: Tables,
     /// Per branch, the last change rejected on it.
     rejections: BTreeMap<String, Rejection>,
@@ -558,7 +559,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             last_time: 0,
             sealer,
             erasures: Vec::new(),
-            erased_keys: HashSet::new(),
+            erased_keys: HashMap::new(),
             tables: Tables::default(),
             rejections: BTreeMap::new(),
             decisions: Vec::new(),
@@ -566,7 +567,12 @@ impl<S: Storage, C: Clock> Store<S, C> {
             unsynced: unsynced::Unsynced::default(),
         };
         let mut replayed = Vec::new();
-        for record in records {
+        for (before, record) in records.into_iter().enumerate() {
+            if let Record::Erase(erase) = &record {
+                store
+                    .erased_keys
+                    .insert(erase.key_fingerprint, before as u64 + 1);
+            }
             let ids = store
                 .apply(&record)
                 .map_err(|e| StoreError::Inconsistent(e.to_string()))?;
@@ -776,6 +782,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         });
         self.append(&record)?;
         self.apply(&record)?;
+        self.erased_keys.insert(key_fingerprint, self.log.records());
         let sealer = self.sealer.as_mut().ok_or(StoreError::NoKeys)?;
         sealer.erase(subject, &key_fingerprint)?;
         Ok(true)
@@ -1269,7 +1276,6 @@ impl<S: Storage, C: Clock> Store<S, C> {
                     },
                     time: erase.time,
                 });
-                self.erased_keys.insert(erase.key_fingerprint);
                 self.last_time = self.last_time.max(erase.time);
                 Ok(Vec::new())
             }

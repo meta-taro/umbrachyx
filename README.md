@@ -162,9 +162,10 @@ $ umbrachyx history agent/support player/42/gems
   certificate that authority did not sign, and the replica is sent the
   keys of subjects first written after its backup. Without them nothing
   between the servers is encrypted and no key is sent: such a subject
-  stops the replica, which says so. Still for trials: a subject written
-  and erased while the replica was more than a megabyte of records
-  behind can stop it for good, and
+  stops the replica, which says so. Still for trials: a replica far behind can
+  still be stopped for good by erasures it missed (16 MiB or more
+  between a value and its erasure, or an erased subject written again
+  next to one erased for good), and
   nothing is measured on two machines yet. Started with
   `--wait-for-replica <seconds>`, the first server answers a write only
   once a replica holds it; killed in the middle of writes, every write
