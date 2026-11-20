@@ -370,8 +370,9 @@ fn serve_on_a_free_port(dir: &TempDir, extra: &[&str]) -> (Server, String, u16) 
             .status
             .success()
     );
-    let port = free_port().to_string();
-    let mut args = vec!["serve", BRANCH, "--port", &port];
+    // Port 0: the system gives the server a free one, which it says.
+    // Naming a port here first would let two tests name the same.
+    let mut args = vec!["serve", BRANCH, "--port", "0"];
     args.extend_from_slice(extra);
     let mut child = dir
         .umbrachyx(&args)
@@ -381,16 +382,21 @@ fn serve_on_a_free_port(dir: &TempDir, extra: &[&str]) -> (Server, String, u16) 
     let stderr = BufReader::new(child.stderr.take().expect("stderr is piped"));
     let server = Server(child);
     let mut said = String::new();
+    let mut port = None;
     for line in stderr.lines() {
         let line = line.expect("reads stderr");
         said.push_str(&line);
         said.push('\n');
         if line.starts_with("serving ") {
+            port = line
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse::<u16>().ok());
             break;
         }
     }
+    let port = port.unwrap_or_else(|| panic!("the server did not say where it serves: {said}"));
     let said = said.replace(&format!(":{port}"), ":PORT");
-    (server, said, port.parse().expect("a port"))
+    (server, said, port)
 }
 
 #[test]
