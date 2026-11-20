@@ -1342,13 +1342,57 @@ One store that writes, and others that follow it and answer reads.
   it is: an erasure is finished on the primary at once and on each
   replica when the record arrives. Which replicas have not had it yet is
   to be shown, not waited for.
-- **Keys do not travel yet.** Values stay sealed on the way, and a
-  replica refuses records sealed under keys it lacks, rather than take
-  them in unreadable, which would look erased. For now a replica is
-  given the key file by hand, which only covers subjects that existed
-  then. Sending new keys with the log needs the connection encrypted;
-  until it is, replication is for measurements and trials, not for data
-  that must stay secret on the network.
+- **A key travels when a replica asks for it, never with the records.**
+  The log holds no key, so that destroying a key erases, and a copy of
+  the log stays unreadable without the key file. A replica that is sent
+  records sealed under keys it lacks asks for those keys by their
+  fingerprints, which the sealed values carry. It keeps a key only if
+  its fingerprint is one it asked for, under the subject the records
+  name, and has it synced in its key file before it writes the records:
+  the other order could leave records on its disk that it can never
+  read. Every answer says which key it is about, so one that arrives in
+  place of another is seen to be and asked for again. Asking costs a
+  second exchange, only for answers that bring a subject the replica
+  has not seen.
+- **Keys travel only on a link that says it carries them.** The call
+  that asks for keys answers "none travel here" unless the link is made
+  to carry them, and a replica without the key then stops where it is,
+  as it did before keys travelled. Between two servers no link carries
+  them yet: that is for the connection where both ends show a
+  certificate (`rustls` in the table above), which is not yet wired to
+  the replicas' port. Until it is, a replica is given the key file by
+  hand, which covers the subjects that existed then, and replication is
+  for measurements and trials, not for data that must stay secret on the
+  network.
+- **A key destroyed before the replica had it stops the replica.** A
+  subject first written after the replica was made, and erased before
+  the replica caught up: the primary no longer has the key to give, and
+  says so from its log, which holds the erasure. If the erasure comes in
+  the same answer as the values, the replica takes both, never able to
+  read what nobody can. If it comes in a later answer, the replica
+  stops and takes nothing: records without their key and without their
+  erasure would not open again after a restart, since a store that
+  opens checks that it holds every key its log needs. It is told to be
+  made again from a new backup. In the simulation (10,000 runs of 64
+  steps, answers of at most 2 KB and often one record, a subject erased
+  in 8% of steps) a replica met this in 1,575 runs, and in 516 it was
+  still stopped when sent everything at once. Taking such records in
+  durably, so that this is no stop, is to come.
+- **A subject erased and written again has two keys on the way.** A
+  subject has one key in a key file, so a replica that still holds the
+  old one cannot keep the new one until the erasure is in. When both
+  come in one answer it takes in the records up to the erasure, and is
+  sent the rest again. It cuts nowhere else: before an erasure the
+  records might need a key destroyed further on.
+- **The simulation carries keys over its network too.** Answers that
+  hold keys are lost, arrive in place of others, are cut short and have
+  bits flipped, while the replica crashes, loses power and fails to
+  write its key file. Checked: it opens again every time, keeps no key
+  but the one asked for, and stops only for a key that was destroyed.
+  It found that a replica whose key file failed while finishing an
+  erasure left the records after that erasure in its log and out of its
+  memory; every record taken in is now applied, and the key file is
+  finished when the store next opens.
 - **A replica is a client of its primary, on a port kept for
   replicas** (`serve --feed-replicas-on <port>`). It sends one command,
   `UMBRA.LOG.AFTER`, with what it holds, and is answered with one value
@@ -1426,8 +1470,9 @@ One store that writes, and others that follow it and answer reads.
   does (median of 300, three runs each); alone, the server answers in
   4.0 ms. The two servers sync to the same disk in turn, which is most
   of that, and says little about two machines.
-- **To come:** an encrypted connection that keys can travel on,
-  and measurements with one
+- **To come:** the connection with certificates wired to the replicas'
+  port, so that keys travel between servers; taking in records whose key
+  was destroyed first; and measurements with one
   writer and several readers next to Valkey and PostgreSQL set up the
   same way.
 

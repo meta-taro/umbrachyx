@@ -262,7 +262,6 @@ impl<S: KeyStorage> Keys<S> {
         subjects: impl Iterator<Item = &'a [u8]>,
     ) -> Result<(), KeyError> {
         let mut made: Vec<(&[u8], Key)> = Vec::new();
-        let mut added = Vec::new();
         for subject in subjects {
             let is_new =
                 !self.keys.contains_key(subject) && made.iter().all(|(other, _)| *other != subject);
@@ -271,11 +270,35 @@ impl<S: KeyStorage> Keys<S> {
             }
             let mut key = [0; KEY_LEN];
             getrandom::getrandom(&mut key).map_err(|e| KeyError::Io(io::Error::other(e)))?;
-            added.extend(entry(subject, &key)?);
             made.push((subject, key));
         }
-        if made.is_empty() {
+        self.keep(&made)
+    }
+
+    /// Keeps keys made elsewhere: what a replica does with the keys its
+    /// primary sends it. A subject that has a key already keeps the one it
+    /// has. All of them durable with one write, or none in use, as in
+    /// [`Self::make_keys`].
+    pub fn put_keys(&mut self, keys: &[(&[u8], Key)]) -> Result<(), KeyError> {
+        let mut new: Vec<(&[u8], Key)> = Vec::new();
+        for (subject, key) in keys {
+            let is_new =
+                !self.keys.contains_key(*subject) && new.iter().all(|(other, _)| other != subject);
+            if is_new {
+                new.push((subject, *key));
+            }
+        }
+        self.keep(&new)
+    }
+
+    /// Makes `new` durable with one write, then puts them to use.
+    fn keep(&mut self, new: &[(&[u8], Key)]) -> Result<(), KeyError> {
+        if new.is_empty() {
             return Ok(());
+        }
+        let mut added = Vec::new();
+        for (subject, key) in new {
+            added.extend(entry(subject, key)?);
         }
         if self.stale {
             let mut bytes = self.entries()?;
@@ -288,10 +311,10 @@ impl<S: KeyStorage> Keys<S> {
             self.stale = true;
             return Err(error.into());
         }
-        for (subject, key) in made {
-            self.keys.insert(subject.to_vec(), key);
+        for (subject, key) in new {
+            self.keys.insert(subject.to_vec(), *key);
             self.by_fingerprint
-                .insert(fingerprint(&key), subject.to_vec());
+                .insert(fingerprint(key), subject.to_vec());
         }
         Ok(())
     }

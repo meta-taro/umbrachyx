@@ -4,7 +4,7 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use umbrachyx::keys::{FileKeyStorage, KeyError, KeyStorage, Keys};
+use umbrachyx::keys::{FileKeyStorage, KEY_LEN, Key, KeyError, KeyStorage, Keys, fingerprint};
 
 /// What a key file starts with, in front of its keys.
 const HEADER_LEN: usize = 16;
@@ -485,4 +485,59 @@ fn a_failed_write_of_many_keys_leaves_none_of_them() {
     assert_eq!(reopened.get(b"player/2"), Some(&later));
     assert_eq!(reopened.get(b"player/1"), None);
     assert_eq!(reopened.get(b"player/3"), None);
+}
+
+/// Keys made elsewhere, as a replica is sent them, are kept with one
+/// write and found by subject and by fingerprint from then on. A subject
+/// that has a key keeps the one it has.
+#[test]
+fn keys_made_elsewhere_are_kept_with_one_write_and_replace_none() {
+    let dir = TempDir::new("put");
+    let storage = CountWrites {
+        file: FileKeyStorage::new(&dir.keys()),
+        writes: 0,
+    };
+    let mut keys = Keys::open(storage).expect("opens");
+    let had = keys.key_for(b"player/1").expect("makes a key");
+    let writes_before = keys.storage().writes;
+    let given: [(&[u8], Key); 3] = [
+        (b"player/1", [1; KEY_LEN]),
+        (b"player/2", [2; KEY_LEN]),
+        (b"player/3", [3; KEY_LEN]),
+    ];
+
+    keys.put_keys(&given).expect("keeps the keys");
+    keys.put_keys(&given).expect("nothing to keep");
+    let writes = keys.storage().writes - writes_before;
+    drop(keys);
+    let reopened = dir.open().expect("reopens");
+
+    assert_eq!(writes, 1);
+    assert_eq!(reopened.get(b"player/1"), Some(&had));
+    assert_eq!(reopened.get(b"player/2"), Some(&[2; KEY_LEN]));
+    assert_eq!(reopened.get(b"player/3"), Some(&[3; KEY_LEN]));
+    assert_eq!(
+        reopened.subject_of(&fingerprint(&[3; KEY_LEN])),
+        Some(&b"player/3"[..])
+    );
+    assert_eq!(reopened.subject_of(&fingerprint(&[1; KEY_LEN])), None);
+}
+
+/// As with keys made here: a write that fails leaves none of them in use.
+#[test]
+fn a_failed_write_of_keys_made_elsewhere_leaves_none_of_them() {
+    let dir = TempDir::new("put-fails");
+    let mut keys = Keys::open(FailNextWrite::new(&dir.keys())).expect("opens");
+    let given: [(&[u8], Key); 2] = [(b"player/1", [1; KEY_LEN]), (b"player/2", [2; KEY_LEN])];
+
+    let failed = keys.put_keys(&given);
+    let none_kept = keys.get(b"player/1").is_none() && keys.get(b"player/2").is_none();
+    keys.put_keys(&given[1..]).expect("keeps the key");
+    drop(keys);
+    let reopened = dir.open().expect("reopens");
+
+    assert!(failed.is_err());
+    assert!(none_kept);
+    assert_eq!(reopened.get(b"player/2"), Some(&[2; KEY_LEN]));
+    assert_eq!(reopened.get(b"player/1"), None);
 }

@@ -5,9 +5,10 @@
 use std::time::Duration;
 
 use super::Writer;
+use crate::keys::{Fingerprint, Key};
 use crate::store::StoreError;
 use crate::store::backup::{BackupError, Moment, Origin};
-use crate::store::follow::{Ask, Chained, Feed, Follower, Held, Refusal, Sent};
+use crate::store::follow::{Ask, Chained, Feed, Follower, Held, KeyAnswer, Refusal, Sent};
 
 impl Writer {
     /// One turn of a backup: what it reads of the store, between two
@@ -122,6 +123,10 @@ impl Feed for Writer {
         }
         Ok(sent)
     }
+
+    fn keys(&mut self, wanted: &[Fingerprint]) -> Result<Vec<KeyAnswer>, StoreError> {
+        self.feed(|store| store.keys(wanted))
+    }
 }
 
 /// A store started with [`Committer::start_following`] takes in its
@@ -134,5 +139,13 @@ impl Follower for Writer {
 
     fn take_in(&mut self, sent: &Sent) -> Result<u64, StoreError> {
         self.follow(|store| store.take_in(sent))
+    }
+
+    fn lacks(&mut self, sent: &Sent) -> Result<Vec<Fingerprint>, StoreError> {
+        self.follow(|store| store.lacks(sent))
+    }
+
+    fn take_keys(&mut self, sent: &Sent, keys: &[Key]) -> Result<(), StoreError> {
+        self.follow(|store| store.take_keys(sent, keys))
     }
 }
