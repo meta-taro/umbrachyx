@@ -55,6 +55,7 @@ pub enum Approved {
 impl<S: Storage, C: Clock> Store<S, C> {
     /// Every change waiting, by branch name.
     pub fn pending(&self) -> Result<Vec<PendingChange>, StoreError> {
+        self.check_keeps_history()?;
         let main = self.head(MAIN_BRANCH);
         let on_main = main.map(|main| self.ancestors(main)).unwrap_or_default();
         let mut changes = Vec::new();

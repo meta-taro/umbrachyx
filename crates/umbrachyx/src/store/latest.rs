@@ -20,8 +20,11 @@ use crate::tree::{Bytes, Change};
 type Started = HashMap<Bytes, Option<Bytes>>;
 
 impl<S: Storage, C: Clock> Store<S, C> {
+    /// Whether `key` is held as a latest value, outside the tree: its
+    /// table was declared so, or this store holds current values only.
+    /// Tables with no history at all are held apart from both.
     pub(super) fn is_latest(&self, key: &[u8]) -> bool {
-        self.tables.engine_of(key) == Engine::Latest
+        self.current_only || self.tables.engine_of(key) == Engine::Latest
     }
 
     /// The table of `key` when it has no history to show: it keeps only

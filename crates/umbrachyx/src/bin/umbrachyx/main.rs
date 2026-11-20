@@ -77,6 +77,7 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
         [--sync-every MS] [--public-key K [--require-auth]]
         [--backup-to D [--backup-every S]] [--feed-replicas-on P [--wait-for-replica S]] [--follow H:P]
         [--replication-cert F --replication-key F --replication-ca F]
+        [--current-values-only]
                               Redis protocol on 127.0.0.1: GET, SET, PING,
                               SCAN, TYPE, TTL, and UMBRA.* to read history.
                               --bind listens on another address of this
@@ -136,7 +137,20 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               encrypted and keys are not sent: values of a
                               subject first written after the backup stop
                               the replica, and it says so. The port
-                              clients use is not encrypted either way
+                              clients use is not encrypted either way.
+                              --current-values-only, with --follow, keeps
+                              in memory the values as they are now and
+                              nothing of the past: what the replica holds
+                              no longer grows with every write. It answers
+                              GET and SCAN as before, and every question
+                              about the past (UMBRA.HISTORY, UMBRA.LOG,
+                              UMBRA.DIFF, UMBRA.CELLS, UMBRA.PENDING,
+                              UMBRA.DECISIONS) with NOHISTORY. A SCAN there
+                              walks in no order, and may return a key
+                              twice or miss one if writes arrive meanwhile.
+                              Its log on disk is whole: started without
+                              the option, it answers those too. Starting
+                              reads the whole log, as any server's does
   mcp --public-key K --token-file F
                               MCP over stdin and stdout, for one agent's token
 
@@ -174,7 +188,7 @@ fn main() -> ExitCode {
 const LOG_RESERVE: u64 = 16 * 1024 * 1024;
 
 /// Options that take no value.
-const FLAGS: &[&str] = &["require-auth"];
+const FLAGS: &[&str] = &["require-auth", "current-values-only"];
 
 struct Args {
     positional: Vec<String>,
@@ -270,8 +284,12 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     if command == "export" {
         return export(storage, keys, &args).map_err(|e| format!("{path}: {e}"));
     }
-    let mut store =
-        Store::open_sealed(storage, keys, SystemClock).map_err(|e| format!("{path}: {e}"))?;
+    let opened = if replication::holds_current_values_only(command, &args)? {
+        Store::open_current_values(storage, Some(keys), SystemClock)
+    } else {
+        Store::open_sealed(storage, keys, SystemClock)
+    };
+    let mut store = opened.map_err(|e| format!("{path}: {e}"))?;
     match command.as_str() {
         "commit" => commit(&mut store, &args),
         "put" => put(&mut store, &args),
@@ -697,6 +715,11 @@ fn serve(mut store: FileStore, args: &Args) -> Result<ExitCode, String> {
     }
     if let Some(primary) = follows {
         eprintln!("following {primary}: this server answers reads and takes no writes");
+        if args.options.contains_key("current-values-only") {
+            eprintln!(
+                "keeping current values only: questions about the past are answered NOHISTORY"
+            );
+        }
         server = server.follow(primary);
     }
     match replication::identity(args)? {

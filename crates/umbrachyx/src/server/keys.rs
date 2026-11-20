@@ -18,6 +18,12 @@
 //! that never changed may be returned twice or missed. A walk with
 //! nothing written to those tables meanwhile returns each key once.
 
+//! A replica started to keep current values only holds every key as
+//! those tables hold theirs, so all of the above goes for every key
+//! there: its walk has no order, a cursor does not outlive a restart,
+//! and a write that arrives from the primary during a walk can make it
+//! return a key twice or miss one.
+
 use super::resp::Reply;
 use crate::store::View;
 

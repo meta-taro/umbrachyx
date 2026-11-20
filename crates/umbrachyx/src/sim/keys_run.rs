@@ -75,6 +75,7 @@ struct Run {
     branches: Vec<String>,
     replica: SealedStore,
     replica_keys: SimKeyStorage,
+    replica_holds_current_only: bool,
     following: Rng,
     net: Net,
     is_stopped: bool,
@@ -86,9 +87,23 @@ fn open(
     key_disk: &SimKeyStorage,
     clock: SimClock,
 ) -> Result<SealedStore, String> {
+    open_holding(disk, key_disk, clock, false)
+}
+
+/// As `open`, or to hold current values only, as a replica may.
+fn open_holding(
+    disk: SimStorage,
+    key_disk: &SimKeyStorage,
+    clock: SimClock,
+    current_only: bool,
+) -> Result<SealedStore, String> {
     let storage: Box<dyn KeyStorage + Send> = Box::new(key_disk.clone());
     let keys = Keys::open(storage).map_err(|e| e.to_string())?;
-    Store::open_sealed(disk, keys, clock).map_err(|e| e.to_string())
+    if current_only {
+        Store::open_current_values(disk, Some(keys), clock).map_err(|e| e.to_string())
+    } else {
+        Store::open_sealed(disk, keys, clock).map_err(|e| e.to_string())
+    }
 }
 
 pub fn run(seed: u64) -> Result<Outcome, String> {
@@ -101,10 +116,13 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
     )
     .map_err(|e| format!("empty store fails to open: {e}"))?;
     let replica_keys = SimKeyStorage::default();
-    let replica = open(
+    // Every other seed, the replica holds current values only.
+    let replica_holds_current_only = seed % 2 == 1;
+    let replica = open_holding(
         SimStorage::default(),
         &replica_keys,
         SimClock::new(&mut following),
+        replica_holds_current_only,
     )
     .map_err(|e| format!("empty replica fails to open: {e}"))?;
     let mut run = Run {
@@ -113,6 +131,7 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
         branches: vec![MAIN_BRANCH.to_owned()],
         replica,
         replica_keys,
+        replica_holds_current_only,
         following,
         net: Net::default(),
         is_stopped: false,
@@ -167,8 +186,13 @@ impl Run {
                 self.replica.storage_mut().process_crash()
             };
             let clock = SimClock::new(&mut self.following);
-            self.replica = open(disk, &self.replica_keys, clock)
-                .map_err(|e| format!("step {step}: replica fails to reopen: {e}"))?;
+            self.replica = open_holding(
+                disk,
+                &self.replica_keys,
+                clock,
+                self.replica_holds_current_only,
+            )
+            .map_err(|e| format!("step {step}: replica fails to reopen: {e}"))?;
             self.outcome.restarts += 1;
             self.trace(step, "replica reopened".to_owned());
         }
@@ -287,6 +311,14 @@ impl Run {
             if self.replica.entries(branch) != self.store.entries(branch) {
                 return Err(format!("the replica reads other values on {branch}"));
             }
+            // Key by key too, erased ones included: gone here as there.
+            for key in all_keys() {
+                if self.replica.current(branch, &key) != self.store.current(branch, &key) {
+                    return Err(format!(
+                        "the replica reads another value for a key on {branch}"
+                    ));
+                }
+            }
         }
         if self.replica.erasures() != self.store.erasures() {
             return Err("the replica has other erasures".to_owned());
@@ -326,6 +358,10 @@ impl Run {
     fn trace(&mut self, step: usize, event: String) {
         self.outcome.trace.push(format!("{step}: {event}"));
     }
+}
+
+fn all_keys() -> impl Iterator<Item = Vec<u8>> {
+    (0..SUBJECTS).flat_map(|s| (0..FIELDS).map(move |f| format!("p/{s}/f{f}").into_bytes()))
 }
 
 #[cfg(test)]

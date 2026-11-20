@@ -106,6 +106,8 @@ pub struct Outcome {
     pub replica_pulls: usize,
     pub replica_records: usize,
     pub replica_restarts: usize,
+    /// Runs in which the replica held current values only.
+    pub replicas_holding_current_only: usize,
     /// What the network did to the answers on their way to the replica.
     pub carried: Carried,
 }
@@ -155,6 +157,9 @@ struct Run {
     rejected: BTreeMap<String, CommitId>,
     /// A store that follows `store` through its log.
     replica: Store<SimStorage, SimClock>,
+    /// Whether the replica holds current values only: no tree and no
+    /// record of commits.
+    replica_holds_current_only: bool,
     following: Rng,
     net: Net,
 }
@@ -168,8 +173,14 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
         .declare_table(LATEST_TABLE.as_bytes(), Engine::Latest, provenance(0))
         .map_err(|e| format!("declaring the latest-value table fails: {e}"))?;
     let mut following = Rng::new(seed ^ REPLICA_SALT);
-    let replica = Store::open(SimStorage::default(), SimClock::new(&mut following))
-        .map_err(|e| format!("empty replica fails to open: {e}"))?;
+    // Every other seed, the replica holds current values only.
+    let replica_holds_current_only = seed % 2 == 1;
+    let replica = open_replica(
+        SimStorage::default(),
+        SimClock::new(&mut following),
+        replica_holds_current_only,
+    )
+    .map_err(|e| format!("empty replica fails to open: {e}"))?;
     let mut run = Run {
         rng,
         store,
@@ -180,6 +191,7 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
         review: Rng::new(seed ^ REVIEW_SALT),
         rejected: BTreeMap::new(),
         replica,
+        replica_holds_current_only,
         following,
         net: Net::default(),
     };
@@ -444,7 +456,7 @@ impl Run {
                 self.replica.storage_mut().process_crash()
             };
             let clock = SimClock::new(&mut self.following);
-            self.replica = Store::open(disk, clock)
+            self.replica = open_replica(disk, clock, self.replica_holds_current_only)
                 .map_err(|e| format!("step {step}: replica fails to reopen: {e}"))?;
             self.outcome.replica_restarts += 1;
         }
@@ -500,6 +512,40 @@ impl Run {
             }
         }
         self.outcome.carried = self.net.carried;
+        self.check_replica_reads()?;
+        if !self.replica_holds_current_only {
+            if self.replica.decisions(usize::MAX) != self.store.decisions(usize::MAX) {
+                return Err("the replica has other decisions".to_owned());
+            }
+            self.outcome.replica_records += self.replica.log_records() as usize;
+            return Ok(());
+        }
+        // It kept no past, and its log kept all of it: opened as any
+        // store, the same disk holds what the first store holds.
+        self.outcome.replicas_holding_current_only += 1;
+        let disk = self.replica.storage_mut().process_crash();
+        self.replica = Store::open(disk, SimClock::new(&mut self.following))
+            .map_err(|e| format!("the replica fails to open as a store with history: {e}"))?;
+        self.check_replica_reads()?;
+        if self.replica.decisions(usize::MAX) != self.store.decisions(usize::MAX) {
+            return Err("opened with history, the replica has other decisions".to_owned());
+        }
+        for branch in self.store.branches() {
+            for key in self.store.entries(branch).iter().map(|(key, _)| key) {
+                if self.replica.history(branch, key) != self.store.history(branch, key) {
+                    return Err(format!(
+                        "opened with history, the replica has another history on {branch}"
+                    ));
+                }
+            }
+        }
+        self.outcome.replica_records += self.replica.log_records() as usize;
+        Ok(())
+    }
+
+    /// The replica has the first store's branches, each at the same
+    /// commit with the same values.
+    fn check_replica_reads(&self) -> Result<(), String> {
         let branches: Vec<String> = self.store.branches().map(str::to_owned).collect();
         if !self
             .replica
@@ -515,11 +561,15 @@ impl Run {
             if entries_of(&self.replica, branch) != entries_of(&self.store, branch) {
                 return Err(format!("the replica's {branch} holds other values"));
             }
+            // And asked for one key at a time, which is another way in.
+            for (key, value) in self.store.entries(branch) {
+                if self.replica.get(branch, &key) != Some(value) {
+                    return Err(format!(
+                        "the replica's {branch} reads another value for a key"
+                    ));
+                }
+            }
         }
-        if self.replica.decisions(usize::MAX) != self.store.decisions(usize::MAX) {
-            return Err("the replica has other decisions".to_owned());
-        }
-        self.outcome.replica_records += self.replica.log_records() as usize;
         Ok(())
     }
 
@@ -647,6 +697,18 @@ fn is_latest(key: &[u8]) -> bool {
     key.starts_with(LATEST_TABLE.as_bytes()) && key.get(LATEST_TABLE.len()) == Some(&b'/')
 }
 
+fn open_replica(
+    disk: SimStorage,
+    clock: SimClock,
+    holds_current_only: bool,
+) -> Result<Store<SimStorage, SimClock>, StoreError> {
+    if holds_current_only {
+        Store::open_current_values(disk, None, clock)
+    } else {
+        Store::open(disk, clock)
+    }
+}
+
 fn entries_of(store: &Store<SimStorage, SimClock>, branch: &str) -> Model {
     store
         .entries(branch)
@@ -692,6 +754,7 @@ mod tests {
             total.replica_pulls += outcome.replica_pulls;
             total.replica_records += outcome.replica_records;
             total.replica_restarts += outcome.replica_restarts;
+            total.replicas_holding_current_only += outcome.replicas_holding_current_only;
             total.carried.lost += outcome.carried.lost;
             total.carried.late += outcome.carried.late;
             total.carried.cut += outcome.carried.cut;
@@ -724,6 +787,7 @@ mod tests {
         assert!(total.rejections >= 50, "{total:?}");
         assert!(total.replica_pulls >= 5_000, "{total:?}");
         assert!(total.replica_restarts >= 1_000, "{total:?}");
+        assert!(total.replicas_holding_current_only >= 100, "{total:?}");
         assert!(total.replica_records >= 10_000, "{total:?}");
         assert!(total.carried.lost >= 500, "{total:?}");
         assert!(total.carried.late >= 200, "{total:?}");

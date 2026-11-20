@@ -116,12 +116,23 @@ pub(super) fn reply(
     writer: &Writer,
     feeds: bool,
     encrypted: bool,
+    keeps_history: bool,
     following: Option<&Shared>,
     name: &str,
     args: &[Vec<u8>],
 ) -> Option<Reply> {
     match name {
-        REPLICATION if args.is_empty() => Some(status(writer, feeds, encrypted, following)),
+        REPLICATION if args.is_empty() => {
+            let mut status = status(writer, feeds, encrypted, following);
+            // What this server holds of what was written: the history,
+            // or only the values as they are now.
+            status["holds"] = json!(if keeps_history {
+                "history"
+            } else {
+                "current values"
+            });
+            Some(Reply::Bulk(Some(status.to_string().into_bytes())))
+        }
         REPLICATION => Some(Reply::Error(format!(
             "ERR wrong number of arguments for '{}' command",
             REPLICATION.to_ascii_lowercase()
@@ -280,8 +291,13 @@ fn held_answer(writer: &mut Writer, ask: &Ask) -> Result<Result<Sent, Refusal>, 
     Ok(first)
 }
 
-fn status(writer: &Writer, feeds: bool, encrypted: bool, following: Option<&Shared>) -> Reply {
-    let status = match following {
+fn status(
+    writer: &Writer,
+    feeds: bool,
+    encrypted: bool,
+    following: Option<&Shared>,
+) -> serde_json::Value {
+    match following {
         None => {
             // For a server that answers a write only once a replica
             // holds it: how many records one has said it holds, and
@@ -309,8 +325,7 @@ fn status(writer: &Writer, feeds: bool, encrypted: bool, following: Option<&Shar
                 "stopped": following.stopped,
             })
         }
-    };
-    Reply::Bulk(Some(status.to_string().into_bytes()))
+    }
 }
 
 /// A connection to a primary: as it is, or over TLS, with the proof

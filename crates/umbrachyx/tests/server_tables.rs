@@ -128,7 +128,11 @@ fn tables_lists_the_declared_tables_and_the_default() {
 
     assert_eq!(
         tables,
-        json!({"default": "history", "tables": [{"name": "pos", "engine": "latest"}]})
+        json!({
+            "default": "history",
+            "tables": [{"name": "pos", "engine": "latest"}],
+            "keeps_history": true,
+        })
     );
     assert_eq!(
         ask_line(&mut client, &["UMBRA.TABLES", "pos"]),
@@ -146,7 +150,7 @@ fn tables_is_empty_when_nothing_is_declared() {
 
     assert_eq!(
         ask_json(&mut client, &["UMBRA.TABLES"]),
-        json!({"default": "history", "tables": []})
+        json!({"default": "history", "tables": [], "keeps_history": true})
     );
     let cells = ask_json(&mut client, &["UMBRA.CELLS", BRANCH]);
     assert_eq!(cells["omitted_tables"], json!([]));

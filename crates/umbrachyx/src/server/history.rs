@@ -10,6 +10,11 @@
 //! `UMBRA.DIFF` where `main` kept no past for them; both name what they
 //! left out in `omitted_tables`, empty when nothing was.
 //!
+//! A replica started to hold current values only keeps no past at all.
+//! It answers which branches and tables there are, and every other
+//! command here with `NOHISTORY`: an empty history would read as nothing
+//! having happened.
+//!
 //! Each answer is one bulk string of JSON, written as `report` writes it
 //! for agents. Every walk stops after a page, because the committer's
 //! writes wait while it runs. `next` names a key as JSON does; a key that
@@ -57,7 +62,14 @@ enum Refusal {
     Store(StoreError),
     /// The key is in a table that keeps only its latest value.
     NoHistory(Vec<u8>),
+    /// This server keeps current values only.
+    CurrentValuesOnly,
 }
+
+/// What a server that keeps current values only says to a question about
+/// the past.
+pub(super) const CURRENT_VALUES_ONLY: &str = "NOHISTORY this server keeps current values only: \
+    ask the server it follows";
 
 impl From<StoreError> for Refusal {
     fn from(error: StoreError) -> Self {
@@ -73,6 +85,7 @@ impl Refusal {
                 "NOHISTORY table '{}' keeps only the latest value",
                 String::from_utf8_lossy(table)
             )),
+            Self::CurrentValuesOnly => Reply::Error(CURRENT_VALUES_ONLY.to_owned()),
         }
     }
 }
@@ -134,6 +147,10 @@ fn text(arg: &[u8]) -> Result<String, String> {
 }
 
 fn ask(store: &dyn Inspect, served: &str, question: &Question) -> Result<Value, Refusal> {
+    let is_about_the_past = !matches!(question, Question::Branches | Question::Tables);
+    if is_about_the_past && !store.keeps_history() {
+        return Err(Refusal::CurrentValuesOnly);
+    }
     match question {
         Question::Branches => Ok(branches(store, served)),
         Question::Tables => Ok(tables(store)),
@@ -171,11 +188,13 @@ fn branches(store: &dyn Inspect, served: &str) -> Value {
         .branches()
         .into_iter()
         .map(|name| {
-            let head = store.head(name).and_then(|id| store.commit_info(&id));
+            // The head is known where no record of the commit is kept.
+            let head = store.head(name);
+            let info = head.and_then(|id| store.commit_info(&id));
             json!({
                 "name": name,
-                "head": head.map(|info| short(&info.id)),
-                "time_us": head.map(|info| info.time),
+                "head": head.map(|id| short(&id)),
+                "time_us": info.map(|info| info.time),
             })
         })
         .collect();
@@ -190,7 +209,11 @@ fn tables(store: &dyn Inspect) -> Value {
         .iter()
         .map(|(name, engine)| json!({"name": report::shown(Some(name)), "engine": engine.name()}))
         .collect();
-    json!({"default": Engine::History.name(), "tables": tables})
+    json!({
+        "default": Engine::History.name(),
+        "tables": tables,
+        "keeps_history": store.keeps_history(),
+    })
 }
 
 /// Table names as JSON shows keys.
