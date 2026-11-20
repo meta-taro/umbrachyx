@@ -31,6 +31,8 @@ pub struct Carried {
     /// Answers that held keys, and those that arrived other than sent.
     pub keys: usize,
     pub keys_spoiled: usize,
+    /// Asks for everything through an erasure.
+    pub asked_through: usize,
 }
 
 #[derive(Debug, Default)]
@@ -54,6 +56,7 @@ pub struct Link<'a, S: Storage, C: Clock> {
 
 impl<S: Storage, C: Clock> Primary for Link<'_, S, C> {
     fn ask(&mut self, ask: &Ask) -> Result<Result<Sent, Refusal>, String> {
+        self.net.carried.asked_through += usize::from(ask.through.is_some());
         let answer = answer(self.store, ask).map_err(|error| error.to_string())?;
         self.net.last_was_flipped = false;
         let sent = match answer {
@@ -133,7 +136,7 @@ impl Net {
                     let bit = rng.below(key.len() as u64 * 8) as usize;
                     key[bit / 8] ^= 1 << (bit % 8);
                 }
-                KeyAnswer::Erased(about) | KeyAnswer::Unknown(about) => {
+                KeyAnswer::Erased { key: about, .. } | KeyAnswer::Unknown(about) => {
                     let bit = rng.below(about.len() as u64 * 8) as usize;
                     about[bit / 8] ^= 1 << (bit % 8);
                 }

@@ -31,6 +31,10 @@ use crate::log::{Chain, LogError, LogId, Storage};
 
 /// The most a primary sends in one answer, whatever is asked for.
 pub const MAX_SENT: usize = 1024 * 1024;
+/// The most a primary sends in one answer to reach an erasure a replica
+/// asked to be sent through. More than that between a value and its
+/// erasure, and the replica is not sent both at once.
+pub const MAX_THROUGH: usize = 16 * 1024 * 1024;
 /// How much of a log's chain is worked out in one turn.
 const CHAIN_STEP: u64 = 1024 * 1024;
 
@@ -50,6 +54,11 @@ pub struct Ask {
     pub held: Held,
     /// As many whole records as fit in this, and one if none does.
     pub max_bytes: usize,
+    /// If set, all the records up to this many, however many bytes
+    /// `max_bytes` says, as long as they are no more than
+    /// [`MAX_THROUGH`]: for a replica that needs an erasure in the same
+    /// answer as the values it erased.
+    pub through: Option<u64>,
 }
 
 /// A primary's answer.
@@ -77,6 +86,9 @@ pub enum Refusal {
     /// The same log, with other records in it: one of the two was written
     /// to apart from the other.
     Diverged,
+    /// The replica asked for everything through an erasure, and that is
+    /// more than a primary sends at once ([`MAX_THROUGH`]).
+    TooFar,
 }
 
 impl fmt::Display for Refusal {
@@ -97,6 +109,13 @@ impl fmt::Display for Refusal {
                 "the primary's log and this replica's hold different records: one of them was \
                  written to apart from the other"
             ),
+            Self::TooFar => write!(
+                f,
+                "the records after this replica's are sealed under a key the primary has \
+                 destroyed, and the erasure is further on than a primary sends at once ({} \
+                 MiB): make the replica again from a new backup",
+                MAX_THROUGH / (1024 * 1024)
+            ),
         }
     }
 }
@@ -107,8 +126,12 @@ impl fmt::Display for Refusal {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum KeyAnswer {
     Key(Key),
-    /// Its log holds the erasure that destroyed the key.
-    Erased(Fingerprint),
+    /// Its log holds the erasure that destroyed the key, as the last
+    /// of its first `at` records.
+    Erased {
+        key: Fingerprint,
+        at: u64,
+    },
     /// It never held such a key.
     Unknown(Fingerprint),
 }
@@ -118,7 +141,7 @@ impl KeyAnswer {
     pub fn fingerprint(&self) -> Fingerprint {
         match self {
             Self::Key(key) => fingerprint(key),
-            Self::Erased(about) | Self::Unknown(about) => *about,
+            Self::Erased { key: about, .. } | Self::Unknown(about) => *about,
         }
     }
 }
@@ -128,7 +151,7 @@ impl fmt::Debug for KeyAnswer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Key(_) => "Key(..)",
-            Self::Erased(_) => "Erased",
+            Self::Erased { .. } => "Erased",
             Self::Unknown(_) => "Unknown",
         })
     }
@@ -267,30 +290,56 @@ pub fn follow_once(
 ) -> Result<Progress, FollowError> {
     while follower.chain_step()? {}
     let held = follower.held()?;
-    let ask = Ask { held, max_bytes };
-    let mut sent = primary
-        .ask(&ask)
-        .map_err(FollowError::Link)?
-        .map_err(FollowError::Refused)?;
-    // A key destroyed since the primary answered: the erasure is in its
-    // log by now, and asked again it may send the erasure with the
-    // values, which then need no key. If not, the erasure is further on
-    // than one answer reaches, and the second ask says so too.
-    match fetch_keys(primary, follower, &sent) {
-        Err(FollowError::Store(StoreError::KeysErased(_))) => {
-            sent = primary
-                .ask(&ask)
-                .map_err(FollowError::Link)?
-                .map_err(FollowError::Refused)?;
-            fetch_keys(primary, follower, &sent)?;
+    let mut ask = Ask {
+        held,
+        max_bytes,
+        through: None,
+    };
+    let mut tries = 0;
+    let sent = loop {
+        let sent = primary
+            .ask(&ask)
+            .map_err(FollowError::Link)?
+            .map_err(FollowError::Refused)?;
+        match fetch_keys(primary, follower, &sent)? {
+            Fetched::All => break sent,
+            // The values need a key the primary destroyed, and the
+            // erasure is not among them: it says where the erasure is,
+            // and is asked again for everything through it, which then
+            // needs no key, or refuses if that is too much to send at
+            // once. A few times at most in one go, since every answer
+            // may name an erasure further on. An answer that does not
+            // reach the erasure it was asked through did not arrive
+            // whole: worth asking again.
+            Fetched::Erased { through } => {
+                tries += 1;
+                if ask.through == Some(through) || tries > MAX_ASKS_THROUGH {
+                    return Err(FollowError::Link(
+                        "the answer did not reach the erasure it was asked through".to_owned(),
+                    ));
+                }
+                ask.through = Some(through);
+            }
         }
-        fetched => fetched?,
-    }
+    };
     let now = follower.take_in(&sent)?;
     Ok(Progress {
         held: now,
         primary: sent.records,
     })
+}
+
+/// How many times in one go a replica asks again to reach an erasure.
+const MAX_ASKS_THROUGH: usize = 4;
+
+/// What became of the keys a replica lacked.
+enum Fetched {
+    /// It has those the primary has; any other, taking the records in
+    /// will name.
+    All,
+    /// The primary destroyed some of them, the last with the erasure
+    /// that ends its first `through` records. None was kept.
+    Erased { through: u64 },
 }
 
 /// Asks `primary` for the keys `follower` lacks to take in `sent`, and
@@ -300,13 +349,13 @@ fn fetch_keys(
     primary: &mut (impl Primary + ?Sized),
     follower: &mut (impl Follower + ?Sized),
     sent: &Sent,
-) -> Result<(), FollowError> {
+) -> Result<Fetched, FollowError> {
     let wanted = follower.lacks(sent)?;
     if wanted.is_empty() {
-        return Ok(());
+        return Ok(Fetched::All);
     }
     let Some(answers) = primary.keys(&wanted).map_err(FollowError::Link)? else {
-        return Ok(());
+        return Ok(Fetched::All);
     };
     // An answer that does not fit the ask did not come from the store
     // that was asked, or not whole: ask again, and keep nothing of it.
@@ -318,7 +367,7 @@ fn fetch_keys(
         )));
     }
     let mut keys = Vec::new();
-    let mut erased = 0;
+    let mut through = None;
     for (wanted, answer) in wanted.iter().zip(&answers) {
         if answer.fingerprint() != *wanted {
             return Err(FollowError::Link(
@@ -327,16 +376,16 @@ fn fetch_keys(
         }
         match answer {
             KeyAnswer::Key(key) => keys.push(*key),
-            KeyAnswer::Erased(_) => erased += 1,
+            KeyAnswer::Erased { at, .. } => through = through.max(Some(*at)),
             // Taking in what was sent says how many are missing.
             KeyAnswer::Unknown(_) => {}
         }
     }
-    if erased > 0 {
-        return Err(StoreError::KeysErased(erased).into());
+    if let Some(through) = through {
+        return Ok(Fetched::Erased { through });
     }
     follower.take_keys(sent, &keys)?;
-    Ok(())
+    Ok(Fetched::All)
 }
 
 impl<S: Storage, C: Clock> Chained for Store<S, C> {
@@ -360,7 +409,18 @@ impl<S: Storage, C: Clock> Feed for Store<S, C> {
         if self.log_chain(held.records)? != Some(held.chain) {
             return Ok(Err(Refusal::Diverged));
         }
-        let frames = self.log_after(held.records, ask.max_bytes.min(MAX_SENT))?;
+        let mut most = ask.max_bytes.min(MAX_SENT);
+        // Asked for everything through an erasure: all of it, if that
+        // is no more than is sent at once.
+        if let Some(through) = ask.through.filter(|through| *through <= records)
+            && let Some(span) = self.log.span(held.records, through)
+        {
+            if span > MAX_THROUGH as u64 {
+                return Ok(Err(Refusal::TooFar));
+            }
+            most = most.max(span as usize);
+        }
+        let frames = self.log_after(held.records, most)?;
         Ok(Ok(Sent {
             after: held.records,
             records,

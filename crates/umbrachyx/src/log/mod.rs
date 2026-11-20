@@ -419,6 +419,20 @@ impl<S: Storage> Log<S> {
         self.storage.read_at(start, (end - start) as usize)
     }
 
+    /// How many bytes the frames of the records after the first `from`
+    /// and up to the first `to` take, or `None` if the log does not hold
+    /// `to` records or `to` is not after `from`.
+    pub fn span(&self, from: u64, to: u64) -> Option<u64> {
+        let (from, to) = (usize::try_from(from).ok()?, usize::try_from(to).ok()?);
+        if to <= from || to > self.ends.len() {
+            return None;
+        }
+        let start = from
+            .checked_sub(1)
+            .map_or(HEADER_LEN as u64, |before| self.ends[before]);
+        Some(self.ends[to - 1] - start)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ends.is_empty()
     }

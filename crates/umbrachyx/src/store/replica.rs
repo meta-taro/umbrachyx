@@ -75,6 +75,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             None => scan.records.len(),
         };
         let whole = scan.ends[take - 1] as usize;
+        let before = self.log.records();
         self.sync_puts()?;
         self.log
             .append_frames(&frames[..whole], &scan.ends[..take])?;
@@ -83,7 +84,11 @@ impl<S: Storage, C: Clock> Store<S, C> {
         // holds is out of the ring already, and is finished when the
         // store next opens, as one of this store's own would be.
         let mut unfinished = None;
-        for record in &scan.records[..take] {
+        for (at, record) in scan.records[..take].iter().enumerate() {
+            if let Record::Erase(erase) = record {
+                self.erased_keys
+                    .insert(erase.key_fingerprint, before + at as u64 + 1);
+            }
             self.apply(record)
                 .map_err(|error| StoreError::Inconsistent(error.to_string()))?;
             if let (Record::Erase(erase), Some(sealer)) = (record, &mut self.sealer)
@@ -111,8 +116,13 @@ impl<S: Storage, C: Clock> Store<S, C> {
                     .and_then(|sealer| sealer.key_of(wanted));
                 match key {
                     Some(key) => KeyAnswer::Key(*key),
-                    None if self.erased_keys.contains(wanted) => KeyAnswer::Erased(*wanted),
-                    None => KeyAnswer::Unknown(*wanted),
+                    None => match self.erased_keys.get(wanted) {
+                        Some(at) => KeyAnswer::Erased {
+                            key: *wanted,
+                            at: *at,
+                        },
+                        None => KeyAnswer::Unknown(*wanted),
+                    },
                 }
             })
             .collect()

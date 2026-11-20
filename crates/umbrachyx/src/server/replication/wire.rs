@@ -29,13 +29,15 @@ pub(super) fn keys_value(answers: &[KeyAnswer]) -> Vec<u8> {
     for answer in answers {
         let tag = match answer {
             KeyAnswer::Key(_) => KEY_FOLLOWS,
-            KeyAnswer::Erased(_) => KEY_ERASED,
+            KeyAnswer::Erased { .. } => KEY_ERASED,
             KeyAnswer::Unknown(_) => KEY_UNKNOWN,
         };
         value.push(tag);
         value.extend_from_slice(&answer.fingerprint());
-        if let KeyAnswer::Key(key) = answer {
-            value.extend_from_slice(key);
+        match answer {
+            KeyAnswer::Key(key) => value.extend_from_slice(key),
+            KeyAnswer::Erased { at, .. } => value.extend_from_slice(&at.to_le_bytes()),
+            KeyAnswer::Unknown(_) => {}
         }
     }
     value
@@ -83,7 +85,14 @@ pub(super) fn read_keys(input: &[u8]) -> Result<Arrived<Vec<KeyAnswer>>, String>
                 rest = after;
                 KeyAnswer::Key(key.try_into().expect("KEY_LEN bytes"))
             }
-            KEY_ERASED => KeyAnswer::Erased(about),
+            KEY_ERASED => {
+                let (at, after) = rest.split_at_checked(8).ok_or(NOT_KEYS)?;
+                rest = after;
+                KeyAnswer::Erased {
+                    key: about,
+                    at: u64::from_le_bytes(at.try_into().expect("8 bytes")),
+                }
+            }
             KEY_UNKNOWN => KeyAnswer::Unknown(about),
             _ => return Err(NOT_KEYS.to_owned()),
         });
@@ -112,13 +121,14 @@ fn number<T: std::str::FromStr>(text: &[u8]) -> Option<T> {
 
 /// The command that asks.
 pub(super) fn ask_command(ask: &Ask) -> Vec<u8> {
-    let args = [
+    let mut args = vec![
         LOG_AFTER.to_owned(),
         hex(&ask.held.log),
         ask.held.records.to_string(),
         hex(&ask.held.chain),
         ask.max_bytes.to_string(),
     ];
+    args.extend(ask.through.map(|through| through.to_string()));
     let mut command = format!("*{}\r\n", args.len()).into_bytes();
     for arg in args {
         command.extend_from_slice(format!("${}\r\n{arg}\r\n", arg.len()).as_bytes());
@@ -127,11 +137,18 @@ pub(super) fn ask_command(ask: &Ask) -> Vec<u8> {
 }
 
 pub(super) fn read_ask(args: &[Vec<u8>]) -> Result<Ask, String> {
-    let [log, records, chain, max_bytes] = args else {
-        return Err(format!(
-            "wrong number of arguments for '{}' command",
-            LOG_AFTER.to_ascii_lowercase()
-        ));
+    let (log, records, chain, max_bytes, through) = match args {
+        [log, records, chain, max_bytes] => (log, records, chain, max_bytes, None),
+        [log, records, chain, max_bytes, through] => {
+            let through = number(through).ok_or("the record to send through is not a number")?;
+            (log, records, chain, max_bytes, Some(through))
+        }
+        _ => {
+            return Err(format!(
+                "wrong number of arguments for '{}' command",
+                LOG_AFTER.to_ascii_lowercase()
+            ));
+        }
     };
     let log: LogId = unhex(log).ok_or("the log's name is 32 hex digits")?;
     let chain: Chain = unhex(chain).ok_or("the chain is 64 hex digits")?;
@@ -144,6 +161,7 @@ pub(super) fn read_ask(args: &[Vec<u8>]) -> Result<Ask, String> {
             chain,
         },
         max_bytes,
+        through,
     })
 }
 
@@ -164,6 +182,7 @@ pub(super) fn answer_reply(answer: Result<Sent, Refusal>) -> Reply {
                 Refusal::AnotherLog => "ANOTHERLOG".to_owned(),
                 Refusal::Fewer { records } => format!("FEWER {records}"),
                 Refusal::Diverged => "DIVERGED".to_owned(),
+                Refusal::TooFar => "TOOFAR".to_owned(),
             };
             Reply::Error(format!("{word} {refusal}"))
         }
@@ -205,6 +224,7 @@ pub(super) fn read_answer(input: &[u8]) -> Result<Arrived<Result<Sent, Refusal>>
             match (words.next(), words.next()) {
                 (Some("ANOTHERLOG"), _) => Ok(Arrived::Whole(Err(Refusal::AnotherLog))),
                 (Some("DIVERGED"), _) => Ok(Arrived::Whole(Err(Refusal::Diverged))),
+                (Some("TOOFAR"), _) => Ok(Arrived::Whole(Err(Refusal::TooFar))),
                 (Some("FEWER"), Some(records)) => match records.parse() {
                     Ok(records) => Ok(Arrived::Whole(Err(Refusal::Fewer { records }))),
                     Err(_) => Err(text),
@@ -252,6 +272,7 @@ mod tests {
                 chain: [0xa7; 32],
             },
             max_bytes: 4096,
+            through: None,
         }
     }
 
@@ -316,6 +337,7 @@ mod tests {
             Err(Refusal::AnotherLog),
             Err(Refusal::Fewer { records: 7 }),
             Err(Refusal::Diverged),
+            Err(Refusal::TooFar),
         ] {
             assert_eq!(arrived(&wire(answer.clone())), Some(answer));
         }
@@ -348,7 +370,10 @@ mod tests {
     fn key_answers() -> Vec<KeyAnswer> {
         vec![
             KeyAnswer::Key([0x5a; KEY_LEN]),
-            KeyAnswer::Erased(*b"erased!!"),
+            KeyAnswer::Erased {
+                key: *b"erased!!",
+                at: 0x0a0d_0000_1234,
+            },
             KeyAnswer::Unknown(*b"\r\nknown?"),
             KeyAnswer::Key([0x0d; KEY_LEN]),
         ]

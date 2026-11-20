@@ -11,7 +11,8 @@ use umbrachyx::keys::{FileKeyStorage, Fingerprint, KEY_LEN, KeyStorage, Keys};
 use umbrachyx::log::{Edit, FileStorage};
 use umbrachyx::store::backup::{DirSource, DirTarget, restore};
 use umbrachyx::store::follow::{
-    Ask, FollowError, Follower, KeyAnswer, MAX_SENT, Primary, Refusal, Sent, WithKeys, follow_once,
+    Ask, FollowError, Follower, KeyAnswer, MAX_SENT, MAX_THROUGH, Primary, Refusal, Sent, WithKeys,
+    follow_once,
 };
 use umbrachyx::store::{
     CommitId, Committer, MAIN_BRANCH, Provenance, Store, StoreError, SystemClock,
@@ -152,7 +153,10 @@ impl Primary for ErasedOthers<'_> {
         Ok(Some(
             wanted
                 .iter()
-                .map(|wanted| KeyAnswer::Erased(wanted.map(|byte| !byte)))
+                .map(|wanted| KeyAnswer::Erased {
+                    key: wanted.map(|byte| !byte),
+                    at: 1,
+                })
                 .collect(),
         ))
     }
@@ -259,7 +263,7 @@ fn a_key_that_is_not_the_one_the_records_name_is_not_kept() {
 }
 
 #[test]
-fn a_key_the_primary_destroyed_before_the_replica_had_it_stops_the_replica() {
+fn a_key_destroyed_before_the_replica_had_it_brings_the_records_through_its_erasure() {
     let dir = TempDir::new("destroyed");
     let mut primary = primary(&dir);
     let mut replica = dir.copy_of(&mut primary, "replica");
@@ -268,14 +272,44 @@ fn a_key_the_primary_destroyed_before_the_replica_had_it_stops_the_replica() {
     primary
         .erase(b"player/3", by("ops", "asked to be forgotten"))
         .expect("erases");
-    let held = replica.log_records();
+    commit(&mut primary, "player/1/gems", "175");
 
     // One record an answer, so the erasure is not in the answer that
-    // holds the value.
-    let stopped = follow_once(&mut WithKeys(&mut primary), &mut replica, 1);
+    // holds the value: the primary says where it is, and is asked for
+    // the records through it.
+    catch_up(&mut WithKeys(&mut primary), &mut replica, 1);
+
+    assert_same(&replica, &primary);
+    assert_eq!(replica.get(MAIN_BRANCH, b"player/3/gems"), None);
+    drop(replica);
+    let reopened = dir.open("replica");
+    assert_eq!(
+        reopened.get(MAIN_BRANCH, b"player/1/gems").as_deref(),
+        Some(&b"175"[..])
+    );
+}
+
+#[test]
+fn an_erasure_further_on_than_a_primary_sends_at_once_stops_the_replica() {
+    let dir = TempDir::new("far");
+    let mut primary = primary(&dir);
+    let mut replica = dir.copy_of(&mut primary, "replica");
+    commit(&mut primary, "player/3/gems", "1");
+    // More between the value and its erasure than a primary sends in
+    // one answer, whatever it is asked.
+    let large = "g".repeat(MAX_THROUGH / 4);
+    for _ in 0..5 {
+        commit(&mut primary, "player/1/replay", &large);
+    }
+    primary
+        .erase(b"player/3", by("ops", "asked to be forgotten"))
+        .expect("erases");
+    let held = replica.log_records();
+
+    let stopped = follow_once(&mut WithKeys(&mut primary), &mut replica, MAX_SENT);
 
     assert!(
-        matches!(stopped, Err(FollowError::Store(StoreError::KeysErased(1)))),
+        matches!(stopped, Err(FollowError::Refused(Refusal::TooFar))),
         "{stopped:?}"
     );
     assert_eq!(replica.log_records(), held);
@@ -306,6 +340,7 @@ fn a_key_the_primary_never_had_stops_the_replica_as_a_missing_key() {
     let ask = Ask {
         held: replica.held().expect("reads its log"),
         max_bytes: MAX_SENT,
+        through: None,
     };
     let sent = primary.ask(&ask).expect("answers").expect("sends");
     let wanted = replica.lacks(&sent).expect("reads what it was sent");
