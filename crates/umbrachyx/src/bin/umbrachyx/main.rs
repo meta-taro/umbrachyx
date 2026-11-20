@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufWriter, ErrorKind, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -709,7 +709,7 @@ fn serve(mut store: FileStore, args: &Args) -> Result<ExitCode, String> {
         let feed = TcpListener::bind((address, feed_port)).map_err(|e| e.to_string())?;
         eprintln!(
             "handing the log to replicas that ask on {}",
-            SocketAddr::new(address, feed_port)
+            feed.local_addr().map_err(|e| e.to_string())?
         );
         server = server.feed_replicas_on(feed);
     }
@@ -737,7 +737,10 @@ fn serve(mut store: FileStore, args: &Args) -> Result<ExitCode, String> {
     if !address.is_loopback() {
         eprintln!("umbrachyx: {BEYOND_THIS_MACHINE}");
     }
-    eprintln!("serving {branch} on {}", SocketAddr::new(address, port));
+    // The address it holds, not the one asked for: given port 0 the
+    // system chooses, and whoever started the server reads it here.
+    let serving = listener.local_addr().map_err(|e| e.to_string())?;
+    eprintln!("serving {branch} on {serving}");
     server.serve(listener)
 }
 
