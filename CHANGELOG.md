@@ -47,6 +47,11 @@
   laptop). It answers `GET` and `SCAN` as before and every question
   about the past with `NOHISTORY`. Its log on disk is whole: started
   without the option it answers those too.
+- **Opening a store takes less memory.** The log is replayed a record
+  at a time instead of decoded whole first: a store opened from a 107 MB
+  log held 1,313 MB right after opening and now holds 946 MB, in the
+  same time (one laptop). A log that is refused is left as it was
+  found, a torn tail included.
 - **Answering a write only once a replica holds it.** `umbrachyx serve
   --feed-replicas-on <port> --wait-for-replica <seconds>` holds each
   answer until a replica has said the write is on its disk. A write no

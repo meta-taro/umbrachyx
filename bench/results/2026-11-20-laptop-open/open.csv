@@ -1,0 +1,25 @@
+"code","log","holds","records","open_ms","rss_after_open_bytes","ns_per_read","reads_found"
+"before","one pass","history",15625,6724,1312800768,507,1630724
+"before","one pass","current",15625,1895,668205056,462,1630724
+"before","two passes","history",31250,11227,2543566848,459,1630724
+"before","two passes","current",31250,4348,1192787968,474,1630724
+"before","one pass","history",15625,6588,1312768000,478,1630724
+"before","one pass","current",15625,1959,668549120,456,1630724
+"before","two passes","history",31250,11029,2517450752,469,1630724
+"before","two passes","current",31250,4266,1192837120,510,1630724
+"before","one pass","history",15625,6780,1314045952,472,1630724
+"before","one pass","current",15625,1969,668876800,458,1630724
+"before","two passes","history",31250,12003,2511323136,481,1630724
+"before","two passes","current",31250,4161,1193017344,475,1630724
+"after","one pass","history",15625,7126,944766976,518,1630724
+"after","one pass","current",15625,1937,251281408,505,1630724
+"after","two passes","history",31250,11302,1819361280,497,1630724
+"after","two passes","current",31250,4241,362577920,490,1630724
+"after","one pass","history",15625,6935,946995200,493,1630724
+"after","one pass","current",15625,1944,251428864,485,1630724
+"after","two passes","history",31250,11472,1810464768,490,1630724
+"after","two passes","current",31250,4196,362823680,493,1630724
+"after","one pass","history",15625,6976,947453952,495,1630724
+"after","one pass","current",15625,1963,251330560,510,1630724
+"after","two passes","history",31250,11334,1810481152,489,1630724
+"after","two passes","current",31250,4207,362348544,498,1630724

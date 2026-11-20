@@ -599,17 +599,14 @@ impl<S: Storage, C: Clock> Store<S, C> {
         keep: bool,
         current_only: bool,
     ) -> Result<(Self, Vec<Replayed>), StoreError> {
-        let (log, records) = Log::open(storage)?;
-        if let Some(sealer) = &sealer {
-            check_sealed(&records, &sealer.ring())?;
-        }
-        let erased: Vec<Fingerprint> = records
-            .iter()
-            .filter_map(|record| match record {
-                Record::Erase(erase) => Some(erase.key_fingerprint),
-                _ => None,
-            })
-            .collect();
+        // A record at a time: all of a log's records decoded at once
+        // take several times the log's bytes, for as long as it is read.
+        let (log, records) = Log::open_lazily(storage)?;
+        let ring = sealer.as_ref().map(Sealer::ring);
+        // What the log's values are sealed under and the key file lacks,
+        // and what its erasures destroyed, gathered as the records go by.
+        let mut lacked: HashSet<Fingerprint> = HashSet::new();
+        let mut erased: Vec<Fingerprint> = Vec::new();
         let mut store = Self {
             log,
             clock,
@@ -635,11 +632,16 @@ impl<S: Storage, C: Clock> Store<S, C> {
             current_only,
         };
         let mut replayed = Vec::new();
-        for (before, record) in records.into_iter().enumerate() {
+        for (before, record) in records.enumerate() {
+            let record = record?;
             if let Record::Erase(erase) = &record {
                 store
                     .erased_keys
                     .insert(erase.key_fingerprint, before as u64 + 1);
+                erased.push(erase.key_fingerprint);
+            }
+            if let Some(ring) = &ring {
+                lacked.extend(keys_lacked(std::slice::from_ref(&record), ring)?.into_keys());
             }
             let ids = store
                 .apply(&record)
@@ -648,6 +650,20 @@ impl<S: Storage, C: Clock> Store<S, C> {
                 replayed.push((record, ids));
             }
         }
+        // Every value in the log must be sealed under a key the key file
+        // holds, or one an erasure in the log destroyed. Neither file
+        // was written while the records were applied, so a store that
+        // does not check out is dropped as it was found.
+        let missing = lacked
+            .iter()
+            .filter(|lacked| !erased.contains(lacked))
+            .count();
+        if missing > 0 {
+            return Err(StoreError::MissingKeys(missing));
+        }
+        // Every record decoded and every key is there: now the file may
+        // be written, to cut a torn tail and make what was read durable.
+        store.log.settle()?;
         // An erasure is logged before its key is destroyed; finish any a
         // crash cut short. Only now, after the log checked out against the
         // key file, is the key file written.

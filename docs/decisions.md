@@ -187,7 +187,22 @@ memory speed for writes will need group commit: one sync for many writes.
 - **All disk access goes through one storage boundary**, so deterministic
   simulation tests can replace the disk with one that loses unsynced bytes,
   tears writes, and fails syncs.
-
+- **Opening reads the log a record at a time.** The file is read whole
+  and every frame's length and checksum are checked; then each record is
+  decoded, applied and let go before the next. Decoded all at once, the
+  records of a log take several times its bytes for as long as it is
+  replayed: on a laptop a store opened from a 107 MB log held 1,313 MB
+  right after opening and now holds 946 MB, and one that keeps current
+  values only 668 MB and now 251 MB, in the same time
+  ([`bench/results/2026-11-20-laptop-open/`](../bench/results/2026-11-20-laptop-open/)).
+  Checking every frame by decoding it first and decoding it again to
+  apply it was tried and cost opening 10 to 30% more time.
+- **A log that is refused is left as it was found.** A frame written
+  whole whose payload does not decode is damage, found when its record
+  is reached. A torn tail is cut, and what was read is synced, only once
+  every record has decoded and every key the values need is in the key
+  file; nothing is appended before that. Before, the tail was cut when
+  the file was scanned, ahead of the key check.
 ## Deterministic simulation
 
 - **The simulator is our own, not madsim or turmoil.** Both replace an
@@ -1534,8 +1549,8 @@ One store that writes, and others that follow it and answer reads.
   option hold the history, with the same commits under the same ids. So
   the role is put on and taken off by restarting, nothing is converted,
   and such a replica can still be made the primary. Its restart still
-  reads the whole log, and takes the memory for that while it does: what
-  is bounded is what it holds afterwards.
+  reads the whole log, and holds the file's bytes while it does: what is
+  bounded is what it holds afterwards.
 - **Only a store that follows may be opened so.** Merging, finding a
   conflict and carrying out an approval need the tree, so a store that
   holds current values only refuses every write of its own before

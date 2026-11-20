@@ -100,14 +100,49 @@ fn chained(chain: &Chain, frame: &[u8]) -> Chain {
 
 /// The records after the header, with damage reported where it is in the
 /// file.
-fn scan_after_header(bytes: &[u8]) -> Result<record::Scan, LogError> {
-    record::scan(&bytes[HEADER_LEN..]).map_err(|error| match error {
+fn scan_after_header(bytes: &[u8], keep: bool) -> Result<record::Scan, LogError> {
+    let scanned = if keep {
+        record::scan(&bytes[HEADER_LEN..])
+    } else {
+        record::scan_frames(&bytes[HEADER_LEN..])
+    };
+    scanned.map_err(|error| match error {
         LogError::Corrupt { offset, reason } => LogError::Corrupt {
             offset: HEADER_LEN as u64 + offset,
             reason,
         },
         other => other,
     })
+}
+
+/// The records of a log that was just opened, decoded one at a time
+/// from the bytes read then. See [`Log::open_lazily`].
+pub(crate) struct Recorded {
+    bytes: Vec<u8>,
+    /// Where each record's frame ends in `bytes`.
+    ends: Vec<u64>,
+    next: usize,
+}
+
+impl Iterator for Recorded {
+    /// A record, or that the frame written whole in its place does not
+    /// decode: damage, as [`Log::open`] reports it.
+    type Item = Result<Record, LogError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let end = *self.ends.get(self.next)? as usize;
+        let start = match self.next.checked_sub(1) {
+            Some(before) => self.ends[before] as usize,
+            None => HEADER_LEN,
+        };
+        self.next += 1;
+        Some(
+            record::decode_frame(&self.bytes[start..end]).ok_or(LogError::Corrupt {
+                offset: start as u64,
+                reason: "checksummed payload does not decode",
+            }),
+        )
+    }
 }
 
 /// What a copy of a log's file turned out to hold.
@@ -138,7 +173,7 @@ pub(crate) fn check_copy(bytes: &[u8]) -> Result<Copied, LogError> {
             reason: "the file is not the first of its log",
         });
     }
-    let scan = scan_after_header(bytes)?;
+    let scan = scan_after_header(bytes, true)?;
     let frames = &bytes[HEADER_LEN..];
     if scan.valid_len != frames.len() as u64 {
         return Err(LogError::Corrupt {
@@ -180,16 +215,44 @@ pub struct Log<S: Storage> {
     /// The last answer of [`Log::chain_at`], and for how many records.
     answered: (u64, Chain),
     is_poisoned: bool,
+    /// Set from opening until [`Log::settle`]: whether the file ends in
+    /// a torn tail still to be cut.
+    unsettled: Option<bool>,
 }
 
 impl<S: Storage> Log<S> {
     /// Open the log and return every acknowledged record in order. A torn
     /// tail left by an interrupted write is cut off before anything new is
     /// appended.
-    pub fn open(mut storage: S) -> Result<(Self, Vec<Record>), LogError> {
+    pub fn open(storage: S) -> Result<(Self, Vec<Record>), LogError> {
+        let (log, _, scan) = Self::open_keeping(storage, true)?;
+        Ok((log, scan.records))
+    }
+
+    /// As [`Self::open`], with the records handed out one at a time as
+    /// they are asked for, in order, so that no more than one is decoded
+    /// at once: all of a log's records decoded together take several
+    /// times the bytes of the log.
+    ///
+    /// Every frame's length and checksum are checked before this returns.
+    /// A payload is decoded when its record is asked for, so a frame
+    /// written whole that does not decode is reported then. Until every
+    /// record has been taken and [`Self::settle`] called, the file is as
+    /// it was found: a log that turns out to be damaged is not cut.
+    pub(crate) fn open_lazily(storage: S) -> Result<(Self, Recorded), LogError> {
+        let (log, bytes, _) = Self::open_keeping(storage, false)?;
+        let recorded = Recorded {
+            bytes,
+            ends: log.ends.clone(),
+            next: 0,
+        };
+        Ok((log, recorded))
+    }
+
+    fn open_keeping(mut storage: S, keep: bool) -> Result<(Self, Vec<u8>, record::Scan), LogError> {
         let bytes = storage.read_all()?;
-        let (header, scan) = match header::read(&bytes) {
-            Start::Header(header) => (header, scan_after_header(&bytes)?),
+        let (header, mut scan) = match header::read(&bytes) {
+            Start::Header(header) => (header, scan_after_header(&bytes, keep)?),
             Start::Newer(version) => return Err(LogError::NewerFormat { version }),
             Start::None => (Self::start(&mut storage, &bytes)?, record::Scan::default()),
         };
@@ -200,14 +263,8 @@ impl<S: Storage> Log<S> {
             });
         }
         let valid_len = HEADER_LEN as u64 + scan.valid_len;
-        if valid_len < bytes.len() as u64 {
-            storage.truncate(valid_len)?;
-        }
-        // Always sync: a process that died between write and sync leaves
-        // records the kernel still serves but the disk may not hold. Handing
-        // them out before they are durable would acknowledge them twice over.
-        storage.sync()?;
-        let log = Self {
+        let has_torn_tail = valid_len < bytes.len() as u64;
+        let mut log = Self {
             storage,
             header,
             len: valid_len,
@@ -220,8 +277,31 @@ impl<S: Storage> Log<S> {
             chained: (0, header.chain_before),
             answered: (0, header.chain_before),
             is_poisoned: false,
+            unsettled: Some(has_torn_tail),
         };
-        Ok((log, scan.records))
+        scan.ends = Vec::new();
+        // Read a record at a time, the log is settled by whoever reads
+        // it, once every record has decoded.
+        if keep {
+            log.settle()?;
+        }
+        Ok((log, bytes, scan))
+    }
+
+    /// Cuts a torn tail off the file, if opening found one, and syncs.
+    /// Always the sync: a process that died between write and sync leaves
+    /// records the kernel still serves but the disk may not hold, and
+    /// handing them out before they are durable would acknowledge them
+    /// twice over. Done once; nothing is appended before it.
+    pub(crate) fn settle(&mut self) -> Result<(), LogError> {
+        let Some(has_torn_tail) = self.unsettled.take() else {
+            return Ok(());
+        };
+        if has_torn_tail {
+            self.storage.truncate(self.len)?;
+        }
+        self.storage.sync()?;
+        Ok(())
     }
 
     /// Makes a file with no header the start of a new log. Only a file
@@ -299,6 +379,13 @@ impl<S: Storage> Log<S> {
     }
 
     fn write_durably(&mut self, frame: &[u8]) -> io::Result<()> {
+        // Never after a torn tail that was not cut.
+        if let Some(has_torn_tail) = self.unsettled.take() {
+            if has_torn_tail {
+                self.storage.truncate(self.len)?;
+            }
+            self.storage.sync()?;
+        }
         self.storage.append(frame)?;
         self.storage.sync()
     }
