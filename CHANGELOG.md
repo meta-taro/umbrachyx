@@ -33,10 +33,10 @@
   keys of subjects first written after its backup, and reads them.
   Without the options nothing between the servers is encrypted, no key
   is sent, and `serve` says so when it starts. `UMBRA.REPLICATION` has
-  `encrypted`. Not yet handled: a subject written and erased before
-  the replica caught up, with the erasure in a later answer than the
-  values, stops the replica, which then has to be made again from a new
-  backup.
+  `encrypted`. Not yet handled: a subject written and erased while the
+  replica was behind, with the erasure more than one answer (a megabyte
+  of records) after the values, stops the replica, which then has to be
+  made again from a new backup.
 - **Answering a write only once a replica holds it.** `umbrachyx serve
   --feed-replicas-on <port> --wait-for-replica <seconds>` holds each
   answer until a replica has said the write is on its disk. A write no

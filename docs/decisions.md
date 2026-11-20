@@ -1398,14 +1398,18 @@ One store that writes, and others that follow it and answer reads.
   the replica caught up: the primary no longer has the key to give, and
   says so from its log, which holds the erasure. If the erasure comes in
   the same answer as the values, the replica takes both, never able to
-  read what nobody can. If it comes in a later answer, the replica
+  read what nobody can. If the key was destroyed after the primary
+  answered and before it was asked for the key, the replica asks once
+  more and is then sent the erasure with the values. If the erasure is
+  further on than one answer reaches (a megabyte), the replica
   stops and takes nothing: records without their key and without their
   erasure would not open again after a restart, since a store that
-  opens checks that it holds every key its log needs. It is told to be
-  made again from a new backup. In the simulation (10,000 runs of 64
-  steps, answers of at most 2 KB and often one record, a subject erased
-  in 8% of steps) a replica met this in 1,575 runs, and in 516 it was
-  still stopped when sent everything at once. Taking such records in
+  opens checks that it holds every key its log needs. Started again it asks
+  again, which helps only if the answers are larger by then; otherwise
+  it is to be made again from a new backup. In the simulation (10,000
+  runs of 64 steps, answers of at most 2 KB and often one record, a
+  subject erased in 8% of steps) a replica met this in 1,041 runs, and
+  in 390 it was still stopped when sent everything at once. Taking such records in
   durably, so that this is no stop, is to come.
 - **A subject erased and written again has two keys on the way.** A
   subject has one key in a key file, so a replica that still holds the

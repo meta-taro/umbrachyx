@@ -267,11 +267,25 @@ pub fn follow_once(
 ) -> Result<Progress, FollowError> {
     while follower.chain_step()? {}
     let held = follower.held()?;
-    let sent = primary
-        .ask(&Ask { held, max_bytes })
+    let ask = Ask { held, max_bytes };
+    let mut sent = primary
+        .ask(&ask)
         .map_err(FollowError::Link)?
         .map_err(FollowError::Refused)?;
-    fetch_keys(primary, follower, &sent)?;
+    // A key destroyed since the primary answered: the erasure is in its
+    // log by now, and asked again it may send the erasure with the
+    // values, which then need no key. If not, the erasure is further on
+    // than one answer reaches, and the second ask says so too.
+    match fetch_keys(primary, follower, &sent) {
+        Err(FollowError::Store(StoreError::KeysErased(_))) => {
+            sent = primary
+                .ask(&ask)
+                .map_err(FollowError::Link)?
+                .map_err(FollowError::Refused)?;
+            fetch_keys(primary, follower, &sent)?;
+        }
+        fetched => fetched?,
+    }
     let now = follower.take_in(&sent)?;
     Ok(Progress {
         held: now,

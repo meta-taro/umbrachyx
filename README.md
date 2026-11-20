@@ -163,7 +163,8 @@ $ umbrachyx history agent/support player/42/gems
   keys of subjects first written after its backup. Without them nothing
   between the servers is encrypted and no key is sent: such a subject
   stops the replica, which says so. Still for trials: a subject written
-  and erased before the replica caught up can stop it for good, and
+  and erased while the replica was more than a megabyte of records
+  behind can stop it for good, and
   nothing is measured on two machines yet. Started with
   `--wait-for-replica <seconds>`, the first server answers a write only
   once a replica holds it; killed in the middle of writes, every write

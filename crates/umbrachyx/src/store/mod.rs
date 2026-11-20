@@ -374,7 +374,8 @@ impl fmt::Display for StoreError {
             Self::KeysErased(count) => write!(
                 f,
                 "the primary destroyed {count} key(s) before this replica had them, and the \
-                 records it was sent need them; nothing was written. Make the replica again \
+                 records it was sent need them without holding the erasure; nothing was \
+                 written. If it stops here again when started again, make the replica again \
                  from a new backup"
             ),
             Self::NotSealed => write!(f, "the log holds values written without encryption"),

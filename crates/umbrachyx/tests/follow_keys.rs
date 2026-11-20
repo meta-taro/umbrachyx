@@ -389,3 +389,46 @@ fn a_new_key_behind_an_erasure_and_a_key_destroyed_first_stop_the_replica_as_des
     );
     assert_eq!(replica.log_records(), held);
 }
+
+/// A link that carries keys, to a primary that erases a subject after it
+/// answered with records and before it is asked for keys, the first
+/// time only.
+struct ErasedMeanwhile<'a> {
+    store: &'a mut FileStore,
+    subject: Option<&'static [u8]>,
+}
+
+impl Primary for ErasedMeanwhile<'_> {
+    fn ask(&mut self, ask: &Ask) -> Result<Result<Sent, Refusal>, String> {
+        self.store.ask(ask)
+    }
+
+    fn keys(&mut self, wanted: &[Fingerprint]) -> Result<Option<Vec<KeyAnswer>>, String> {
+        if let Some(subject) = self.subject.take() {
+            self.store
+                .erase(subject, by("ops", "asked to be forgotten"))
+                .expect("erases");
+        }
+        WithKeys(&mut *self.store).keys(wanted)
+    }
+}
+
+#[test]
+fn a_subject_erased_between_the_answer_and_the_ask_for_its_key_does_not_stop_the_replica() {
+    let dir = TempDir::new("meanwhile");
+    let mut primary = primary(&dir);
+    let mut replica = dir.copy_of(&mut primary, "replica");
+    commit(&mut primary, "player/3/gems", "1");
+    let mut link = ErasedMeanwhile {
+        store: &mut primary,
+        subject: Some(b"player/3"),
+    };
+
+    // The key is gone by the time it is asked for, and the erasure is in
+    // the log by then: asked again, the primary sends both.
+    let progress = follow_once(&mut link, &mut replica, MAX_SENT).expect("follows");
+
+    assert!(progress.is_caught_up(), "{progress:?}");
+    assert_same(&replica, &primary);
+    assert_eq!(replica.get(MAIN_BRANCH, b"player/3/gems"), None);
+}
