@@ -25,8 +25,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -316,7 +316,13 @@ fn rounds() -> u32 {
         .unwrap_or(FULL_ROUNDS)
 }
 
+/// One test of this file at a time. Each round picks free ports and
+/// then starts servers on them; two tests doing that at once can pick
+/// the same port, and one would then talk to the other's server.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
 fn kill_rounds(name: &str, rounds: u32, between: Between) {
+    let _alone = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
     let mut random = SEED;
     let mut total = 0;
     for round in 0..rounds {
