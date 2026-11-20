@@ -50,6 +50,10 @@
 # shutdown pending, or the script refuses to start: a measuring machine
 # left running costs more than every run of this script together.
 #
+# The client may be run more than once against the same servers, with
+# one replica, then two, then four: each run fills what is not there yet
+# and puts its rows in a directory named for the number of replicas.
+#
 # To rehearse on one machine, give 127.0.0.1 for every address and set
 # UMBRACHYX_BENCH_REPLICA_OFFSET=1000 for the replica and the client: the
 # replica's servers then listen that many ports higher.
@@ -308,14 +312,17 @@ postgres_rows() {
   unset PGOPTIONS
 }
 
-# The table filled on the primary, and there on every replica.
+# The table filled on the primary, and there on every replica. The
+# client may be run again with more replicas against the same servers,
+# so a table that is there already is left as it is.
 postgres_fill() {
   local primary_address="$1" address
   shift
   PGOPTIONS="-c synchronous_commit=local" "$pg_bin/psql" -q -v ON_ERROR_STOP=1 \
     -h "$primary_address" -p "$postgres_port" -U bench postgres <<SQL
-CREATE TABLE kv (key text PRIMARY KEY, value text NOT NULL);
-INSERT INTO kv SELECT 'key:' || lpad(n::text, 12, '0'), '$value' FROM generate_series(0, $keys - 1) AS n;
+CREATE TABLE IF NOT EXISTS kv (key text PRIMARY KEY, value text NOT NULL);
+INSERT INTO kv SELECT 'key:' || lpad(n::text, 12, '0'), '$value' FROM generate_series(0, $keys - 1) AS n
+  ON CONFLICT DO NOTHING;
 VACUUM ANALYZE kv;
 CHECKPOINT;
 SQL
