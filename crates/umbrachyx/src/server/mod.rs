@@ -129,6 +129,8 @@ pub struct Server {
     following: Option<replication::Shared>,
     /// How backing up goes, once the server serves.
     backing_up: Option<backups::Shared>,
+    /// Which replicas ask, once the server serves and feeds any.
+    asking: Option<replication::SharedAsking>,
 }
 
 impl Server {
@@ -160,6 +162,7 @@ impl Server {
             identity: None,
             following: None,
             backing_up: None,
+            asking: None,
         })
     }
 
@@ -256,8 +259,15 @@ impl Server {
                 .expect("the thread that follows the primary starts");
             self.following = Some(following);
         }
-        // Before the serving threads are given their copies of this, so
-        // each can say how the backup goes.
+        // Both before the serving threads are given their copies of
+        // this, so each can say which replicas ask and how the backup
+        // goes.
+        if let Some(listener) = self.feeds_replicas.clone() {
+            let tls = self.identity.as_ref().map(|tls| tls.server.clone());
+            let asking = replication::spawn_feed(self.writer.clone(), listener, tls)
+                .expect("the thread that answers replicas starts");
+            self.asking = Some(asking);
+        }
         if let Some((dir, every)) = self.backup.clone() {
             let backing_up = backups::spawn(self.writer.clone(), dir, every)
                 .expect("the thread that backs the store up starts");
@@ -277,11 +287,6 @@ impl Server {
         let queued = Arc::clone(&self.queued);
         event::spawn_writer(self.writer.clone(), queued, wakers, self.sync_every)
             .expect("the thread that writes commits starts");
-        if let Some(listener) = self.feeds_replicas.clone() {
-            let tls = self.identity.as_ref().map(|tls| tls.server.clone());
-            replication::spawn_feed(self.writer.clone(), listener, tls)
-                .expect("the thread that answers replicas starts");
-        }
         let mut next = 0;
         loop {
             let (stream, peer) = match listener.accept() {
@@ -357,6 +362,7 @@ impl Server {
                     self.identity.is_some(),
                     self.keeps_history,
                     self.following.as_ref(),
+                    self.asking.as_ref(),
                     &name,
                     args,
                 ) {

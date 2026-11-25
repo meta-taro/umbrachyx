@@ -74,6 +74,13 @@ impl Writer {
         self.engine.records()
     }
 
+    /// How many records the log held once its last erasure was written,
+    /// as of the last write, or `None` if nothing was erased. A copy of
+    /// the log that holds at least as many holds every erasure's record.
+    pub fn erased_through(&self) -> Option<u64> {
+        self.engine.erased_through()
+    }
+
     /// One turn of answering a replica, between two groups of writes.
     fn feed<T>(
         &self,

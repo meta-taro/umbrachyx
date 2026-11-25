@@ -34,7 +34,10 @@
   `umbrachyx replication [--host <address>] [--port <port>]` asks a
   running server the same from the command line, opens no log, and
   exits with 1 if a replica stopped or cannot reach its primary, or a
-  primary refuses writes because no replica keeps up.
+  primary refuses writes because no replica keeps up. Both say how
+  many records the log held once its last erasure was written, and a
+  server that feeds replicas how many are asking now and how many of
+  those hold fewer: of the replicas asking, not of every copy there is.
   A replica holding another log, more records than its primary, or
   records its primary does not hold is sent nothing. For trials only:
   nothing is measured on two machines yet.

@@ -320,6 +320,7 @@ fn described(status: &Value) -> Option<(Vec<String>, bool)> {
         }
         _ => return None,
     };
+    erasure_lines(status, &mut lines);
     Some((lines, is_well))
 }
 
@@ -363,4 +364,31 @@ fn replica_lines(status: &Value, lines: &mut Vec<String>) -> bool {
         lines.push(format!("stopped: {}", said(why)));
     }
     unreachable.is_none() && stopped.is_none()
+}
+
+/// Where the last erasure is in this server's log and, of the replicas
+/// asking it now, how many do not hold that record yet. A server from
+/// before it said so says nothing of either, and no line is printed. A
+/// replica that is not connected is not counted: the server knows only
+/// those that ask.
+fn erasure_lines(status: &Value, lines: &mut Vec<String>) {
+    let Some(through) = status.get("erased_through") else {
+        return;
+    };
+    let through = through.as_u64();
+    lines.push(match through {
+        Some(through) => format!("last erasure: within its first {through} records"),
+        None => "last erasure: none".to_owned(),
+    });
+    let asking = status["replicas_asking"].as_u64();
+    let behind = status["replicas_asking_behind_an_erasure"].as_u64();
+    if let (Some(asking), Some(behind)) = (asking, behind) {
+        lines.push(match through {
+            Some(_) => format!(
+                "replicas asking now: {asking}, {behind} of them holding fewer records than \
+                 the last erasure"
+            ),
+            None => format!("replicas asking now: {asking}"),
+        });
+    }
 }

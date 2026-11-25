@@ -29,7 +29,7 @@
 //! runs the committer calls `sync_puts` as often as it promises to.
 
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -101,6 +101,9 @@ trait Engine: Send + Sync {
     fn wait_for_records(&self, after: u64, at_most: Duration) -> bool;
     /// How many records the log held when the last write ended.
     fn records(&self) -> u64;
+    /// How many of them it held once its last erasure was written, as
+    /// of the last write, or `None` if nothing was erased.
+    fn erased_through(&self) -> Option<u64>;
     /// Whether puts were answered that the log does not hold yet, as of
     /// the last group written.
     fn has_unsynced_puts(&self) -> bool;
@@ -129,6 +132,9 @@ struct Core<S: Storage, C: Clock> {
     records: Mutex<u64>,
     /// Told whenever `records` grows.
     grew: Condvar,
+    /// How many records the log held once its last erasure was written,
+    /// or 0 if nothing was erased: no erasure is the log's 0th record.
+    erased_through: AtomicU64,
     /// What replicas hold, if a write is answered only once one holds
     /// it.
     replicas: Option<Replicas>,
@@ -195,6 +201,8 @@ impl<S: Storage, C: Clock> Core<S, C> {
 
     /// Tells whoever waits for more records how many there are now.
     fn note_records(&self, store: &Store<S, C>) {
+        self.erased_through
+            .store(store.erased_through().unwrap_or(0), Ordering::Release);
         let now = store.log_records();
         let mut records = lock(&self.records);
         if *records != now {
@@ -353,6 +361,10 @@ where
         *lock(&self.records)
     }
 
+    fn erased_through(&self) -> Option<u64> {
+        Some(self.erased_through.load(Ordering::Acquire)).filter(|&at| at != 0)
+    }
+
     fn has_unsynced_puts(&self) -> bool {
         self.has_unsynced_puts.load(Ordering::Acquire)
     }
@@ -420,6 +432,7 @@ where
     fn with(store: Store<S, C>, is_following: bool, replicas: Option<Replicas>) -> Self {
         let published = Arc::new(RwLock::new(Arc::new(store.view())));
         let records = store.log_records();
+        let erased_through = store.erased_through().unwrap_or(0);
         Self {
             core: Arc::new(Core {
                 turns: Turns::default(),
@@ -430,6 +443,7 @@ where
                 lost_answered_puts: AtomicBool::new(false),
                 records: Mutex::new(records),
                 grew: Condvar::new(),
+                erased_through: AtomicU64::new(erased_through),
                 replicas,
             }),
         }

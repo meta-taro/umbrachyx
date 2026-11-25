@@ -216,6 +216,15 @@ fn it_reads_every_current_value_its_primary_reads_on_every_branch() {
     assert_eq!(replica.head("agent"), primary.head("agent"));
     assert_eq!(replica.erasures(), primary.erasures());
     assert_eq!(replica.get(MAIN_BRANCH, b"player/2/gems"), None);
+    // Where the last erasure is in the log, for one that reads it as
+    // records arrive and for one that reads it when it opens.
+    assert!(primary.erased_through().is_some());
+    assert_eq!(replica.erased_through(), primary.erased_through());
+    drop(replica);
+    assert_eq!(
+        dir.open_current("replica").erased_through(),
+        primary.erased_through()
+    );
 }
 
 #[test]

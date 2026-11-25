@@ -42,6 +42,7 @@
 //! is, and how far behind, to any client; it does not say where the
 //! primary is, which is whoever started the server's to know.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::AtomicUsize;
@@ -110,20 +111,91 @@ fn lock(shared: &Shared) -> std::sync::MutexGuard<'_, Following> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// What the replicas asking now said they hold, each at the last ask of
+/// its that was answered. A server knows no other replicas than these:
+/// one that is not connected, or stopped asking, is not here.
+#[derive(Debug, Default)]
+pub(super) struct Asking {
+    /// The number the next connection that is answered is given.
+    next: u64,
+    /// How many records each said it held.
+    held: HashMap<u64, u64>,
+}
+
+impl Asking {
+    /// How many of them said they hold fewer records than the log held
+    /// once its last erasure was written: `through`, or `None` if
+    /// nothing was erased.
+    fn behind(&self, through: Option<u64>) -> usize {
+        self.held
+            .values()
+            .filter(|&&held| through.is_some_and(|through| held < through))
+            .count()
+    }
+}
+
+pub(super) type SharedAsking = Arc<Mutex<Asking>>;
+
+/// One connection's line in [`Asking`]: written at each ask of its that
+/// is answered, and removed when the connection ends, however it does.
+/// An ask that is refused writes nothing: it comes from another log or
+/// from whoever reached the port, and what it says it holds means
+/// nothing here.
+struct Seat {
+    asking: SharedAsking,
+    number: Option<u64>,
+}
+
+impl Seat {
+    fn note(&mut self, held: u64) {
+        let mut asking = self.asking.lock().unwrap_or_else(PoisonError::into_inner);
+        let number = match self.number {
+            Some(number) => number,
+            None => {
+                asking.next += 1;
+                *self.number.insert(asking.next)
+            }
+        };
+        asking.held.insert(number, held);
+    }
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        if let Some(number) = self.number {
+            let mut asking = self.asking.lock().unwrap_or_else(PoisonError::into_inner);
+            asking.held.remove(&number);
+        }
+    }
+}
+
 /// The reply to a replication command a client may send, or `None` if
-/// `name` is none.
+/// `name` is none. `asking` is `None` on a server that feeds no replica.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reply(
     writer: &Writer,
     feeds: bool,
     encrypted: bool,
     keeps_history: bool,
     following: Option<&Shared>,
+    asking: Option<&SharedAsking>,
     name: &str,
     args: &[Vec<u8>],
 ) -> Option<Reply> {
     match name {
         REPLICATION if args.is_empty() => {
             let mut status = status(writer, feeds, encrypted, following);
+            // How many records the log held once its last erasure was
+            // written: a copy that holds as many holds every erasure's
+            // record. And of the replicas asking now, how many said
+            // they hold fewer.
+            let through = writer.erased_through();
+            status["erased_through"] = json!(through);
+            if let Some(asking) = asking {
+                let asking = asking.lock().unwrap_or_else(PoisonError::into_inner);
+                status["replicas_asking"] = json!(asking.held.len());
+                status["replicas_asking_behind_an_erasure"] = json!(asking.behind(through));
+            }
             // What this server holds of what was written: the history,
             // or only the values as they are now.
             status["holds"] = json!(if keeps_history {
@@ -148,8 +220,10 @@ pub(super) fn spawn_feed(
     writer: Writer,
     listener: Arc<TcpListener>,
     tls: Option<Arc<rustls::ServerConfig>>,
-) -> io::Result<()> {
+) -> io::Result<SharedAsking> {
     let replicas = Arc::new(AtomicUsize::new(0));
+    let asking = SharedAsking::default();
+    let told = Arc::clone(&asking);
     thread::Builder::new()
         .name("feed".to_owned())
         .spawn(move || {
@@ -165,11 +239,15 @@ pub(super) fn spawn_feed(
                 let slot = super::Slot::take(&replicas, MAX_REPLICAS);
                 let writer = writer.clone();
                 let tls = tls.clone();
+                let seat = Seat {
+                    asking: Arc::clone(&told),
+                    number: None,
+                };
                 let started = thread::Builder::new()
                     .name("feed a replica".to_owned())
                     .spawn(move || match (slot, tls) {
-                        (Some(_slot), None) => feed_plain(stream, writer),
-                        (Some(_slot), Some(tls)) => feed_private(stream, writer, &tls),
+                        (Some(_slot), None) => feed_plain(stream, writer, seat),
+                        (Some(_slot), Some(tls)) => feed_private(stream, writer, &tls, seat),
                         (None, None) => super::refuse(stream),
                         // Told nothing: the reason would go out in the
                         // clear, to whoever connected.
@@ -180,22 +258,22 @@ pub(super) fn spawn_feed(
                 }
             }
         })
-        .map(drop)
+        .map(|_| asking)
 }
 
-fn feed_plain(stream: TcpStream, writer: Writer) {
+fn feed_plain(stream: TcpStream, writer: Writer, seat: Seat) {
     // An answer goes out when it is ready, not when more follows.
     let _ = stream.set_nodelay(true);
     if stream.set_read_timeout(Some(QUIET)).is_err() {
         return;
     }
-    feed(stream, writer, None);
+    feed(stream, writer, None, seat);
 }
 
 /// Answers a replica once it has shown its certificate. One that shows
 /// none the authority signed, or does not speak TLS, is closed without
 /// a word.
-fn feed_private(stream: TcpStream, writer: Writer, tls: &Arc<rustls::ServerConfig>) {
+fn feed_private(stream: TcpStream, writer: Writer, tls: &Arc<rustls::ServerConfig>, seat: Seat) {
     let _ = stream.set_nodelay(true);
     let Ok((stream, private)) = tls::accept(tls, stream, HANDSHAKE) else {
         return;
@@ -207,12 +285,17 @@ fn feed_private(stream: TcpStream, writer: Writer, tls: &Arc<rustls::ServerConfi
     if timed.is_err() {
         return;
     }
-    feed(stream, writer, Some(&private));
+    feed(stream, writer, Some(&private), seat);
 }
 
 /// Answers one replica until it goes, or sends what is no command.
 /// Keys are given only on a connection that is `private`.
-fn feed(mut stream: impl Read + Write, mut writer: Writer, private: Option<&Private>) {
+fn feed(
+    mut stream: impl Read + Write,
+    mut writer: Writer,
+    private: Option<&Private>,
+    mut seat: Seat,
+) {
     let mut input = Vec::new();
     let mut chunk = [0; 4096];
     loop {
@@ -231,14 +314,19 @@ fn feed(mut stream: impl Read + Write, mut writer: Writer, private: Option<&Priv
             Err(_) => return,
         };
         let mut out = Vec::new();
-        feed_reply(&mut writer, &command, private).write_to(&mut out);
+        feed_reply(&mut writer, &command, private, &mut seat).write_to(&mut out);
         if stream.write_all(&out).is_err() {
             return;
         }
     }
 }
 
-fn feed_reply(writer: &mut Writer, command: &[Vec<u8>], private: Option<&Private>) -> Reply {
+fn feed_reply(
+    writer: &mut Writer,
+    command: &[Vec<u8>],
+    private: Option<&Private>,
+    seat: &mut Seat,
+) -> Reply {
     let Some((name, args)) = command.split_first() else {
         return Reply::Error(ONLY_REPLICAS.to_owned());
     };
@@ -254,7 +342,7 @@ fn feed_reply(writer: &mut Writer, command: &[Vec<u8>], private: Option<&Private
         Ok(ask) => ask,
         Err(error) => return Reply::Error(format!("ERR {error}")),
     };
-    match held_answer(writer, &ask) {
+    match held_answer(writer, &ask, seat) {
         Ok(answer) => answer_reply(answer),
         Err(error) => Reply::Error(format!("ERR {error}")),
     }
@@ -282,8 +370,18 @@ fn keys_reply(writer: &mut Writer, args: &[Vec<u8>]) -> Reply {
 
 /// The answer to `ask`, held back for up to [`HOLD`] while there is
 /// nothing to send.
-fn held_answer(writer: &mut Writer, ask: &Ask) -> Result<Result<Sent, Refusal>, StoreError> {
+fn held_answer(
+    writer: &mut Writer,
+    ask: &Ask,
+    seat: &mut Seat,
+) -> Result<Result<Sent, Refusal>, StoreError> {
     let first = answer(writer, ask)?;
+    // Noted as soon as the ask is found to be one of this log's, and
+    // before it is held: a replica that has everything says so with an
+    // ask that is then held, and would be counted behind for that long.
+    if first.is_ok() {
+        seat.note(ask.held.records);
+    }
     let has_nothing = matches!(&first, Ok(sent) if sent.frames.is_empty());
     if has_nothing && writer.wait_for_more_records(ask.held.records, HOLD) {
         return answer(writer, ask);
@@ -525,5 +623,68 @@ fn follow(
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seat(asking: &SharedAsking) -> Seat {
+        Seat {
+            asking: Arc::clone(asking),
+            number: None,
+        }
+    }
+
+    fn held(asking: &SharedAsking) -> Vec<u64> {
+        let mut held: Vec<u64> = lock_asking(asking).held.values().copied().collect();
+        held.sort_unstable();
+        held
+    }
+
+    fn lock_asking(asking: &SharedAsking) -> std::sync::MutexGuard<'_, Asking> {
+        asking.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[test]
+    fn a_replica_is_counted_from_its_first_answered_ask_until_its_connection_ends() {
+        let asking = SharedAsking::default();
+        let mut first = seat(&asking);
+        let mut second = seat(&asking);
+        assert_eq!(held(&asking), [] as [u64; 0]);
+
+        first.note(3);
+        second.note(7);
+        first.note(5);
+
+        assert_eq!(held(&asking), [5, 7]);
+        drop(first);
+        assert_eq!(held(&asking), [7]);
+        drop(second);
+        assert_eq!(held(&asking), [] as [u64; 0]);
+    }
+
+    #[test]
+    fn a_connection_never_answered_is_not_counted_and_leaves_nothing() {
+        let asking = SharedAsking::default();
+
+        drop(seat(&asking));
+
+        assert_eq!(held(&asking), [] as [u64; 0]);
+    }
+
+    #[test]
+    fn a_replica_is_behind_an_erasure_while_it_holds_fewer_records_than_the_log_did_then() {
+        let asking = SharedAsking::default();
+        let mut seats = [seat(&asking), seat(&asking), seat(&asking)];
+        for (seat, held) in seats.iter_mut().zip([4, 5, 9]) {
+            seat.note(held);
+        }
+
+        // The erasure is the fifth record: who holds five holds it.
+        assert_eq!(lock_asking(&asking).behind(Some(5)), 1);
+        assert_eq!(lock_asking(&asking).behind(Some(10)), 3);
+        assert_eq!(lock_asking(&asking).behind(None), 0);
     }
 }

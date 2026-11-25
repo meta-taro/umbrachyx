@@ -86,8 +86,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         let mut unfinished = None;
         for (at, record) in scan.records[..take].iter().enumerate() {
             if let Record::Erase(erase) = record {
-                self.erased_keys
-                    .insert(erase.key_fingerprint, before + at as u64 + 1);
+                self.note_erased(erase.key_fingerprint, before + at as u64 + 1);
             }
             self.apply(record)
                 .map_err(|error| StoreError::Inconsistent(error.to_string()))?;
