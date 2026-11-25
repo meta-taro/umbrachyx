@@ -115,7 +115,11 @@ impl Sealer {
     /// Every key held now, as a key file's bytes: what a backup keeps
     /// beside its copy of the log.
     pub(crate) fn key_file(&self) -> Result<Vec<u8>, KeyError> {
-        self.keys.entries()
+        // Not the keys still held with puts answered early: no record
+        // a backup copies was sealed under one, and a backup that kept
+        // one would keep it after this store has lost it and given its
+        // subject another.
+        self.keys.durable_entries()
     }
 
     pub(crate) fn ring(&self) -> Ring {
@@ -130,6 +134,26 @@ impl Sealer {
         keys: impl Iterator<Item = &'a [u8]>,
     ) -> Result<(), KeyError> {
         self.keys.make_keys(keys.map(subject))
+    }
+
+    /// As [`Sealer::make_keys_for`], without writing the key file: the
+    /// keys are durable once [`Sealer::write_held_keys`] returns. Only
+    /// for values that are not written before that.
+    pub(crate) fn hold_keys_for<'a>(
+        &mut self,
+        keys: impl Iterator<Item = &'a [u8]>,
+    ) -> Result<(), KeyError> {
+        self.keys.make_keys_held(keys.map(subject))
+    }
+
+    /// Whether keys are in use that the key file does not hold yet.
+    pub(crate) fn has_held_keys(&self) -> bool {
+        self.keys.has_held()
+    }
+
+    /// Makes durable the keys [`Sealer::hold_keys_for`] made.
+    pub(crate) fn write_held_keys(&mut self) -> Result<(), KeyError> {
+        self.keys.write_held()
     }
 
     /// Seals `value` for `key`, making its subject's key first if needed.

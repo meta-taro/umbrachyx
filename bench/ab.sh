@@ -15,12 +15,18 @@
 # With `plain-async` as the last word, only the writes to a plain-async
 # table are measured: for a change that touches nothing else, and for a
 # machine whose sync is too slow to wait for the other rows.
+#
+# PLAIN_KEY names the key those writes go to, `__rand_int__` in it
+# standing for a number below a million: `kv/bench/key:__rand_int__`
+# unless set, which is one subject for every key;
+# `kv/__rand_int__/v` is a subject for each.
 set -euo pipefail
 
 old="$1"
 new="$2"
 rounds="${3:-3}"
 only="${4:-}"
+plain_key="${PLAIN_KEY:-kv/bench/key:__rand_int__}"
 case "$only" in
   "" | plain-async) ;;
   *) echo "bench/ab.sh: the last word is plain-async or nothing, not $only" >&2; exit 2 ;;
@@ -52,7 +58,7 @@ plain_rows() {
   server=$!
   until valkey-cli -p "$port" ping >/dev/null 2>&1; do sleep 0.1; done
   valkey-benchmark -p "$port" -n "$keys" -r "$keys" -c 50 -P 64 -q \
-    SET "kv/bench/key:__rand_int__" "$value" >/dev/null 2>&1
+    SET "$plain_key" "$value" >/dev/null 2>&1
   local clients
   for clients in 1 8 64 256; do
     plain_row "$side" "$engine, $clients clients" -n 200000 -c "$clients"
@@ -69,7 +75,7 @@ plain_row() {
   local side="$1" label="$2"
   shift 2
   valkey-benchmark -p "$port" -r "$keys" --csv "$@" \
-    SET "kv/bench/key:__rand_int__" "$value" 2>/dev/null | grep -v '"test"' |
+    SET "$plain_key" "$value" 2>/dev/null | grep -v '"test"' |
     python3 -c 'import csv, sys
 for r in csv.reader(sys.stdin):
     print(",".join([sys.argv[1], "\"" + sys.argv[2] + "\"", "SET", r[1], r[4], r[6]]))' "$side" "$label"

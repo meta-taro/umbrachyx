@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **A write to a new subject on a plain-async table no longer waits for
+  the key file.** The subject's key is held with the put and written
+  before it, with one write for all the keys held, where each new
+  subject synced the key file at once. On one laptop, writes with a
+  subject for every key: 690 a second to 39,300–40,000 from one client
+  (`bench/results/2026-11-26-laptop-new-subjects/`).
 - **The map of tables that keep no history hashes a key once and
   writes a short value over where it is.** On one laptop, writes to a
   plain-async table sent 64 at a time: 1,190,000 to 1,280,000 a second

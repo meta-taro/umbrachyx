@@ -1978,10 +1978,39 @@ So a table can be declared to keep no history at all.
   would show a state that was never kept. Stopping loses exactly what
   the table says a failure may lose. Until it stops, no further put is
   answered.
+- **A new subject's key is held with the put that needs it** (measured,
+  taken). A subject's key was made durable before anything was sealed
+  under it, so the first write to a new subject synced the key file,
+  on a plain-async table too: a table that otherwise waits for no sync
+  waited for one whenever a write brought a new subject, and data
+  shaped as `session/<id>/field` brings one with every new id. The rule
+  that matters is that no value is on disk under a key that is not, and
+  a put answered early is not on disk. So its key is put in use and
+  held like it, and written, with one write for all the keys held,
+  before the record that carries the puts: every record the store
+  writes, for any reason, writes the keys held first. A failure before
+  that loses the keys and the puts together, which is what the table
+  says a failure may lose; if the key file refuses them, the puts held
+  are lost as when the log refuses them, and the server stops. Anything
+  else in the group of writes, a commit or a put that waits, and its
+  keys are durable first as before. On one laptop, whose sync is a
+  full flush, writes with a subject for every key
+  (`PLAIN_KEY=kv/__rand_int__/v bench/ab.sh <old> <new> 3 plain-async`,
+  [`bench/results/2026-11-26-laptop-new-subjects/`](../bench/results/2026-11-26-laptop-new-subjects/)):
+  690 a second to 39,300–40,000 from one client, 1,270 to
+  124,800–129,600 from eight, 205,000–221,000 to 521,000–524,000 sent
+  64 at a time. In a Linux container, where a sync is cheaper, a new
+  subject cost a write two thirds of its rate from one client before
+  this; after it is not measured there.
 - **Checked by a simulation of its own** (see [Deterministic
-  simulation](#deterministic-simulation)): over 10,000 seeds and 180,718
-  restarts, 78,351 lost the last puts answered first and none lost
-  anything else.
+  simulation](#deterministic-simulation)): over 10,000 seeds and 180,715
+  restarts, 78,304 lost the last puts answered first and none lost
+  anything else. The same run with values sealed and a subject for
+  every key, and with writes to the key file made to fail: over 10,000
+  seeds, 204,781 restarts and 23,773 failed writes of keys, the store
+  opened again every time, which it does only if the key file holds
+  every key the log uses, and no put answered early wrote the key
+  file.
 - **Not built**: declaring a table from a token-bound session, expiry,
   compaction, and a way to move the server between in-place and
   copying maps as the load changes (a batch at night, a burst of

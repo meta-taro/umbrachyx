@@ -27,8 +27,10 @@
 use std::collections::BTreeMap;
 
 use super::disk::{SimStorage, SyncFault};
+use super::key_disk::{KeyFault, SimKeyStorage};
 use super::rng::Rng;
 use super::store_run::{SimClock, provenance};
+use crate::keys::{KeyStorage, Keys};
 use crate::log::{Edit, Engine, LogError};
 use crate::store::{CommitRequest, MAIN_BRANCH, Request, Store, StoreError};
 
@@ -47,6 +49,12 @@ const KEY_SPACE: u64 = 40;
 /// How often puts answered early are held by the thread that read
 /// them, in a hundred.
 const HELD_BY_THE_READER_PERCENT: u64 = 50;
+/// Out of 100, per write that waits for the disk, when values are
+/// sealed and its sync was not made to fail.
+const KEY_FAULT_PERCENT: u64 = 10;
+/// An entry of the key file is a little over 70 bytes; tear anywhere in
+/// it.
+const MAX_TORN: u64 = 80;
 const MAX_REQUESTS: u64 = 4;
 const MAX_EDITS: u64 = 4;
 const REMOVE_PERCENT: u64 = 20;
@@ -83,6 +91,9 @@ pub struct Outcome {
     /// Puts refused because the log had refused a write.
     pub refused_after_a_failure: usize,
     pub replica_pulls: usize,
+    /// Writes to the key file made to fail, in a run whose values are
+    /// sealed.
+    pub key_faults: usize,
 }
 
 /// A write that must be on disk when it is answered.
@@ -139,14 +150,45 @@ struct Run {
     in_flight: Option<Vec<Edit>>,
     branches: usize,
     outcome: Outcome,
-    replica: SimStore,
+    /// None when values are sealed: this run is about the key file, and
+    /// a replica of a sealed store is the business of another.
+    replica: Option<SimStore>,
     following: Rng,
+    /// The key file, when values are sealed.
+    keys: Option<SimKeyStorage>,
 }
 
 pub fn run(seed: u64) -> Result<Outcome, String> {
+    run_with(seed, false)
+}
+
+/// The same run with values sealed, every key a subject of its own. A
+/// put answered before it is on disk has its key held with it: the run
+/// checks that the store opens again after every failure, which it does
+/// only if the key file holds every key the log uses, and that the key
+/// file was not written for a put answered early.
+pub fn run_sealed(seed: u64) -> Result<Outcome, String> {
+    run_with(seed, true)
+}
+
+fn open(
+    disk: SimStorage,
+    clock: SimClock,
+    keys: Option<&SimKeyStorage>,
+) -> Result<SimStore, StoreError> {
+    let Some(keys) = keys else {
+        return Store::open(disk, clock);
+    };
+    let storage: Box<dyn KeyStorage + Send> = Box::new(keys.clone());
+    let keys = Keys::open(storage).map_err(StoreError::Keys)?;
+    Store::open_sealed(disk, keys, clock)
+}
+
+fn run_with(seed: u64, is_sealed: bool) -> Result<Outcome, String> {
     let mut rng = Rng::new(seed);
     let clock = SimClock::new(&mut rng);
-    let mut store = Store::open(SimStorage::default(), clock)
+    let keys = is_sealed.then(SimKeyStorage::default);
+    let mut store = open(SimStorage::default(), clock, keys.as_ref())
         .map_err(|e| format!("empty store fails to open: {e}"))?;
     for (table, engine) in [
         (EARLY_TABLE, Engine::PlainAsync),
@@ -157,8 +199,13 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
             .map_err(|e| format!("declaring {table} fails: {e}"))?;
     }
     let mut following = Rng::new(seed ^ REPLICA_SALT);
-    let replica = Store::open(SimStorage::default(), SimClock::new(&mut following))
-        .map_err(|e| format!("empty replica fails to open: {e}"))?;
+    let replica = if is_sealed {
+        None
+    } else {
+        let replica = Store::open(SimStorage::default(), SimClock::new(&mut following))
+            .map_err(|e| format!("empty replica fails to open: {e}"))?;
+        Some(replica)
+    };
     let mut run = Run {
         rng,
         store,
@@ -169,6 +216,7 @@ pub fn run(seed: u64) -> Result<Outcome, String> {
         outcome: Outcome::default(),
         replica,
         following,
+        keys,
     };
     for step in 0..STEPS {
         run.step(step)?;
@@ -217,7 +265,9 @@ impl Run {
             .collect();
         let edits = edits_of(&requests);
         let records = self.store.log_records();
-        if self.rng.percent(HELD_BY_THE_READER_PERCENT) {
+        let key_file = self.key_file_len();
+        let held_by_the_reader = self.rng.percent(HELD_BY_THE_READER_PERCENT);
+        if held_by_the_reader && self.keys.is_none() {
             // As the thread that read them holds them: no values are
             // sealed in this store, so they are ready as they are.
             match self.store.hold_sealed(edits.clone()) {
@@ -234,6 +284,11 @@ impl Run {
         }
         if !self.store.has_unsynced_puts() {
             return Err(format!("step {step}: the store forgot the puts it holds"));
+        }
+        if self.key_file_len() != key_file {
+            return Err(format!(
+                "step {step}: a put answered early wrote the key file"
+            ));
         }
         self.ahead.push(edits);
         self.outcome.early += 1;
@@ -259,7 +314,31 @@ impl Run {
         if let Some(fault) = fault {
             self.store.storage_mut().fault_next_sync(fault);
         }
-        match (waiting.run(&mut self.store), fault) {
+        let has_key_fault = fault.is_none() && self.maybe_key_fault();
+        let written = waiting.run(&mut self.store);
+        if has_key_fault {
+            let was_unused = self.keys.as_ref().is_some_and(SimKeyStorage::clear_fault);
+            match (&written, was_unused) {
+                // No key was written, so nothing failed.
+                (_, true) => {}
+                (Err(StoreError::Keys(_)), false) => {
+                    // The write was not made, and nothing was put in
+                    // the log: what comes back is what was durable, and
+                    // of the puts answered early as many as any restart
+                    // keeps.
+                    self.outcome.key_faults += 1;
+                    self.trace(step, format!("{what}: key file fault"));
+                    let power = self.rng.percent(50);
+                    return self.restart(step, power);
+                }
+                (result, false) => {
+                    return Err(format!(
+                        "step {step}: {what} with a key file fault returned {result:?}"
+                    ));
+                }
+            }
+        }
+        match (written, fault) {
             (Ok(()), None) => {
                 if self.store.has_unsynced_puts() {
                     return Err(format!("step {step}: {what} left puts off the disk"));
@@ -326,7 +405,7 @@ impl Run {
             self.store.storage_mut().process_crash()
         };
         let clock = SimClock::new(&mut self.rng);
-        self.store = Store::open(disk, clock)
+        self.store = open(disk, clock, self.keys.as_ref())
             .map_err(|e| format!("step {step}: store fails to reopen: {e}"))?;
         self.outcome.restarts += 1;
         let held = entries_of(&self.store);
@@ -375,9 +454,11 @@ impl Run {
     /// store's log must hold those records too: nothing was handed out
     /// that a restart then took back.
     fn pull(&mut self, step: usize, max_bytes: usize) -> Result<(), String> {
-        let held = self.replica.log_records();
-        let theirs = self
-            .replica
+        let Some(replica) = self.replica.as_mut() else {
+            return Ok(());
+        };
+        let held = replica.log_records();
+        let theirs = replica
             .log_chain(held)
             .map_err(|e| format!("step {step}: replica cannot read its log: {e}"))?;
         let ours = self
@@ -396,7 +477,7 @@ impl Run {
         if frames.is_empty() {
             return Ok(());
         }
-        self.replica
+        replica
             .replicate(&frames)
             .map_err(|e| format!("step {step}: replica refuses its primary's records: {e}"))?;
         self.outcome.replica_pulls += 1;
@@ -409,13 +490,45 @@ impl Run {
         self.store
             .sync_puts()
             .map_err(|e| format!("writing the held puts at the end fails: {e}"))?;
-        while self.replica.log_records() < self.store.log_records() {
+        while self
+            .replica
+            .as_ref()
+            .is_some_and(|replica| replica.log_records() < self.store.log_records())
+        {
             self.pull(STEPS, usize::MAX)?;
         }
-        if entries_of(&self.replica) != entries_of(&self.store) {
+        if let Some(replica) = &self.replica
+            && entries_of(replica) != entries_of(&self.store)
+        {
             return Err("the replica holds other values".to_owned());
         }
         Ok(())
+    }
+
+    /// How long the key file is, or 0 if values are not sealed.
+    fn key_file_len(&self) -> usize {
+        let Some(keys) = &self.keys else {
+            return 0;
+        };
+        keys.clone().read_all().map_or(0, |bytes| bytes.len())
+    }
+
+    /// Sometimes, when values are sealed, makes the next write to the
+    /// key file fail. Returns whether it did.
+    fn maybe_key_fault(&mut self) -> bool {
+        let Some(keys) = &self.keys else {
+            return false;
+        };
+        if !self.rng.percent(KEY_FAULT_PERCENT) {
+            return false;
+        }
+        let fault = KeyFault {
+            torn: self.rng.below(MAX_TORN) as usize,
+            garbage: self.rng.percent(50).then(|| self.rng.next_u64()),
+            new_survives: self.rng.percent(50),
+        };
+        keys.fail_next_write(fault);
+        true
     }
 
     /// Commits and puts as they arrive together: to the table that keeps
@@ -509,6 +622,10 @@ mod tests {
     const FULL_SEEDS: u64 = 10_000;
 
     fn run_seeds(seeds: u64) -> Outcome {
+        run_seeds_of(seeds, run)
+    }
+
+    fn run_seeds_of(seeds: u64, run: fn(u64) -> Result<Outcome, String>) -> Outcome {
         let mut total = Outcome::default();
         for seed in 0..seeds {
             let outcome = run(seed).unwrap_or_else(|error| {
@@ -527,8 +644,50 @@ mod tests {
             total.in_flight_lost += outcome.in_flight_lost;
             total.refused_after_a_failure += outcome.refused_after_a_failure;
             total.replica_pulls += outcome.replica_pulls;
+            total.key_faults += outcome.key_faults;
         }
         total
+    }
+
+    #[test]
+    fn same_seed_runs_the_same_way_sealed() {
+        let outcome = |seed| run_sealed(seed).map(|outcome| outcome.trace);
+        assert_eq!(outcome(42), outcome(42));
+    }
+
+    /// Sealed, the promises are only tested if keys are held, restarts
+    /// lose puts and the key file fails.
+    #[test]
+    fn faults_actually_happen_sealed() {
+        let total = run_seeds_of(QUICK_SEEDS, run_sealed);
+
+        assert!(total.early >= 5_000, "{total:?}");
+        assert!(total.waited >= 2_000, "{total:?}");
+        assert!(total.restarts >= 2_000, "{total:?}");
+        assert!(total.restarts_that_lost >= 500, "{total:?}");
+        assert!(total.key_faults >= 100, "{total:?}");
+    }
+
+    #[test]
+    #[ignore = "10,000 seeds; run with --ignored"]
+    fn ten_thousand_seeds_sealed_plain() {
+        let seeds = std::env::var(SEEDS_ENV)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(FULL_SEEDS);
+        let total = run_seeds_of(seeds, run_sealed);
+        println!(
+            "plain tables with sealed values, {seeds} seeds: {} groups of puts answered before \
+             they or their keys were on disk, {} writes that waited for it, {} restarts, {} of \
+             them lost the last puts ({} groups in all, never anything else), {} writes to the \
+             key file failed; the store opened again every time",
+            total.early,
+            total.waited,
+            total.restarts,
+            total.restarts_that_lost,
+            total.early_lost,
+            total.key_faults,
+        );
     }
 
     #[test]

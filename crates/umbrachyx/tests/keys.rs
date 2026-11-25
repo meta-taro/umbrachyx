@@ -541,3 +541,123 @@ fn a_failed_write_of_keys_made_elsewhere_leaves_none_of_them() {
     assert_eq!(reopened.get(b"player/2"), Some(&[2; KEY_LEN]));
     assert_eq!(reopened.get(b"player/1"), None);
 }
+
+/// Keys made to be held are in use at once, for values that are not on
+/// disk yet either, and reach the file with one write when asked.
+#[test]
+fn keys_held_are_in_use_at_once_and_in_the_file_once_written() {
+    let dir = TempDir::new("held");
+    let mut keys = dir.open().expect("opens");
+
+    keys.make_keys_held([&b"session/1"[..], b"session/2"].into_iter())
+        .expect("makes the keys");
+
+    let first = *keys.get(b"session/1").expect("in use");
+    assert!(keys.has_held());
+    let on_disk = dir.open().expect("opens what is on disk");
+    assert_eq!(on_disk.get(b"session/1"), None, "not in the file yet");
+
+    keys.write_held().expect("writes them");
+
+    assert!(!keys.has_held());
+    let reopened = dir.open().expect("reopens");
+    assert_eq!(reopened.get(b"session/1"), Some(&first));
+    assert!(reopened.get(b"session/2").is_some());
+}
+
+/// A process that ends with keys held loses them, and the file it
+/// leaves opens with the keys it had.
+#[test]
+fn keys_held_when_the_process_ends_are_gone_and_the_file_opens() {
+    let dir = TempDir::new("held-lost");
+    let mut keys = dir.open().expect("opens");
+    let kept = keys.key_for(b"player/1").expect("makes a durable key");
+    keys.make_keys_held(std::iter::once(&b"session/1"[..]))
+        .expect("makes a held key");
+    drop(keys);
+
+    let reopened = dir.open().expect("reopens");
+
+    assert_eq!(reopened.get(b"player/1"), Some(&kept));
+    assert_eq!(reopened.get(b"session/1"), None);
+}
+
+/// A key made durable takes the held ones into the file with it, ahead
+/// of it: none is left behind a later one.
+#[test]
+fn a_key_made_durable_takes_the_held_ones_with_it() {
+    let dir = TempDir::new("held-then-durable");
+    let mut keys = dir.open().expect("opens");
+    keys.make_keys_held(std::iter::once(&b"session/1"[..]))
+        .expect("makes a held key");
+    let held = *keys.get(b"session/1").expect("in use");
+
+    let durable = keys.key_for(b"player/1").expect("makes a durable key");
+
+    assert!(!keys.has_held());
+    let reopened = dir.open().expect("reopens");
+    assert_eq!(reopened.get(b"session/1"), Some(&held));
+    assert_eq!(reopened.get(b"player/1"), Some(&durable));
+}
+
+/// A write of held keys that fails leaves them in use and held, and the
+/// next write puts them all in the file.
+#[test]
+fn a_failed_write_of_held_keys_keeps_them_for_the_next_write() {
+    let dir = TempDir::new("held-fails");
+    let mut keys = Keys::open(FailNextWrite::new(&dir.keys())).expect("opens");
+    keys.make_keys_held([&b"session/1"[..], b"session/2"].into_iter())
+        .expect("makes the keys");
+    let first = *keys.get(b"session/1").expect("in use");
+
+    assert!(keys.write_held().is_err(), "the write was made to fail");
+
+    assert!(keys.has_held());
+    assert_eq!(keys.get(b"session/1"), Some(&first));
+    keys.write_held().expect("the next write goes through");
+    assert!(!keys.has_held());
+    let reopened = dir.open().expect("reopens");
+    assert_eq!(reopened.get(b"session/1"), Some(&first));
+    assert!(reopened.get(b"session/2").is_some());
+}
+
+/// Erasing a subject whose key is still held writes the file without
+/// it, and with every other key in use.
+#[test]
+fn erasing_a_subject_whose_key_is_held_leaves_the_file_without_it() {
+    let dir = TempDir::new("held-erased");
+    let mut keys = dir.open().expect("opens");
+    keys.make_keys_held([&b"session/1"[..], b"session/2"].into_iter())
+        .expect("makes the keys");
+    let erased = *keys.get(b"session/1").expect("in use");
+    let other = *keys.get(b"session/2").expect("in use");
+
+    assert!(keys.erase(b"session/1").expect("erases"));
+
+    assert!(!keys.has_held(), "the file written holds every key in use");
+    let bytes = std::fs::read(dir.keys()).expect("reads the file");
+    assert!(!contains(&bytes, &erased));
+    let reopened = dir.open().expect("reopens");
+    assert_eq!(reopened.get(b"session/1"), None);
+    assert_eq!(reopened.get(b"session/2"), Some(&other));
+}
+
+/// What may be copied elsewhere leaves out the keys the file does not
+/// hold yet, and has them once it does.
+#[test]
+fn keys_held_are_not_among_those_copied_elsewhere() {
+    let dir = TempDir::new("held-not-copied");
+    let mut keys = dir.open().expect("opens");
+    let durable = keys.key_for(b"player/1").expect("makes a durable key");
+    keys.make_keys_held(std::iter::once(&b"session/1"[..]))
+        .expect("makes a held key");
+    let held = *keys.get(b"session/1").expect("in use");
+
+    let copied = keys.durable_entries().expect("lists the keys");
+
+    assert!(contains(&copied, &durable));
+    assert!(!contains(&copied, &held));
+    keys.write_held().expect("writes it");
+    let copied = keys.durable_entries().expect("lists the keys");
+    assert!(contains(&copied, &held));
+}
