@@ -45,7 +45,7 @@ use crate::log::{Edit, LogError, Storage};
 mod copies;
 mod turns;
 
-use turns::{Job, Slot, Turn, Turns, lock};
+use turns::{Job, Slot, Turns, lock};
 
 type Answer = Result<CommitId, StoreError>;
 
@@ -574,7 +574,8 @@ impl Writer {
         if self.engine.is_following() {
             answer.fill(Err(StoreError::ReadOnly));
         } else {
-            lock(&self.engine.turns().queue).jobs.push_back(Job {
+            self.engine.turns().queue(Job {
+                waits_for_the_disk: !matches!(request, Request::SealedPut(_)),
                 request,
                 len,
                 answer: Arc::clone(&answer),
@@ -591,7 +592,7 @@ impl Writer {
     /// commits need not wait for the sync: they ask each [`Pending`] with
     /// [`Pending::poll`] afterwards.
     pub fn write_queued(&self) {
-        let _turn = self.engine.turns().take();
+        let _turn = self.engine.turns().take_to_write_the_queue();
         self.engine.write_queue();
     }
 
@@ -740,10 +741,8 @@ impl Pending {
                 queue = turns.wait(queue);
                 continue;
             }
-            queue.is_taken = true;
-            drop(queue);
             {
-                let _turn = Turn(turns);
+                let _turn = turns.take_found_free(queue);
                 let group = turns.next_group();
                 self.engine.write(group);
             }

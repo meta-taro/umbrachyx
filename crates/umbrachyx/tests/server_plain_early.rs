@@ -269,13 +269,16 @@ fn clients_writing_the_same_keys_at_once_leave_what_the_log_replays() {
     const VALUE_LEN: usize = 256 * 1024;
     for is_sealed in [false, true] {
         let dir = TempDir::new(if is_sealed { "same-sealed" } else { "same" });
-        let (committer, address) = serve(dir.store(is_sealed), Duration::from_millis(50));
+        // No timer empties what is held, so the bound is reached, and
+        // the put that reaches it goes to the thread that writes.
+        let (committer, address) = serve(dir.store(is_sealed), A_LONG_TIME);
         let mut client = connect(address);
         for key in 0..KEYS {
             // Every subject has a key before the clients start.
             let key = format!("cache/{key}/blob");
             assert_eq!(ask_line(&mut client, &["SET", &key, "start"]), "+OK");
         }
+        let held_before = committer.writer().puts_held_early();
 
         let writers: Vec<_> = (0..CLIENTS)
             .map(|id| {
@@ -298,13 +301,10 @@ fn clients_writing_the_same_keys_at_once_leave_what_the_log_replays() {
             .map(|key| format!("cache/{key}/blob"))
             .map(|key| (key.clone(), get(&mut client, &key)))
             .collect();
-        let held = committer.writer().puts_held_early();
+        let held = committer.writer().puts_held_early() - held_before;
         let all = (CLIENTS * ROUNDS) as u64;
         assert!(held > 0, "no put was held where it was read");
-        assert!(
-            held < all + KEYS as u64,
-            "no put went to the thread that writes"
-        );
+        assert!(held < all, "no put went to the thread that writes");
         drop(committer.stop());
         let store = dir.open(is_sealed);
         for (key, value) in shown {

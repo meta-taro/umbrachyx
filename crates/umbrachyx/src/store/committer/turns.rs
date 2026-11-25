@@ -15,6 +15,9 @@ pub(super) struct Job {
     /// The bytes the request adds to a group's payload.
     pub(super) len: usize,
     pub(super) answer: Arc<Slot>,
+    /// Whether writing it waits for the disk: anything but puts that
+    /// are answered before they are on it.
+    pub(super) waits_for_the_disk: bool,
 }
 
 /// Where a commit's answer is left for whoever sent it.
@@ -49,6 +52,12 @@ pub(super) struct Turns {
 pub(super) struct Queue {
     pub(super) jobs: VecDeque<Job>,
     pub(super) is_taken: bool,
+    /// Whether whoever has the turn may keep it for as long as the disk
+    /// takes, or longer: every turn but one taken to hold puts, or to
+    /// write a queue that has only such puts in it so far.
+    is_long: bool,
+    /// How many of the jobs queued wait for the disk.
+    long_jobs: usize,
     /// How many threads wait to be told that a turn ended.
     waiting: usize,
     /// Whether whoever has the turn waits for a replica to hold what it
@@ -67,6 +76,7 @@ impl Drop for Turn<'_> {
     fn drop(&mut self) {
         let mut queue = lock(&self.0.queue);
         queue.is_taken = false;
+        queue.is_long = false;
         // Telling costs a system call on some systems even when nobody
         // listens, and a thread that answers puts itself ends a turn
         // for every connection it reads.
@@ -106,14 +116,28 @@ impl Turns {
         queue
     }
 
+    /// Queues `job` for whoever writes next.
+    pub(super) fn queue(&self, job: Job) {
+        let mut queue = lock(&self.queue);
+        queue.long_jobs += usize::from(job.waits_for_the_disk);
+        queue.jobs.push_back(job);
+    }
+
     /// The turn to write, if within `at_most` nobody has it and nothing
     /// is queued: for a thread that must not sleep, and whose write must
     /// not go ahead of one queued before it. It looks again and again
-    /// rather than sleep, so `at_most` is a few turns' length, no more.
+    /// rather than sleep, so `at_most` is a few turns' length, no more;
+    /// and it does not look at all while the turn is one that may last
+    /// as long as the disk takes, or a write that waits for the disk is
+    /// queued: looking through a sync kept every connection of the
+    /// thread waiting, its reads too.
     pub(super) fn take_if_idle(&self, at_most: Duration) -> Option<Turn<'_>> {
         let since = Instant::now();
         loop {
             let mut queue = lock(&self.queue);
+            if queue.long_jobs > 0 || (queue.is_taken && queue.is_long) {
+                return None;
+            }
             if !queue.is_taken && queue.jobs.is_empty() {
                 queue.is_taken = true;
                 return Some(Turn(self));
@@ -128,11 +152,34 @@ impl Turns {
 
     /// Waits for the turn to write.
     pub(super) fn take(&self) -> Turn<'_> {
+        let mut queue = self.wait_until_free();
+        queue.is_taken = true;
+        queue.is_long = true;
+        Turn(self)
+    }
+
+    /// Waits for the turn as [`Turns::take`] does, to write the queue:
+    /// the turn is long only once [`Turns::next_group`] hands it a job
+    /// that waits for the disk.
+    pub(super) fn take_to_write_the_queue(&self) -> Turn<'_> {
+        let mut queue = self.wait_until_free();
+        queue.is_taken = true;
+        Turn(self)
+    }
+
+    fn wait_until_free(&self) -> MutexGuard<'_, Queue> {
         let mut queue = lock(&self.queue);
         while queue.is_taken {
             queue = self.wait(queue);
         }
+        queue
+    }
+
+    /// Takes the turn for a thread that found it free under the queue's
+    /// lock, to write a group.
+    pub(super) fn take_found_free<'a>(&'a self, mut queue: MutexGuard<'_, Queue>) -> Turn<'a> {
         queue.is_taken = true;
+        queue.is_long = true;
         Turn(self)
     }
 
@@ -175,6 +222,7 @@ impl Turns {
             }
             if !queue.is_taken {
                 queue.is_taken = true;
+                queue.is_long = true;
                 return Some(Turn(self));
             }
             queue = self.wait(queue);
@@ -204,6 +252,10 @@ impl Turns {
                 break;
             }
             len += job.len;
+            if job.waits_for_the_disk {
+                queue.long_jobs -= 1;
+                queue.is_long = true;
+            }
             group.extend(queue.jobs.pop_front());
         }
         group

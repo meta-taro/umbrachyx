@@ -1923,10 +1923,16 @@ So a table can be declared to keep no history at all.
   of one connection together, under the store's lock, so the map and
   the held puts keep one order and everything above still holds as
   written. It never sleeps for them. It looks for the turn for 100
-  microseconds at most (none on a machine with one processor), and if
-  somebody is writing, something is queued that they must not go ahead
-  of, or 4 MiB is held already, they go to the thread that writes as
-  before. Only the store makes keys: a subject's first value is sealed
+  microseconds at most (none on a machine with one processor), and only
+  while whoever has it is another thread holding puts: if a write that
+  waits for the disk has the turn or is queued, if something is queued
+  that they must not go ahead of, or if 4 MiB is held already, they go
+  to the thread that writes as before. Looking through a sync was tried
+  first and kept every connection of the serving thread waiting: beside
+  clients writing a table with history, in a Linux container, reads
+  fell from about 200,000 a second to 65,000–108,000 and their 99th
+  percentile rose from 0.18 ms to 0.9; not looking then, 188,000–193,000
+  and 0.18. Only the store makes keys: a subject's first value is sealed
   there, and the serving threads seal for the subject from then on.
   On one laptop, two builds in turn (`bench/ab.sh <old> <new> 3
   plain-async`,
@@ -1938,7 +1944,11 @@ So a table can be declared to keep no history at all.
   threads four puts in five went to the thread that writes after all)
   and for 2,000 (fewer writes than 100), and a higher bound on what is
   held (48 MiB gave a tenth more sent 64 at a time, and was not what
-  held the rate down). The release machines have not measured it.
+  held the rate down). A subject for every key changes nothing while
+  the subjects are new, since each new one waits for the key file
+  ([#36](https://github.com/meta-taro/umbrachyx/issues/36)), and gains
+  as above once they have keys. The release machines have not measured
+  it.
 - **Only the server's path answers first.** A put made with the
   command-line tool or the MCP tool is on disk when answered, whatever
   the table: there the caller waits anyway, and one promise fewer has to
