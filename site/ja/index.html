@@ -443,6 +443,42 @@
           <li><b>差分：</b>2 つの枝、または 2 つの確定のあいだ。</li>
           <li><b>承認待ちの一覧：</b>それぞれの差分と、承認・却下のボタン。</li>
         </ul>
+        <figure class="shot">
+          <img
+            src="../screens/key-history.png"
+            width="1280"
+            height="800"
+            loading="lazy"
+            alt="dbboard の画面。キー player/1/gems の履歴。シーズン開始で 100、ゲームサーバーのクエスト報酬で 150 と 175、エージェントが書いた補填で 225。それぞれに、誰が・なぜ・いつ書いたかが付いている。"
+          />
+          <figcaption>
+            <b>キーの履歴。</b>あるプレイヤーの gems が、最初の値からいまの値になるまで。変更ごとに、誰が・なぜ・いつ。データは作りものです。
+          </figcaption>
+        </figure>
+        <figure class="shot">
+          <img
+            src="../screens/branch-diff.png"
+            width="1280"
+            height="800"
+            loading="lazy"
+            alt="dbboard の画面。確定の一覧と、その理由。選んだ確定（エージェントによる障害の補填）が 3 人の gems を変えていて、それぞれ前の値が並んでいる。"
+          />
+          <figcaption>
+            <b>1 つの変更の差分。</b>エージェントの確定が何を変えたかを、前の値と並べて。
+          </figcaption>
+        </figure>
+        <figure class="shot">
+          <img
+            src="../screens/review-pending.png"
+            width="1280"
+            height="800"
+            loading="lazy"
+            alt="dbboard の承認のタブ。エージェントの変更が 1 件待っている。誰が書いたか、理由、変える・足す 5 つのキー、理由の欄、却下と承認のボタン。この画面で承認と却下ができるのは人だけ、と書いてある。"
+          />
+          <figcaption>
+            <b>承認待ちの変更。</b>誰が・なぜ・何を変えるのかと、承認・却下のボタン。押せるのは人だけです。
+          </figcaption>
+        </figure>
         <p>
           dbboard だけの仕掛けはありません。履歴は Redis のプロトコルの上の
           <code>UMBRA.*</code>

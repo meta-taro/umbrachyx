@@ -264,3 +264,21 @@ header h1 .quiet {
 table {
   background: rgba(8, 9, 18, 0.55);
 }
+
+/* Screens of a viewer, under the list of what it shows. Framed as the
+   picture at the top is. */
+.shot {
+  margin: 20px 0 24px;
+}
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.shot figcaption {
+  color: var(--fg-3);
+  font-size: 13.5px;
+  margin-top: 10px;
+}

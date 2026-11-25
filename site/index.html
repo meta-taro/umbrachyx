@@ -467,6 +467,46 @@
             reject.
           </li>
         </ul>
+        <figure class="shot">
+          <img
+            src="screens/key-history.png"
+            width="1280"
+            height="800"
+            loading="lazy"
+            alt="dbboard, its display set to Japanese. The history of the key player/1/gems: 100 when the season opened, 150 and 175 after quest rewards from the game server, 225 as compensation written by an agent, each with who wrote it, why and when."
+          />
+          <figcaption>
+            <b>The history of a key.</b> One player's gems, from the first value to the last:
+            each change with who made it, why and when. The data is made up, and dbboard's
+            display is set to Japanese here.
+          </figcaption>
+        </figure>
+        <figure class="shot">
+          <img
+            src="screens/branch-diff.png"
+            width="1280"
+            height="800"
+            loading="lazy"
+            alt="dbboard. A list of commits with their reasons; the one chosen, an agent's compensation for an outage, changed the gems of three players, each shown with the value it had before."
+          />
+          <figcaption>
+            <b>The diff of one change.</b> What an agent's commit changed, with the value each
+            key had before.
+          </figcaption>
+        </figure>
+        <figure class="shot">
+          <img
+            src="screens/review-pending.png"
+            width="1280"
+            height="800"
+            loading="lazy"
+            alt="dbboard, the tab for approvals. An agent's change waits: who wrote it, why, the five keys it changes or adds, a field for the reason, and buttons to reject or approve. A line says only a person can do either on this screen."
+          />
+          <figcaption>
+            <b>A change waiting.</b> Who wrote it, why, what it would change, and the buttons to
+            approve or reject, which only a person can press.
+          </figcaption>
+        </figure>
         <p>
           Nothing in this is special to dbboard. The history is asked for with
           <code>UMBRA.*</code> commands over the Redis protocol, and any client that speaks
