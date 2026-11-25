@@ -5,7 +5,9 @@
 - **Backup and restore.** `umbrachyx backup <directory>` copies the log
   and the keys as they are at one moment, and adds only what was written
   since when run again; `umbrachyx restore <directory>` writes a new
-  store from it and checks every record on the way. A backup stopped
+  store from it and checks every record on the way; `umbrachyx backup
+  <directory> --check` makes the same checks and writes nothing, to ask
+  whether a backup would restore without restoring it. A backup stopped
   part way stays what it was before. An erasure reaches a backup with
   the next one begun after it. `umbrachyx serve --backup-to <directory>
   [--backup-every <seconds>]` keeps such a backup up to date while the

@@ -143,7 +143,9 @@ $ umbrachyx history agent/support player/42/gems
   [`docs/decisions.md`](docs/decisions.md#tables-that-keep-no-history-plain-and-plain-async).
 - **`umbrachyx backup <directory>` copies the log and the keys as they
   are at one moment**, and `umbrachyx restore <directory>` writes a new
-  store from the copy. Running it again adds what was written since. A
+  store from the copy. Running it again adds what was written since;
+  `umbrachyx backup <directory> --check` says whether the backup would
+  restore, without restoring it. A
   subject erased since has no key in the backup afterwards; older copies
   of the backup still do, so keep them only as long as an erasure may
   take. `umbrachyx serve --backup-to <directory>` keeps the backup up

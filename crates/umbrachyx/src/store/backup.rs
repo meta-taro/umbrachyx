@@ -517,6 +517,80 @@ fn remove_other_keys(target: &mut impl Target, manifest: &Manifest) -> Result<()
     Ok(())
 }
 
+/// What a backup that checked out holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checked {
+    pub records: u64,
+    /// Bytes of its copy of the log.
+    pub bytes: u64,
+    /// Whether it holds a key file.
+    pub has_keys: bool,
+}
+
+/// A backup read whole and found to be what its manifest says.
+struct Read {
+    manifest: Manifest,
+    log: Vec<u8>,
+    keys: Option<Vec<u8>>,
+}
+
+/// Reads the backup at `target` and checks it as restoring does: every
+/// record of the copy of the log decodes and they are the records the
+/// manifest names, and the key file is the one it names.
+fn read_whole(target: &mut impl Source) -> Result<Read, BackupError> {
+    let manifest = Manifest::read(target)?
+        .filter(Manifest::is_started)
+        .ok_or(BackupError::NoBackup)?;
+    let len = usize::try_from(manifest.log_len)
+        .map_err(|_| BackupError::Damaged("the manifest names more bytes than fit in memory"))?;
+    if target.log_len()? < manifest.log_len {
+        return Err(BackupError::Damaged(
+            "the copy of the log is shorter than the manifest says",
+        ));
+    }
+    let log = target.log_read(0, len)?;
+    let copied = log::check_copy(&log)?;
+    if (copied.id, copied.records, copied.chain) != (manifest.id, manifest.records, manifest.chain)
+    {
+        return Err(BackupError::Damaged(
+            "the copy of the log is not what the manifest says",
+        ));
+    }
+    let keys = match manifest.keys {
+        Some(hash) => {
+            let bytes = target
+                .read(&manifest.keys_name())?
+                .ok_or(BackupError::Damaged("the key file is missing"))?;
+            if *blake3::hash(&bytes).as_bytes() != hash {
+                return Err(BackupError::Damaged(
+                    "the key file is not what the manifest says",
+                ));
+            }
+            Some(bytes)
+        }
+        None => None,
+    };
+    Ok(Read {
+        manifest,
+        log,
+        keys,
+    })
+}
+
+/// Whether the backup at `target` would restore, without restoring it:
+/// what `restore` checks before it writes, and nothing written. It does
+/// not say that the place restored to is free, nor that the key file
+/// holds a key for every subject of the log: a store restored without
+/// one says so when it opens.
+pub fn verify(target: &mut impl Source) -> Result<Checked, BackupError> {
+    let read = read_whole(target)?;
+    Ok(Checked {
+        records: read.manifest.records,
+        bytes: read.manifest.log_len,
+        has_keys: read.keys.is_some(),
+    })
+}
+
 /// Writes the store the backup at `target` holds into `log` and `keys`,
 /// which must both be empty: a new place, not a store that exists. Every
 /// record and the key file are checked against the manifest first; a
@@ -529,36 +603,13 @@ pub fn restore(
     log: &mut impl Storage,
     keys: Option<&mut dyn KeyStorage>,
 ) -> Result<Restored, BackupError> {
-    let manifest = Manifest::read(target)?
-        .filter(Manifest::is_started)
-        .ok_or(BackupError::NoBackup)?;
-    let len = usize::try_from(manifest.log_len)
-        .map_err(|_| BackupError::Damaged("the manifest names more bytes than fit in memory"))?;
-    if target.log_len()? < manifest.log_len {
-        return Err(BackupError::Damaged(
-            "the copy of the log is shorter than the manifest says",
-        ));
-    }
-    let bytes = target.log_read(0, len)?;
-    let copied = log::check_copy(&bytes)?;
-    if (copied.id, copied.records, copied.chain) != (manifest.id, manifest.records, manifest.chain)
-    {
-        return Err(BackupError::Damaged(
-            "the copy of the log is not what the manifest says",
-        ));
-    }
-    let key_file = match manifest.keys {
-        Some(hash) => {
-            let bytes = target
-                .read(&manifest.keys_name())?
-                .ok_or(BackupError::Damaged("the key file is missing"))?;
-            if *blake3::hash(&bytes).as_bytes() != hash {
-                return Err(BackupError::Damaged(
-                    "the key file is not what the manifest says",
-                ));
-            }
-            Some((keys.ok_or(BackupError::NeedsKeys)?, bytes))
-        }
+    let Read {
+        manifest,
+        log: bytes,
+        keys: key_file,
+    } = read_whole(target)?;
+    let key_file = match key_file {
+        Some(bytes) => Some((keys.ok_or(BackupError::NeedsKeys)?, bytes)),
         None => None,
     };
     if !log.read_all()?.iter().all(|&byte| byte == 0) {

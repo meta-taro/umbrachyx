@@ -1,10 +1,12 @@
 //! Where `serve` keeps a backup of the store, and how often it brings it
-//! up to date.
+//! up to date. And `backup --check`, which asks a backup whether it
+//! would restore.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Duration;
 
-use umbrachyx::store::backup::{self, DirTarget};
+use umbrachyx::store::backup::{self, DirSource, DirTarget};
 
 use crate::{Args, FileStore};
 
@@ -35,4 +37,23 @@ pub fn place(store: &mut FileStore, args: &Args) -> Result<Option<(PathBuf, Dura
     backup::check(store, &mut target).map_err(|e| format!("{dir}: {e}"))?;
     eprintln!("backing up to {dir} every {} s", every.as_secs_f64());
     Ok(Some((PathBuf::from(dir), every)))
+}
+
+/// `backup <directory> --check`: reads the backup in the directory and
+/// says whether it would restore. Nothing is written, the directory
+/// included: a place with no backup is not made into one.
+pub fn check(args: &Args) -> Result<ExitCode, String> {
+    let [dir] = args.exactly()?;
+    let checked =
+        backup::verify(&mut DirSource::new(dir.as_ref())).map_err(|e| format!("{dir}: {e}"))?;
+    let keys = if checked.has_keys {
+        "its key file"
+    } else {
+        "no key file"
+    };
+    println!(
+        "the backup in {dir} would restore: {} records ({} bytes of log) and {keys}, as it says",
+        checked.records, checked.bytes
+    );
+    Ok(ExitCode::SUCCESS)
 }
