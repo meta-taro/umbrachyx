@@ -18,7 +18,11 @@
   `--feed-replicas-on <port>`, for the
   records after the ones it holds, answers reads with the same commits
   under the same ids, and refuses writes with `READONLY`.
-  `UMBRA.REPLICATION` says how far it is, and why it stopped if it did.
+  `UMBRA.REPLICATION` says how far it is, and why it stopped if it did;
+  `umbrachyx replication [--host <address>] [--port <port>]` asks a
+  running server the same from the command line, opens no log, and
+  exits with 1 if a replica stopped or cannot reach its primary, or a
+  primary refuses writes because no replica keeps up.
   A replica holding another log, more records than its primary, or
   records its primary does not hold is sent nothing. For trials only:
   nothing is measured on two machines yet.
