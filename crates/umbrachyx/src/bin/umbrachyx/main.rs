@@ -424,7 +424,7 @@ fn restore(path: &str, args: &Args) -> Result<ExitCode, String> {
             // Whatever is left is ours: neither file was there before.
             let _ = std::fs::remove_file(path);
             let _ = std::fs::remove_file(&keys_path);
-            Err(format!("{dir}: {error}"))
+            Err(backups::refused(dir, &error))
         }
     }
 }

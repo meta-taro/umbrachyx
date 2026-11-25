@@ -1293,6 +1293,13 @@ from the copy.
   backup went and not that the place still holds it: a place lost while
   nothing is written is found at the next write. `backup <directory>
   --check` is what asks the place itself.
+- **On Windows a backup cannot be read while a server writes it.** A
+  server that keeps its backup in a place holds the copy of the log
+  while it writes one, and for that time a `restore` or a check of the
+  place is refused by the system ("another process has locked a portion
+  of the file"). Nothing is written by the refused command and nothing
+  is wrong with the backup; the command says so and that it can be run
+  again. The server holds the place only while a backup runs.
 - **A backup read while another finishes is read again.** A backup
   writes its key file, then its manifest, then removes the key file of
   the backup before; a restore or a check that began with the old

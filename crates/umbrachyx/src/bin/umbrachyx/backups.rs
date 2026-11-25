@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use umbrachyx::store::backup::{self, DirSource, DirTarget};
+use umbrachyx::store::backup::{self, BackupError, DirSource, DirTarget};
 
 use crate::{Args, FileStore, replication};
 
@@ -46,7 +46,7 @@ pub fn place(store: &mut FileStore, args: &Args) -> Result<Option<(PathBuf, Dura
 pub fn verify(args: &Args) -> Result<ExitCode, String> {
     let [dir] = args.exactly()?;
     let checked =
-        backup::verify(&mut DirSource::new(dir.as_ref())).map_err(|e| format!("{dir}: {e}"))?;
+        backup::verify(&mut DirSource::new(dir.as_ref())).map_err(|e| refused(dir, &e))?;
     let keys = if checked.has_keys {
         "its key file"
     } else {
@@ -98,4 +98,50 @@ pub fn status(args: &Args, default_port: u16) -> Result<ExitCode, String> {
     }
     println!("failing: no");
     Ok(ExitCode::SUCCESS)
+}
+
+/// What Windows answers a read of a part of a file another process has
+/// locked.
+const LOCKED_ON_WINDOWS: i32 = 33;
+
+/// Why the backup in `dir` could not be read, as it is said to whoever
+/// asked. A server that keeps its backup there holds the copy of the log
+/// while it writes one, and on Windows nobody else can read it for that
+/// time: the backup is not damaged, and asking again works.
+pub fn refused(dir: &str, error: &BackupError) -> String {
+    let is_being_written = cfg!(windows)
+        && matches!(error, BackupError::Io(error) if error.raw_os_error() == Some(LOCKED_ON_WINDOWS));
+    if is_being_written {
+        format!(
+            "{dir}: {error}\na server may be writing a backup there, and holds it while it does: \
+             nothing is wrong with the backup, run this again"
+        )
+    } else {
+        format!("{dir}: {error}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_backup_locked_on_windows_is_said_to_be_one_to_ask_again() {
+        let locked = BackupError::Io(std::io::Error::from_raw_os_error(LOCKED_ON_WINDOWS));
+
+        let said = refused("the-backup", &locked);
+
+        assert!(said.starts_with("the-backup: "), "{said}");
+        // Elsewhere that number is another error, and nothing is added.
+        assert_eq!(said.contains("run this again"), cfg!(windows), "{said}");
+    }
+
+    #[test]
+    fn a_damaged_backup_is_not_said_to_be_one_to_ask_again() {
+        let damaged = BackupError::Damaged("the key file is missing");
+
+        let said = refused("the-backup", &damaged);
+
+        assert!(!said.contains("run this again"), "{said}");
+    }
 }
