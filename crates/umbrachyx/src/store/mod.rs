@@ -1621,7 +1621,9 @@ fn cells_of(
 ) -> Vec<(Bytes, Bytes)> {
     let mut written: BTreeMap<&[u8], Option<&[u8]>> = BTreeMap::new();
     for edit in &commit.changes {
-        let is_live = match written.get(edit.key.as_slice()) {
+        // Only a removal asks whether the key is live, and asking walks
+        // the tree: a write that sets a key is not made to.
+        let is_live = || match written.get(edit.key.as_slice()) {
             Some(value) => value.is_some(),
             None => {
                 let held = if is_latest(&edit.key) {
@@ -1632,7 +1634,7 @@ fn cells_of(
                 held.is_some_and(|bytes| decode_cell(bytes).value.is_some())
             }
         };
-        if edit.value.is_none() && !is_live {
+        if edit.value.is_none() && !is_live() {
             continue;
         }
         written.insert(&edit.key, edit.value.as_deref());
