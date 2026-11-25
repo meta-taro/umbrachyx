@@ -6,6 +6,13 @@
   otherwise.** A connection waiting for its `SET`s to be written was
   read each time the thread that writes finished a group, to hear only
   that nothing had arrived: one system call a `SET` for nothing.
+- **Sealing and opening a value set its key up once.** The store puts
+  AES-SIV together from RustCrypto's `aes`, `cmac` and `ctr` itself,
+  where it used their `aes-siv`, which expands a key for every value.
+  The bytes are the same, and the tests hold them to `aes-siv`'s. On
+  one laptop a value of 32 bytes is sealed in 56–57 ns where it took
+  185–191, and opened in 72–73 where it took 181–196
+  (`bench/results/2026-11-25-laptop-siv/`).
 - **Backup and restore.** `umbrachyx backup <directory>` copies the log
   and the keys as they are at one moment, and adds only what was written
   since when run again; `umbrachyx restore <directory>` writes a new
