@@ -10,7 +10,10 @@
   whether a backup would restore without restoring it. Both read the
   backup's copy of the log a megabyte at a time, not whole: on one
   laptop, for a backup of 1,000,000 SETs, 8 MB where it was 590 MB
-  (`bench/results/2026-11-25-laptop-restore/`). A backup stopped
+  (`bench/results/2026-11-25-laptop-restore/`). A restored store is
+  written beside its place and moved there when it is whole, so a
+  restore that is stopped leaves no store with only some of its
+  records, and one made there meanwhile is not replaced. A backup stopped
   part way stays what it was before. An erasure reaches a backup with
   the next one begun after it. `umbrachyx serve --backup-to <directory>
   [--backup-every <seconds>]` keeps such a backup up to date while the

@@ -94,7 +94,10 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               lost meanwhile is found at the next write:
                               backup <directory> --check asks the place
   restore <directory>         writes the store the backup in <directory>
-                              holds to $UMBRACHYX_DB, which must not exist yet
+                              holds to $UMBRACHYX_DB, which must not exist
+                              yet. The store is written beside that name
+                              and moved there when it is whole: a restore
+                              that is stopped leaves no store there
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
         [--sync-every MS] [--public-key K [--require-auth]]
         [--backup-to D [--backup-every S]] [--feed-replicas-on P [--wait-for-replica S]] [--follow H:P]
@@ -399,8 +402,8 @@ fn back_up(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {
 }
 
 /// Writes the store a backup holds to `path`, where there must be none.
-/// The files this made are removed again if the backup is refused, so a
-/// failed restore leaves no empty store behind.
+/// It is written beside `path` and moved there when it is whole, so a
+/// restore that is stopped or refused leaves no store behind.
 fn restore(path: &str, args: &Args) -> Result<ExitCode, String> {
     let [dir] = args.exactly()?;
     let keys_path = format!("{path}.keys");
@@ -411,22 +414,11 @@ fn restore(path: &str, args: &Args) -> Result<ExitCode, String> {
             ));
         }
     }
-    let mut target = DirSource::new(dir.as_ref());
-    let mut log = FileStorage::open(path.as_ref()).map_err(|e| format!("{path}: {e}"))?;
-    let mut keys = FileKeyStorage::new(keys_path.as_ref());
-    match backup::restore(&mut target, &mut log, Some(&mut keys)) {
-        Ok(restored) => {
-            println!("restored {} records from {dir} to {path}", restored.records);
-            Ok(ExitCode::SUCCESS)
-        }
-        Err(error) => {
-            drop(log);
-            // Whatever is left is ours: neither file was there before.
-            let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(&keys_path);
-            Err(backups::refused(dir, &error))
-        }
-    }
+    let mut source = DirSource::new(dir.as_ref());
+    let restored = backup::restore_to(&mut source, path.as_ref(), keys_path.as_ref())
+        .map_err(|error| backups::refused(dir, &error))?;
+    println!("restored {} records from {dir} to {path}", restored.records);
+    Ok(ExitCode::SUCCESS)
 }
 
 fn commit(store: &mut FileStore, args: &Args) -> Result<ExitCode, String> {

@@ -5,8 +5,9 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use super::{KEYS_PREFIX, LOG, MANIFEST, Source, Target};
-use crate::log::sync_parent_dir;
+use super::{BackupError, KEYS_PREFIX, LOG, MANIFEST, Restored, Source, Target, restore};
+use crate::keys::{FileKeyStorage, KeyStorage};
+use crate::log::{FileStorage, Storage, sync_parent_dir};
 
 /// A backup kept in a directory of its own. The copy of the log is held
 /// open and locked, so two backups cannot write to one place at once.
@@ -217,4 +218,103 @@ impl Target for DirTarget {
             .filter(|name| is_backup_file(name))
             .collect())
     }
+}
+
+/// What is added to the name of a store's file while it is being
+/// restored.
+const RESTORING: &str = ".restoring";
+
+/// `path` with `suffix` added to its name.
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.to_owned().into_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Gives the file at `from` the name `to`, which must not be taken: a
+/// rename would replace a file made there meanwhile, a link does not.
+fn move_into_place(from: &Path, to: &Path) -> Result<(), BackupError> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => Ok(std::fs::remove_file(from)?),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(BackupError::NotEmpty),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Writes the store the backup at `source` holds to the files `log` and
+/// `keys`, neither of which may exist: a new place, not a store.
+///
+/// The store is written beside its place, under other names, and moved
+/// there when it is whole and durable: its log first, its keys last. So
+/// a restore that is stopped while it writes, by a signal or a power
+/// cut, leaves no file at the place; what it left beside the place is
+/// cleared by the next restore. Stopped between the two moves it leaves
+/// a log without its keys, which does not open and says so.
+///
+/// A store made at the place while this one was being written is not
+/// replaced: the restore is refused, and nothing of it is left there.
+pub fn restore_to(
+    source: &mut impl Source,
+    log: &Path,
+    keys: &Path,
+) -> Result<Restored, BackupError> {
+    if log.exists() || keys.exists() {
+        return Err(BackupError::NotEmpty);
+    }
+    let (log_beside, keys_beside) = (beside(log, RESTORING), beside(keys, RESTORING));
+    // Whoever holds this file writes the two beside the place, and
+    // nobody else clears them: a restore that cannot take it leaves them
+    // alone. Held until the store is in place, so no other restore
+    // empties the file while it is being given its name.
+    let mut held = FileStorage::open(&log_beside)?;
+    let restored = write_beside(source, &mut held, &keys_beside).and_then(|restored| {
+        move_both_into_place(&log_beside, &keys_beside, log, keys)?;
+        Ok(restored)
+    });
+    if restored.is_err() {
+        let _ = std::fs::remove_file(&log_beside);
+        let _ = std::fs::remove_file(&keys_beside);
+    }
+    drop(held);
+    restored
+}
+
+/// Restores into the two files beside the place, whatever an earlier
+/// restore left in them, and makes them durable.
+fn write_beside(
+    source: &mut impl Source,
+    log_beside: &mut FileStorage,
+    keys_beside: &Path,
+) -> Result<Restored, BackupError> {
+    log_beside.truncate(0)?;
+    match std::fs::remove_file(keys_beside) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let mut keys = FileKeyStorage::new(keys_beside);
+    restore(source, log_beside, Some(&mut keys as &mut dyn KeyStorage))
+}
+
+/// Gives the two files their names. The log first: it is the file a
+/// server makes when it starts, so if one has started at the place this
+/// is refused before anything of the restored store is there. Keys moved
+/// first would be left in that server's place, for it to add its own to.
+fn move_both_into_place(
+    log_beside: &Path,
+    keys_beside: &Path,
+    log: &Path,
+    keys: &Path,
+) -> Result<(), BackupError> {
+    move_into_place(log_beside, log)?;
+    if keys_beside.exists()
+        && let Err(refused) = move_into_place(keys_beside, keys)
+    {
+        // A key file that is not this store's: the log just placed is
+        // ours and opens with no other keys, so it is taken back.
+        let _ = std::fs::remove_file(log);
+        return Err(refused);
+    }
+    sync_parent_dir(log)?;
+    sync_parent_dir(keys)?;
+    Ok(())
 }
