@@ -355,3 +355,76 @@ fn an_answer_that_is_not_a_status_is_an_error() {
     assert_eq!(code, 2, "{out}{err}");
     assert!(out.is_empty(), "{out}");
 }
+
+#[test]
+fn a_primary_that_refuses_writes_says_so_and_exits_one_until_a_replica_holds_everything() {
+    let dir = TempDir::new("refuses");
+    dir.primary_and_replica();
+    let options = ["--feed-replicas-on", "0", "--wait-for-replica", "0.05"];
+    let primary = serve(&dir, "primary", &options);
+    // No replica asks yet: the write is in the primary's log only.
+    let only_here = first_line(primary.port, &["SET", "player/1/gems", "70"]);
+    assert!(only_here.starts_with("-NOTREPLICATED "), "{only_here}");
+
+    let (code, out, err) = dir.status(primary.port);
+
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(
+        out.contains("writes: refused until a replica holds everything\n"),
+        "{out}"
+    );
+    assert!(out.contains("yes; a replica holds 0 of "), "{out}");
+
+    let _replica = replica(&dir, &primary, &[]);
+    let start = Instant::now();
+    let (code, out) = loop {
+        let (code, out, _) = dir.status(primary.port);
+        if code == 0 {
+            break (code, out);
+        }
+        assert!(start.elapsed() < LIMIT, "still refuses: {out}");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(code, 0);
+    let held = out
+        .lines()
+        .find_map(|line| line.rsplit_once("a replica holds "))
+        .expect("says what a replica holds")
+        .1;
+    let (held, of) = held.split_once(" of ").expect("both");
+    assert_eq!(Some(held), of.strip_suffix(" records"), "{out}");
+    assert!(!out.contains("writes: refused"), "{out}");
+}
+
+#[test]
+fn bind_is_refused_and_host_is_named() {
+    let dir = TempDir::new("bind");
+
+    let output = dir
+        .umbrachyx("no-such-log", &["replication", "--bind", "10.0.0.5"])
+        .output()
+        .expect("runs");
+    let (code, out, err) = said(&output);
+
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("--host"), "{err}");
+}
+
+#[test]
+fn a_server_that_never_answers_is_given_up_on() {
+    let dir = TempDir::new("silent");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+    let port = listener.local_addr().expect("has an address").port();
+    // Takes the connection and says nothing; kept so it stays open.
+    let _held = thread::spawn(move || {
+        let held: Vec<TcpStream> = listener.incoming().flatten().collect();
+        drop(held);
+    });
+
+    let start = Instant::now();
+    let (code, out, err) = dir.status(port);
+
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("no answer within"), "{err}");
+    assert!(start.elapsed() < Duration::from_secs(20), "waited too long");
+}

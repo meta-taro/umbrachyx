@@ -2,11 +2,11 @@
 //! and which server it follows itself. And `replication`, which asks a
 //! running server how that is going.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use umbrachyx::server::Identity;
@@ -145,10 +145,11 @@ pub fn holds_current_values_only(command: &str, args: &Args) -> Result<bool, Str
 
 /// Where `replication` asks when `--host` names no other machine.
 const THIS_MACHINE: &str = "127.0.0.1";
-/// How long a server has to take the connection, and to answer.
+/// How long a server has to take the connection, and then to answer in
+/// full.
 const ANSWER_WITHIN: Duration = Duration::from_secs(5);
 /// The longest status read. A real one is a few hundred bytes.
-const MAX_STATUS: u64 = 64 * 1024;
+const MAX_STATUS: usize = 64 * 1024;
 /// The longest text of the server's that is printed.
 const MAX_SAID: usize = 300;
 /// `UMBRA.REPLICATION`, as the protocol sends a command.
@@ -157,6 +158,7 @@ const ASK: &[u8] = b"*1\r\n$17\r\nUMBRA.REPLICATION\r\n";
 /// going well: a replica that stopped or cannot reach its primary, a
 /// primary that refuses writes because no replica keeps up.
 const NOT_WELL: u8 = 1;
+const NOT_A_STATUS: &str = "the answer is not a replication status: is it an Umbrachyx server?";
 
 /// `replication`: asks the server on `--host` and `--port` how its
 /// replication is going, and prints the answer a line per fact. It opens
@@ -164,6 +166,13 @@ const NOT_WELL: u8 = 1;
 /// few records behind is well; one that stopped is not.
 pub fn status(args: &Args, default_port: u16) -> Result<ExitCode, String> {
     let [] = args.exactly()?;
+    // `serve --bind A` is how the server was started; said here it would
+    // be taken and this machine asked instead.
+    if args.options.contains_key("bind") {
+        return Err(
+            "replication takes --host, the address the server listens on, not --bind".to_owned(),
+        );
+    }
     let host = args
         .options
         .get("host")
@@ -175,9 +184,8 @@ pub fn status(args: &Args, default_port: u16) -> Result<ExitCode, String> {
         None => default_port,
     };
     let answered = ask(host, port).map_err(|why| format!("{host}:{port}: {why}"))?;
-    let (lines, is_well) = described(&answered).ok_or_else(|| {
-        format!("{host}:{port}: the answer is not a replication status: is it an Umbrachyx server?")
-    })?;
+    let (lines, is_well) =
+        described(&answered).ok_or_else(|| format!("{host}:{port}: {NOT_A_STATUS}"))?;
     for line in lines {
         println!("{line}");
     }
@@ -205,25 +213,68 @@ fn ask(host: &str, port: u16) -> Result<Value, String> {
         }
     }
     let mut stream = stream.ok_or(refused)?;
-    stream
-        .set_read_timeout(Some(ANSWER_WITHIN))
-        .and_then(|()| stream.set_write_timeout(Some(ANSWER_WITHIN)))
-        .and_then(|()| stream.write_all(ASK))
-        .map_err(|e| e.to_string())?;
-    let mut reply = BufReader::new(stream.take(MAX_STATUS));
-    let mut first = String::new();
-    reply.read_line(&mut first).map_err(|e| e.to_string())?;
-    let first = first.trim_end();
+    let reply = answer(&mut stream, Instant::now() + ANSWER_WITHIN)?;
+    let (first, rest) = split_line(&reply).ok_or(NOT_A_STATUS)?;
     if let Some(error) = first.strip_prefix('-') {
         return Err(format!("the server answered: {}", said(error)));
     }
-    let length: usize = first
-        .strip_prefix('$')
-        .and_then(|length| length.parse().ok())
-        .ok_or("the answer is not a replication status: is it an Umbrachyx server?")?;
-    let mut status = vec![0; length.min(MAX_STATUS as usize)];
-    reply.read_exact(&mut status).map_err(|e| e.to_string())?;
-    serde_json::from_slice(&status).map_err(|e| format!("the answer is not JSON: {e}"))
+    let length = value_length(first).ok_or(NOT_A_STATUS)?;
+    let status = rest.get(..length).ok_or(NOT_A_STATUS)?;
+    serde_json::from_slice(status).map_err(|e| format!("the answer is not JSON: {e}"))
+}
+
+/// Sends the question and reads the reply: a line, and the value after
+/// it if the line says one follows. All of it by `deadline`, however
+/// slowly the bytes come, and no more than a status could be.
+fn answer(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, String> {
+    let late = || format!("no answer within {} s", ANSWER_WITHIN.as_secs());
+    stream
+        .set_write_timeout(Some(ANSWER_WITHIN))
+        .and_then(|()| stream.write_all(ASK))
+        .map_err(|e| e.to_string())?;
+    let mut reply = Vec::new();
+    let mut part = [0; 4096];
+    while !is_whole(&reply) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(late());
+        }
+        stream
+            .set_read_timeout(Some(left))
+            .map_err(|e| e.to_string())?;
+        match stream.read(&mut part) {
+            Ok(0) => break,
+            Ok(read) => reply.extend_from_slice(&part[..read]),
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Err(late());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+        if reply.len() > MAX_STATUS {
+            return Err(NOT_A_STATUS.to_owned());
+        }
+    }
+    Ok(reply)
+}
+
+/// The first line of `reply` without its end, and what follows it.
+fn split_line(reply: &[u8]) -> Option<(&str, &[u8])> {
+    let end = reply.windows(2).position(|pair| pair == b"\r\n")?;
+    Some((std::str::from_utf8(&reply[..end]).ok()?, &reply[end + 2..]))
+}
+
+/// How long the value is that the line `first` says follows.
+fn value_length(first: &str) -> Option<usize> {
+    first.strip_prefix('$')?.parse().ok()
+}
+
+/// Whether nothing more of `reply` is to come: its line is read, and the
+/// value after it if the line says how long one is.
+fn is_whole(reply: &[u8]) -> bool {
+    match split_line(reply) {
+        None => false,
+        Some((first, rest)) => value_length(first).is_none_or(|length| rest.len() >= length),
+    }
 }
 
 /// Text another machine sent, fit for a terminal: no control characters,
