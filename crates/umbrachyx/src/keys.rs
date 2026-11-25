@@ -129,11 +129,20 @@ impl KeyStorage for FileKeyStorage {
     }
 
     fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        // Asked before the file is opened, which makes it if it is not
+        // there. Only this process writes the file: the store's log is
+        // locked for as long as it does.
+        let is_new = !self.path.try_exists()?;
         let mut file = Self::create(&self.path, false)?;
         file.write_all(bytes)?;
         file.sync_data()?;
-        // The file may be new; its directory entry has to survive too.
-        sync_parent_dir(&self.path)
+        if is_new {
+            // Its directory entry has to survive too. A file that was
+            // there already has one that did: syncing the directory
+            // again for every key made was a second sync a new subject.
+            sync_parent_dir(&self.path)?;
+        }
+        Ok(())
     }
 
     fn replace(&mut self, bytes: &[u8]) -> io::Result<()> {
