@@ -278,6 +278,8 @@ fn a_replica_that_stopped_says_why_and_exits_one() {
 
     assert_eq!(code, 1, "{out}{err}");
     assert!(out.contains("the key file lacks"), "{out}");
+    // It asks no more, and its primary no longer counts it.
+    dir.status_with(primary.port, "replicas asking now: 0\n");
 }
 
 #[test]
@@ -452,6 +454,11 @@ fn a_primary_says_where_its_last_erasure_is_and_that_the_replica_asking_holds_it
     let (_, of_the_replica, _) = dir.status_with(replica.port, "records: 3 of the primary's 3\n");
 
     assert_eq!(code, 0, "{out}{err}");
+    // Once the replica holds the erasure the primary says so at once,
+    // not when it next has something to send: three asks in a row, with
+    // no wait between them, are far inside the time an ask is held.
+    let at_once = (0..3).any(|_| dir.status(primary.port).1.contains(wanted));
+    assert!(at_once, "the primary still counts the replica behind");
     assert!(
         before.contains("replicas asking now: 0, 0 of them holding"),
         "{before}"

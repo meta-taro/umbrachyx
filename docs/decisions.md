@@ -1433,9 +1433,10 @@ One store that writes, and others that follow it and answer reads.
   replica already says how many it holds. A server that feeds replicas
   adds how many are asking now and how many of those said they hold
   fewer. Numbers only, since any client may ask. Two limits. A server
-  knows no replicas but those that ask: one that is switched off, cut
-  off, or stopped following is not counted, and it is the one that
-  still holds the key, so "none behind" is of the replicas asking and
+  knows no replicas but those that ask: one that is switched off or
+  stopped following is not counted once its connection has ended, one
+  cut off without closing it for a minute longer, and it is the one
+  that still holds the key, so "none behind" is of the replicas asking and
   not of every copy there is. Showing which replicas there are needs
   them named, which goes with deciding which certificate may ask for
   keys. And holding the record is not the key destroyed: a replica

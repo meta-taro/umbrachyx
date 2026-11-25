@@ -342,13 +342,8 @@ fn feed_reply(
         Ok(ask) => ask,
         Err(error) => return Reply::Error(format!("ERR {error}")),
     };
-    match held_answer(writer, &ask) {
-        Ok(answer) => {
-            if answer.is_ok() {
-                seat.note(ask.held.records);
-            }
-            answer_reply(answer)
-        }
+    match held_answer(writer, &ask, seat) {
+        Ok(answer) => answer_reply(answer),
         Err(error) => Reply::Error(format!("ERR {error}")),
     }
 }
@@ -375,8 +370,18 @@ fn keys_reply(writer: &mut Writer, args: &[Vec<u8>]) -> Reply {
 
 /// The answer to `ask`, held back for up to [`HOLD`] while there is
 /// nothing to send.
-fn held_answer(writer: &mut Writer, ask: &Ask) -> Result<Result<Sent, Refusal>, StoreError> {
+fn held_answer(
+    writer: &mut Writer,
+    ask: &Ask,
+    seat: &mut Seat,
+) -> Result<Result<Sent, Refusal>, StoreError> {
     let first = answer(writer, ask)?;
+    // Noted as soon as the ask is found to be one of this log's, and
+    // before it is held: a replica that has everything says so with an
+    // ask that is then held, and would be counted behind for that long.
+    if first.is_ok() {
+        seat.note(ask.held.records);
+    }
     let has_nothing = matches!(&first, Ok(sent) if sent.frames.is_empty());
     if has_nothing && writer.wait_for_more_records(ask.held.records, HOLD) {
         return answer(writer, ask);
