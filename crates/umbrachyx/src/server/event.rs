@@ -235,6 +235,9 @@ struct Connection {
     /// A command that is not a `SET` waits in `input` for the `SET`s
     /// before it to be answered.
     is_waiting: bool,
+    /// The socket said it has no more, and has not said otherwise
+    /// since: reading it again would only hear the same.
+    is_drained: bool,
     _slot: Slot,
 }
 
@@ -294,7 +297,11 @@ impl Loop {
                     self.adopt(&mut ready);
                     ready.extend(&self.awaiting);
                 } else {
-                    ready.push(event.token().0);
+                    let token = event.token().0;
+                    if let Some(connection) = self.connections.get_mut(&token) {
+                        connection.is_drained = false;
+                    }
+                    ready.push(token);
                 }
             }
             ready.sort_unstable();
@@ -351,6 +358,11 @@ impl Loop {
                 Sent::All if is_done => self.close(*token),
                 Sent::All => {
                     connection.is_blocked = false;
+                    if was_blocked {
+                        // Nothing was heard from it while it was only
+                        // watched for room to write.
+                        connection.is_drained = false;
+                    }
                     if was_blocked && !self.listen(*token, Interest::READABLE) {
                         continue;
                     }
@@ -397,6 +409,7 @@ impl Loop {
                     is_blocked: false,
                     has_backlog: false,
                     is_waiting: false,
+                    is_drained: false,
                     _slot: slot,
                 },
             );
@@ -462,6 +475,9 @@ impl Connection {
         if self.has_backlog || self.is_waiting {
             self.execute(server);
         }
+        if self.is_drained {
+            return;
+        }
         let mut budget = READ_BUDGET;
         while !self.has_backlog && !self.is_waiting && !self.is_closing && budget > 0 {
             match self.stream.read(chunk) {
@@ -471,11 +487,15 @@ impl Connection {
                     self.execute(server);
                     if HAS_EDGE_ON_ARRIVAL && read < chunk.len() {
                         // The socket had no more: it will say when it does.
+                        self.is_drained = true;
                         return;
                     }
                     budget = budget.saturating_sub(read);
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.is_drained = true;
+                    return;
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(_) => {
                     // Broken: there is nobody to send the replies to.

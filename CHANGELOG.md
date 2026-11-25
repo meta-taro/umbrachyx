@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **A socket that said it has no more is not read again until it says
+  otherwise.** A connection waiting for its `SET`s to be written was
+  read each time the thread that writes finished a group, to hear only
+  that nothing had arrived: one system call a `SET` for nothing.
 - **Sealing and opening a value set its key up once.** The store puts
   AES-SIV together from RustCrypto's `aes`, `cmac` and `ctr` itself,
   where it used their `aes-siv`, which expands a key for every value.
