@@ -1265,6 +1265,17 @@ from the copy.
   file holds a key for every subject in the log. A store restored
   without one says so when it opens. It reads the whole copy of the log
   into memory, as restoring still does.
+- **A running server says how its backup goes, and not where it is.**
+  `UMBRA.BACKUP` answers any client, as reads do: how many records the
+  backup holds of the store's, how many seconds ago the last backup
+  that copied anything finished, and whether backups fail. The place is
+  whoever started the server's to know, and the reason a backup failed
+  can name it (a path that is in use, or no longer holds the backup),
+  so the reply carries neither: the reason stays on the server's
+  standard error. The time is an age the server works out, not a
+  moment, so the asker's clock does not enter. `backup --status` prints
+  it and exits with 1 when backups fail; a server that keeps no backup
+  says so and that is not a failure.
 - **A backup read while another finishes is read again.** A backup
   writes its key file, then its manifest, then removes the key file of
   the backup before; a restore or a check that began with the old

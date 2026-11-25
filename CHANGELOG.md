@@ -13,7 +13,11 @@
   [--backup-every <seconds>]` keeps such a backup up to date while the
   server runs: a backup holds the moment it began, the log is copied a
   part at a time between writes, and no client can ask for one or name
-  the place.
+  the place. `UMBRA.BACKUP` says to any client how many of the store's
+  records the backup holds, how long ago the last one finished and
+  whether backups fail, and not where it is kept or why one failed;
+  `umbrachyx backup --status [--host <address>] [--port <port>]` asks it
+  from the command line and exits with 1 if backups fail.
 - **A server that follows another.** `umbrachyx serve <branch> --follow
   <host:port>` serves a restored backup of another server as its
   replica: it asks that server, on the port it was given with

@@ -157,8 +157,8 @@ const ASK: &[u8] = b"*1\r\n$17\r\nUMBRA.REPLICATION\r\n";
 /// The exit status when the server answered and its replication is not
 /// going well: a replica that stopped or cannot reach its primary, a
 /// primary that refuses writes because no replica keeps up.
-const NOT_WELL: u8 = 1;
-const NOT_A_STATUS: &str = "the answer is not a replication status: is it an Umbrachyx server?";
+pub const NOT_WELL: u8 = 1;
+pub const NOT_A_STATUS: &str = "the answer is not a status: is it an Umbrachyx server?";
 
 /// `replication`: asks the server on `--host` and `--port` how its
 /// replication is going, and prints the answer a line per fact. It opens
@@ -166,24 +166,8 @@ const NOT_A_STATUS: &str = "the answer is not a replication status: is it an Umb
 /// few records behind is well; one that stopped is not.
 pub fn status(args: &Args, default_port: u16) -> Result<ExitCode, String> {
     let [] = args.exactly()?;
-    // `serve --bind A` is how the server was started; said here it would
-    // be taken and this machine asked instead.
-    if args.options.contains_key("bind") {
-        return Err(
-            "replication takes --host, the address the server listens on, not --bind".to_owned(),
-        );
-    }
-    let host = args
-        .options
-        .get("host")
-        .map_or(THIS_MACHINE, String::as_str);
-    let port = match args.options.get("port") {
-        Some(port) => port
-            .parse()
-            .map_err(|_| format!("--port {port:?} is not a port"))?,
-        None => default_port,
-    };
-    let answered = ask(host, port).map_err(|why| format!("{host}:{port}: {why}"))?;
+    let (host, port) = server(args, default_port)?;
+    let answered = ask(&host, port, ASK).map_err(|why| format!("{host}:{port}: {why}"))?;
     let (lines, is_well) =
         described(&answered).ok_or_else(|| format!("{host}:{port}: {NOT_A_STATUS}"))?;
     for line in lines {
@@ -196,10 +180,35 @@ pub fn status(args: &Args, default_port: u16) -> Result<ExitCode, String> {
     })
 }
 
-/// What the server on `host` and `port` answers to `UMBRA.REPLICATION`.
+/// The running server a command is to ask: the one `--host` and
+/// `--port` name, on this machine and `default_port` without them.
+pub fn server(args: &Args, default_port: u16) -> Result<(String, u16), String> {
+    // `serve --bind A` is how the server was started; said here it would
+    // be taken and this machine asked instead.
+    if args.options.contains_key("bind") {
+        return Err(
+            "a running server is named with --host, the address it listens on, not --bind"
+                .to_owned(),
+        );
+    }
+    let host = args
+        .options
+        .get("host")
+        .map_or(THIS_MACHINE, String::as_str);
+    let port = match args.options.get("port") {
+        Some(port) => port
+            .parse()
+            .map_err(|_| format!("--port {port:?} is not a port"))?,
+        None => default_port,
+    };
+    Ok((host.to_owned(), port))
+}
+
+/// What the server on `host` and `port` answers to `question`, a command
+/// as the protocol sends one, when the answer is a value of JSON.
 /// The far end is whatever listens there: it is given a time limit, and
 /// no more of its answer is read than a status could be.
-fn ask(host: &str, port: u16) -> Result<Value, String> {
+pub fn ask(host: &str, port: u16, question: &[u8]) -> Result<Value, String> {
     let addresses = (host, port).to_socket_addrs().map_err(|e| e.to_string())?;
     let mut refused = "the name has no address".to_owned();
     let mut stream = None;
@@ -213,7 +222,7 @@ fn ask(host: &str, port: u16) -> Result<Value, String> {
         }
     }
     let mut stream = stream.ok_or(refused)?;
-    let reply = answer(&mut stream, Instant::now() + ANSWER_WITHIN)?;
+    let reply = answer(&mut stream, question, Instant::now() + ANSWER_WITHIN)?;
     let (first, rest) = split_line(&reply).ok_or(NOT_A_STATUS)?;
     if let Some(error) = first.strip_prefix('-') {
         return Err(format!("the server answered: {}", said(error)));
@@ -226,11 +235,11 @@ fn ask(host: &str, port: u16) -> Result<Value, String> {
 /// Sends the question and reads the reply: a line, and the value after
 /// it if the line says one follows. All of it by `deadline`, however
 /// slowly the bytes come, and no more than a status could be.
-fn answer(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, String> {
+fn answer(stream: &mut TcpStream, question: &[u8], deadline: Instant) -> Result<Vec<u8>, String> {
     let late = || format!("no answer within {} s", ANSWER_WITHIN.as_secs());
     stream
         .set_write_timeout(Some(ANSWER_WITHIN))
-        .and_then(|()| stream.write_all(ASK))
+        .and_then(|()| stream.write_all(question))
         .map_err(|e| e.to_string())?;
     let mut reply = Vec::new();
     let mut part = [0; 4096];

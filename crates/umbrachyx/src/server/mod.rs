@@ -127,6 +127,8 @@ pub struct Server {
     identity: Option<tls::Configs>,
     /// How following goes, once the server serves.
     following: Option<replication::Shared>,
+    /// How backing up goes, once the server serves.
+    backing_up: Option<backups::Shared>,
 }
 
 impl Server {
@@ -157,6 +159,7 @@ impl Server {
             keeps_history,
             identity: None,
             following: None,
+            backing_up: None,
         })
     }
 
@@ -253,6 +256,13 @@ impl Server {
                 .expect("the thread that follows the primary starts");
             self.following = Some(following);
         }
+        // Before the serving threads are given their copies of this, so
+        // each can say how the backup goes.
+        if let Some((dir, every)) = self.backup.clone() {
+            let backing_up = backups::spawn(self.writer.clone(), dir, every)
+                .expect("the thread that backs the store up starts");
+            self.backing_up = Some(backing_up);
+        }
         let loops: Vec<event::Handle> = (0..self.loops.max(1))
             .filter_map(|number| match event::spawn(self.clone(), number) {
                 Ok(handle) => Some(handle),
@@ -267,10 +277,6 @@ impl Server {
         let queued = Arc::clone(&self.queued);
         event::spawn_writer(self.writer.clone(), queued, wakers, self.sync_every)
             .expect("the thread that writes commits starts");
-        if let Some((dir, every)) = self.backup.clone() {
-            backups::spawn(self.writer.clone(), dir, every)
-                .expect("the thread that backs the store up starts");
-        }
         if let Some(listener) = self.feeds_replicas.clone() {
             let tls = self.identity.as_ref().map(|tls| tls.server.clone());
             replication::spawn_feed(self.writer.clone(), listener, tls)
@@ -338,6 +344,11 @@ impl Server {
                     return Some(Step::Reply(reply));
                 }
                 if let Some(reply) = history::answer(&self.writer, &self.branch, &name, args) {
+                    return Some(Step::Reply(reply));
+                }
+                if let Some(reply) =
+                    backups::reply(&self.writer, self.backing_up.as_ref(), &name, args)
+                {
                     return Some(Step::Reply(reply));
                 }
                 if let Some(reply) = replication::reply(

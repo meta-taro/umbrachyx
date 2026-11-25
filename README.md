@@ -149,7 +149,9 @@ $ umbrachyx history agent/support player/42/gems
   subject erased since has no key in the backup afterwards; older copies
   of the backup still do, so keep them only as long as an erasure may
   take. `umbrachyx serve --backup-to <directory>` keeps the backup up
-  to date while the server runs, without holding writes for the copy.
+  to date while the server runs, without holding writes for the copy;
+  `umbrachyx backup --status` asks that server how many records its
+  backup holds and whether backups fail.
   Neither is in a released version yet: build from source to try them
   ([`docs/decisions.md`](docs/decisions.md#backup-and-restore)).
 - **A second server can follow the first and answer reads.** Restore a
