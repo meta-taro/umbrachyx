@@ -104,6 +104,37 @@ fn pipelined_commands_are_answered_in_order() {
     assert_eq!(read_reply(&mut client, expected), expected);
 }
 
+/// More than a read takes at once, with `SET`s scattered through it: a
+/// command behind a `SET` waits for it with the rest of the pipeline
+/// still in the socket, and nothing new arrives to say so.
+#[test]
+fn a_pipeline_longer_than_one_read_with_sets_in_it_is_all_answered_in_order() {
+    let dir = TempDir::new("long-pipeline");
+    let (_committer, mut client) = start(&dir);
+    let mut requests = Vec::new();
+    let mut expected = Vec::new();
+    for round in 0..40 {
+        let value = format!("{round}");
+        requests.extend(command(&["SET", "player/1/gold", &value]));
+        expected.extend_from_slice(b"+OK\r\n");
+        for _ in 0..500 {
+            requests.extend(command(&["GET", "player/1/gold"]));
+            expected.extend(format!("${}\r\n{value}\r\n", value.len()).into_bytes());
+        }
+    }
+    assert!(requests.len() > 8 * 64 * 1024, "several reads' worth");
+    let mut sender = client.try_clone().expect("clones");
+    let sending = thread::spawn(move || sender.write_all(&requests).expect("sends"));
+    client
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("sets a timeout");
+
+    let reply = read_reply(&mut client, &expected);
+
+    sending.join().expect("the sender ends");
+    assert!(reply == expected, "every reply, in the order asked");
+}
+
 /// The file, with every sync counted and slowed down.
 struct CountingStorage {
     file: FileStorage,

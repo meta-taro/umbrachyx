@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **A socket that said it has no more is not read again until it says
+  otherwise.** A connection waiting for its `SET`s to be written was
+  read each time the thread that writes finished a group, to hear only
+  that nothing had arrived: one system call a `SET` for nothing.
 - **Backup and restore.** `umbrachyx backup <directory>` copies the log
   and the keys as they are at one moment, and adds only what was written
   since when run again; `umbrachyx restore <directory>` writes a new
