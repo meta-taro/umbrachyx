@@ -153,6 +153,12 @@ jobs:
       - name: Memory
         run: bench/memory.sh | tee bench-memory.csv
 
+      # What checking and restoring a backup take, on a small backup: the
+      # script reads `time` differently on Linux than where it was
+      # written, so it is run here. The numbers are not published.
+      - name: Check and restore a backup
+        run: bench/restore.sh 20000 | tee bench-restore.txt
+
       # bench/replicated.sh is written for a primary, its replicas and a
       # client on machines of their own, which cost money by the hour.
       # Here all three roles run on this one machine with a small load,
@@ -202,7 +208,7 @@ jobs:
         run: |
           {
             echo "### Benchmarks (shared runner, compare runs of this job only)"
-            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv bench-memory.csv bench-replicated-rehearsal.txt bench-commit-cost.txt bench-commit-cost-small-pages.txt; do
+            for file in bench-umbrachyx.csv bench-valkey.csv bench-connections.csv bench-memory.csv bench-restore.txt bench-replicated-rehearsal.txt bench-commit-cost.txt bench-commit-cost-small-pages.txt; do
               echo
               echo "\`$file\`"
               echo

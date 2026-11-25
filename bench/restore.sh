@@ -23,20 +23,30 @@ cargo build --quiet --release -p umbrachyx
 built="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/umbrachyx"
 measured="${UMBRACHYX_BIN:-$built}"
 
-# Runs a command and prints the most memory it held, in MB, and how long
-# it took, in seconds. GNU time reports KiB, the BSD one bytes.
+[ -x /usr/bin/time ] || { echo "bench/restore.sh needs /usr/bin/time" >&2; exit 1; }
+
+# Runs a command and leaves in `took` the most memory it held, in MB, and
+# how long it took, in seconds. GNU time reports KiB, the BSD one bytes.
+# A command that fails stops the script with what it said: no row is
+# printed for it.
+took=
 cost() {
-  local out="$dir/time.out"
+  local out="$dir/time.out" flag=-l
   if /usr/bin/time -v true >/dev/null 2>&1; then
-    /usr/bin/time -v "$@" >/dev/null 2>"$out"
-    awk -F': ' '/Maximum resident set size/ {rss=$2/1024}
+    flag=-v
+  fi
+  if ! /usr/bin/time "$flag" "$@" >/dev/null 2>"$out"; then
+    cat "$out" >&2
+    return 1
+  fi
+  if [ "$flag" = -v ]; then
+    took="$(awk -F': ' '/Maximum resident set size/ {rss=$2/1024}
                 /Elapsed \(wall clock\)/ {n=split($2,t,":"); s=t[n]+60*t[n-1]}
-                END {printf "%.0f MB  %.2f s\n", rss, s}' "$out"
+                END {printf "%.0f MB  %.2f s", rss, s}' "$out")"
   else
-    /usr/bin/time -l "$@" >/dev/null 2>"$out"
-    awk '/maximum resident set size/ {rss=$1/1048576}
+    took="$(awk '/maximum resident set size/ {rss=$1/1048576}
          / real / {s=$1}
-         END {printf "%.0f MB  %.2f s\n", rss, s}' "$out"
+         END {printf "%.0f MB  %.2f s", rss, s}' "$out")"
   fi
 }
 
@@ -58,9 +68,11 @@ else
 fi
 echo "sets: $sets, copy of the log: $(wc -c <"$dir/backup/log" | tr -d ' ') bytes"
 for run in $(seq "$runs"); do
-  echo "backup --check  run $run: $(cost "$measured" backup "$dir/backup" --check)"
+  cost "$measured" backup "$dir/backup" --check
+  echo "backup --check  run $run: $took"
 done
 for run in $(seq "$runs"); do
   rm -f "$dir/restored" "$dir/restored.keys"
-  echo "restore         run $run: $(UMBRACHYX_DB="$dir/restored" cost "$measured" restore "$dir/backup")"
+  UMBRACHYX_DB="$dir/restored" cost "$measured" restore "$dir/backup"
+  echo "restore         run $run: $took"
 done

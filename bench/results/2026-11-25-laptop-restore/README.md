@@ -32,7 +32,7 @@ The most memory the process held, and how long it took:
 | `restore <directory>` | 590 MB, 0.35 to 0.36 s | 8 MB, 0.37 to 0.39 s |
 
 Restoring now reads the copy twice, once to check it and once to write
-it, and takes 0.01 to 0.03 s longer here for it. The backup is on the
+it: 0.37 to 0.39 s here where it took 0.35 to 0.36 s. The backup is on the
 same SSD as the store, and was read moments before, so the second read
 comes from the system's cache: on a disk that has to be read again it
 costs a second read of the copy.
@@ -40,3 +40,7 @@ costs a second read of the copy.
 What is held now is a part of the copy, one megabyte, and the record
 that runs across its end, so a record of many megabytes still takes that
 much.
+
+The script was changed after these runs to stop when a measured command
+fails, where it printed a row regardless; what it measures and prints
+for a command that succeeds is the same.

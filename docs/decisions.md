@@ -1274,8 +1274,8 @@ from the copy.
   again, the keys too, and the backup refused, because a part of a log
   opens as a shorter store. On one laptop a backup of 1,000,000 SETs
   (131 MB of log) took 590 MB to check or restore before and takes 8 MB,
-  in the same time to check and 0.01 to 0.03 s longer to restore
-  (`bench/results/2026-11-25-laptop-restore/`); the second read came
+  in the same time to check, and 0.37 to 0.39 s to restore where it
+  took 0.35 to 0.36 s (`bench/results/2026-11-25-laptop-restore/`); the second read came
   from the system's cache there, and on a disk that has to be read again
   it costs a second read of the copy.
 - **A running server says how its backup goes, and not where it is.**
@@ -1317,10 +1317,8 @@ from the copy.
   as a log's header is.
 - **Not while a server has the log open.** The log is locked by the
   process that writes it, so the command needs the server stopped. A
-  server that backs itself up, to a place named by whoever starts it and
-  never by a client, is to come.
-- **Restoring reads the whole copy of the log into memory**, as opening
-  a store does.
+  server backs itself up with `serve --backup-to`, to a place named by
+  whoever starts it and never by a client.
 
 ## Replication (being built)
 
