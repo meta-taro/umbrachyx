@@ -155,7 +155,9 @@ $ umbrachyx history agent/support player/42/gems
   --follow <host:port>`; the first server is started with
   `--feed-replicas-on <port>`, a port to open to its replicas only. The replica asks for the records it lacks, holds
   the same commits under the same ids, and refuses writes with
-  `READONLY`; `UMBRA.REPLICATION` says how far it is. Given a
+  `READONLY`; `UMBRA.REPLICATION` says how far it is, and `umbrachyx
+  replication --port <port>` prints the same for a running server and
+  exits with 1 if its replication is not going well. Given a
   certificate, its key and an authority's certificate each
   (`--replication-cert`, `--replication-key`, `--replication-ca`, PEM
   files you make), the two servers speak TLS 1.3, answer nobody whose

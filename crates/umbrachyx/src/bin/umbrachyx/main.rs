@@ -7,7 +7,8 @@
 //! The log file is named by `UMBRACHYX_DB`. Values are encrypted under a key
 //! per subject, kept in the file next to it with `.keys` added to its name.
 //! Exit status is 0 on success, 1 when a merge or undo stopped on
-//! conflicts, and 2 on any other error.
+//! conflicts or when `replication` found a server whose replication is
+//! not going well, and 2 on any other error.
 
 use std::collections::HashMap;
 use std::io::{BufWriter, ErrorKind, Write};
@@ -154,6 +155,15 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
   mcp --public-key K --token-file F
                               MCP over stdin and stdout, for one agent's token
 
+  replication [--host A] [--port P]
+                              asks the server running on this machine, or
+                              on A, how its replication is going: primary
+                              or replica, what it holds, how many records
+                              it and the other end have, and why a replica
+                              stopped or cannot reach its primary. Opens no
+                              log. Exit status 1 if a replica stopped or
+                              cannot reach its primary, or a primary refuses
+                              writes because no replica keeps up
   keygen <file>               a new root key into <file>; prints its public key
   token issue --key <file> --subject S --branch B --prefix P --columns C,..
               --operations read,write --purpose U --expires-in 8h
@@ -219,7 +229,7 @@ impl Args {
                 .clone();
             match name {
                 "remove" => parsed.removes.push(value),
-                "who" | "why" | "approved-by" | "from" | "limit" | "port" | "bind"
+                "who" | "why" | "approved-by" | "from" | "limit" | "port" | "bind" | "host"
                 | "max-connections" | "threads" | "sync-every" | "key" | "subject" | "branch"
                 | "prefix" | "columns" | "column" | "operations" | "operation" | "purpose"
                 | "expires-in" | "public-key" | "token-file" | "backup-to" | "backup-every"
@@ -265,6 +275,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     match command.as_str() {
         "keygen" => return tokens::keygen(&args),
         "token" => return tokens::token(&args),
+        "replication" => return replication::status(&args, DEFAULT_PORT),
         _ => {}
     }
     let path = std::env::var(DB_ENV).unwrap_or_else(|_| DEFAULT_DB.to_owned());
