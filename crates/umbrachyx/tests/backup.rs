@@ -1126,3 +1126,66 @@ fn a_place_that_holds_a_store_is_refused_before_anything_is_read() {
     assert_eq!(files_of(&dir, "source"), before);
     drop(store);
 }
+
+#[test]
+fn a_server_started_at_the_place_meanwhile_is_left_no_keys_of_the_restored_store() {
+    let dir = TempDir::new("only-a-log");
+    backed_up_in_several_parts(&dir);
+    let (log, keys) = (dir.log("restored"), dir.keys("restored"));
+    let mut source = WhileWritten::new(&dir, || {
+        // A server makes its log when it starts, and its key file only
+        // with its first key.
+        std::fs::write(&log, b"another store's log").expect("writes");
+    });
+
+    let refused = restore_to(&mut source, &log, &keys);
+
+    drop(source);
+    assert!(matches!(refused, Err(BackupError::NotEmpty)), "{refused:?}");
+    assert_eq!(std::fs::read(&log).expect("reads"), b"another store's log");
+    assert_eq!(files_of(&dir, "restored"), ["restored.log"]);
+}
+
+#[test]
+fn a_second_restore_to_the_place_leaves_the_first_ones_files_alone() {
+    let dir = TempDir::new("two-restores");
+    backed_up_in_several_parts(&dir);
+    let (log, keys) = (dir.log("restored"), dir.keys("restored"));
+    // A restore that is still writing holds its log beside the place.
+    let log_beside = dir.0.join("restored.log.restoring");
+    let keys_beside = dir.0.join("restored.log.keys.restoring");
+    let first = FileStorage::open(&log_beside).expect("opens file");
+    std::fs::write(&keys_beside, b"the first restore's keys").expect("writes");
+
+    let refused = restore_to(&mut DirSource::new(&dir.backup_dir()), &log, &keys);
+
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(
+        files_of(&dir, "restored"),
+        ["restored.log.keys.restoring", "restored.log.restoring"]
+    );
+    assert_eq!(
+        std::fs::read(&keys_beside).expect("reads"),
+        b"the first restore's keys"
+    );
+    drop(first);
+}
+
+#[test]
+fn a_restored_log_without_its_keys_does_not_open() {
+    let dir = TempDir::new("log-no-keys");
+    backed_up_in_several_parts(&dir);
+    let (log, keys) = (dir.log("restored"), dir.keys("restored"));
+    restore_to(&mut DirSource::new(&dir.backup_dir()), &log, &keys).expect("restores");
+    // What a restore stopped between its two moves leaves at the place.
+    std::fs::remove_file(&keys).expect("removes the keys");
+
+    let key_storage: Box<dyn KeyStorage + Send> = Box::new(FileKeyStorage::new(&keys));
+    let opened = Store::open_sealed(
+        FileStorage::open(&log).expect("opens file"),
+        Keys::open(key_storage).expect("opens the key file"),
+        SystemClock,
+    );
+
+    assert!(opened.is_err(), "a store opened without its keys");
+}

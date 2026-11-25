@@ -1260,19 +1260,27 @@ from the copy.
   from a copy that cannot be written to, such as a snapshot.
 - **A restored store is moved into its place when it is whole.** The
   log and the keys are written beside the place, under names ending in
-  `.restoring`, made durable, and then given their names: the keys
-  first, the log last. A restore stopped by a signal or a power cut
-  while it writes leaves no log at the place, where before it left the
+  `.restoring`, made durable, and then given their names: the log
+  first, the keys last. A restore stopped by a signal or a power cut
+  while it writes leaves no file at the place, where before it left the
   keys and the start of the log, which opens as a store with only some
   of its records. What it left beside the place is cleared by the next
-  restore. Stopped between the two moves it leaves a key file and no
-  log: a store with nothing in it, which `restore` then refuses to
-  write over until that file is removed. The files are given their
-  names with a link, not a rename: nothing holds the place while the
-  store is written, and a rename would replace a store that a server
-  started there meanwhile. Such a store is left as it is and the
-  restore refused. If only its log was made in that time, the restored
-  key file is already there and stays: that store may have opened it.
+  restore. Stopped between the two moves it leaves a log without its
+  keys, which does not open and says which keys it lacks; `restore`
+  then refuses to write over it until it is removed.
+- **A store made at the place meanwhile is not replaced.** Nothing holds
+  the place while the store is written beside it, so a server started
+  there in that time makes a store of its own. The files are given
+  their names with a link, not a rename, which would replace that
+  store: the link is refused and the restore with it. The log goes
+  first because it is the file a server makes when it starts, its key
+  file only with its first key: keys moved first would be left at that
+  server's place, for it to add its own to. The price is a filesystem
+  without hard links, some network shares and exFAT among them, where
+  `restore` now fails with the system's error.
+- **Two restores to one place do not write each other's files.** The
+  one that holds the log beside the place writes both files, until they
+  have their names; another is refused and clears nothing.
 - **A backup can be asked whether it would restore** (`backup
   <directory> --check`): the same checks, by the same code, and nothing
   written. It opens no store, so it runs where only the backup is. What
