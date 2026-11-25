@@ -1425,8 +1425,23 @@ One store that writes, and others that follow it and answer reads.
 - **An erasure reaches the replica as a record and destroys its copy of
   the key.** A replica that is not connected still holds the key until
   it is: an erasure is finished on the primary at once and on each
-  replica when the record arrives. Which replicas have not had it yet is
-  to be shown, not waited for.
+  replica when the record arrives. That is shown, not waited for.
+- **A server says where its last erasure is, and counts the replicas
+  asking that do not hold it yet.** `UMBRA.REPLICATION` gives how many
+  records the log held once its last erasure was written: a copy of the
+  log holds every erasure's record once it holds that many, and each
+  replica already says how many it holds. A server that feeds replicas
+  adds how many are asking now and how many of those said they hold
+  fewer. Numbers only, since any client may ask. Two limits. A server
+  knows no replicas but those that ask: one that is switched off, cut
+  off, or stopped following is not counted, and it is the one that
+  still holds the key, so "none behind" is of the replicas asking and
+  not of every copy there is. Showing which replicas there are needs
+  them named, which goes with deciding which certificate may ask for
+  keys. And holding the record is not the key destroyed: a replica
+  whose key file could not be written says so in its own status, and
+  finishes the erasure when it next opens. An ask that is refused is
+  not counted, since what it says it holds means nothing.
 - **A key travels when a replica asks for it, never with the records.**
   The log holds no key, so that destroying a key erases, and a copy of
   the log stays unreadable without the key file. A replica that is sent

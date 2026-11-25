@@ -430,3 +430,29 @@ fn a_store_opened_again_does_not_open_what_was_erased() {
         Some("30")
     );
 }
+
+#[test]
+fn the_store_says_how_many_records_its_log_held_once_the_last_erasure_was_written() {
+    let dir = TempDir::new("through");
+    let mut store = dir.open();
+    seed(&mut store);
+    assert_eq!(store.erased_through(), None);
+
+    assert!(erase_player_42(&mut store));
+    // The record of the erasure is the last of the log: a copy that
+    // holds one record fewer does not hold it.
+    let through = store.log_records();
+    assert_eq!(store.erased_through(), Some(through));
+    store
+        .commit(
+            MAIN_BRANCH,
+            vec![set("player/7/gems", "1")],
+            by("seed", "test data"),
+        )
+        .expect("commits");
+
+    assert_eq!(store.log_records(), through + 1);
+    assert_eq!(store.erased_through(), Some(through));
+    drop(store);
+    assert_eq!(dir.open().erased_through(), Some(through));
+}

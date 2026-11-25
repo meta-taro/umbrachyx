@@ -498,6 +498,8 @@ pub struct Store<S: Storage, C: Clock> {
     /// The fingerprint of every key an erasure in the log destroyed,
     /// with how many records the log held once it held the erasure.
     erased_keys: HashMap<Fingerprint, u64>,
+    /// How many records the log held once its last erasure was written.
+    erased_through: Option<u64>,
     tables: Tables,
     /// Per branch, the last change rejected on it.
     rejections: BTreeMap<String, Rejection>,
@@ -624,6 +626,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             sealer,
             erasures: Vec::new(),
             erased_keys: HashMap::new(),
+            erased_through: None,
             tables: Tables::default(),
             rejections: BTreeMap::new(),
             decisions: Vec::new(),
@@ -635,9 +638,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         for (before, record) in records.enumerate() {
             let record = record?;
             if let Record::Erase(erase) = &record {
-                store
-                    .erased_keys
-                    .insert(erase.key_fingerprint, before as u64 + 1);
+                store.note_erased(erase.key_fingerprint, before as u64 + 1);
                 erased.push(erase.key_fingerprint);
             }
             if let Some(ring) = &ring {
@@ -871,7 +872,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         });
         self.append(&record)?;
         self.apply(&record)?;
-        self.erased_keys.insert(key_fingerprint, self.log.records());
+        self.note_erased(key_fingerprint, self.log.records());
         let sealer = self.sealer.as_mut().ok_or(StoreError::NoKeys)?;
         sealer.erase(subject, &key_fingerprint)?;
         Ok(true)
@@ -915,6 +916,21 @@ impl<S: Storage, C: Clock> Store<S, C> {
     }
 
     /// Every subject erased, oldest first.
+    /// How many records the log held once its last erasure was written,
+    /// or `None` if nothing was erased: a copy of the log that holds at
+    /// least as many holds the record of every erasure.
+    pub fn erased_through(&self) -> Option<u64> {
+        self.erased_through
+    }
+
+    /// Notes that the record of the erasure of `key` is the `at`th of
+    /// the log. Records are applied in order, so the last noted is the
+    /// last erasure.
+    fn note_erased(&mut self, key: Fingerprint, at: u64) {
+        self.erased_keys.insert(key, at);
+        self.erased_through = Some(at);
+    }
+
     pub fn erasures(&self) -> &[Erasure] {
         &self.erasures
     }

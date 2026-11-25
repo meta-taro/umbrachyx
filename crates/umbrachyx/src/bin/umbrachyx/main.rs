@@ -184,7 +184,11 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               on A, how its replication is going: primary
                               or replica, what it holds, how many records
                               it and the other end have, and why a replica
-                              stopped or cannot reach its primary. Opens no
+                              stopped or cannot reach its primary. Also how
+                              many records the log held once its last
+                              erasure was written, and how many of the
+                              replicas asking now hold fewer: a replica
+                              that is not connected is not counted. Opens no
                               log. Exit status 1 if a replica stopped or
                               cannot reach its primary, or a primary refuses
                               writes because no replica keeps up

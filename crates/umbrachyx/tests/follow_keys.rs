@@ -281,8 +281,10 @@ fn a_key_destroyed_before_the_replica_had_it_brings_the_records_through_its_eras
 
     assert_same(&replica, &primary);
     assert_eq!(replica.get(MAIN_BRANCH, b"player/3/gems"), None);
+    assert_eq!(replica.erased_through(), primary.erased_through());
     drop(replica);
     let reopened = dir.open("replica");
+    assert_eq!(reopened.erased_through(), primary.erased_through());
     assert_eq!(
         reopened.get(MAIN_BRANCH, b"player/1/gems").as_deref(),
         Some(&b"175"[..])

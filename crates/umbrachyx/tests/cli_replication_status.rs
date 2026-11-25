@@ -428,3 +428,80 @@ fn a_server_that_never_answers_is_given_up_on() {
     assert!(err.contains("no answer within"), "{err}");
     assert!(start.elapsed() < Duration::from_secs(20), "waited too long");
 }
+
+/// As `primary_and_replica`, with a player erased on the primary after
+/// its replica was restored: the third record of the primary's log, and
+/// one the replica does not hold yet.
+fn primary_that_erased_and_replica(dir: &TempDir) {
+    dir.primary_and_replica();
+    let mut erase = vec!["erase", "player/1"];
+    erase.extend_from_slice(&WHO);
+    dir.run("primary", &erase);
+}
+
+#[test]
+fn a_primary_says_where_its_last_erasure_is_and_that_the_replica_asking_holds_it() {
+    let dir = TempDir::new("erasure");
+    primary_that_erased_and_replica(&dir);
+    let primary = primary(&dir);
+    let (_, before, _) = dir.status(primary.port);
+    let replica = replica(&dir, &primary, &[]);
+
+    let wanted = "replicas asking now: 1, 0 of them holding fewer records than the last erasure\n";
+    let (code, out, err) = dir.status_with(primary.port, wanted);
+    let (_, of_the_replica, _) = dir.status_with(replica.port, "records: 3 of the primary's 3\n");
+
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        before.contains("replicas asking now: 0, 0 of them holding"),
+        "{before}"
+    );
+    let erasure = "last erasure: within its first 3 records\n";
+    assert!(out.contains(erasure), "{out}");
+    // The replica read the record as it arrived, and says the same.
+    assert!(of_the_replica.contains(erasure), "{of_the_replica}");
+    assert!(
+        !of_the_replica.contains("replicas asking"),
+        "{of_the_replica}"
+    );
+
+    drop(replica);
+    dir.status_with(primary.port, "replicas asking now: 0, ");
+}
+
+#[test]
+fn a_server_that_erased_nothing_says_so_and_counts_who_asks() {
+    let dir = TempDir::new("no-erasure");
+    dir.primary_and_replica();
+    let primary = primary(&dir);
+    let _replica = replica(&dir, &primary, &[]);
+
+    let (code, out, err) = dir.status_with(primary.port, "replicas asking now: 1\n");
+
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("last erasure: none\n"), "{out}");
+}
+
+#[test]
+fn an_ask_that_is_refused_is_not_a_replica_asking() {
+    let dir = TempDir::new("refused-ask");
+    primary_that_erased_and_replica(&dir);
+    let primary = primary(&dir);
+    let feed = primary.feed.as_deref().expect("feeds");
+    let mut stranger = TcpStream::connect(feed).expect("connects");
+    // An ask in the right shape, of a log this server does not hold.
+    let (log, chain) = ("0".repeat(32), "0".repeat(64));
+    let ask = format!(
+        "*5\r\n$15\r\nUMBRA.LOG.AFTER\r\n$32\r\n{log}\r\n$1\r\n0\r\n$64\r\n{chain}\r\n$4\r\n4096\r\n"
+    );
+    stranger.write_all(ask.as_bytes()).expect("sends");
+    let mut answer = String::new();
+    BufReader::new(&stranger)
+        .read_line(&mut answer)
+        .expect("reads");
+
+    let (_, out, _) = dir.status(primary.port);
+
+    assert!(answer.starts_with("-ANOTHERLOG"), "{answer}");
+    assert!(out.contains("replicas asking now: 0, "), "{out}");
+}
