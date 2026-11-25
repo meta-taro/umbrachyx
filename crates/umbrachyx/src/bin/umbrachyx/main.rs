@@ -85,11 +85,14 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               asks the server running on this machine, or
                               on A, how the backup it keeps is going: how
                               many of the store's records it holds, how
-                              long ago the last one finished, and whether
+                              long ago the last one ran to its end, and whether
                               backups fail. Opens no log. The server does
                               not say where the backup is kept or why one
                               failed; the reason is on its standard error.
-                              Exit status 1 if backups fail
+                              Exit status 1 if backups fail. A backup is
+                              taken when something was written, so a place
+                              lost meanwhile is found at the next write:
+                              backup <directory> --check asks the place
   restore <directory>         writes the store the backup in <directory>
                               holds to $UMBRACHYX_DB, which must not exist yet
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
@@ -300,6 +303,11 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     }
     // Asked of a running server: no store is opened.
     if command == "backup" && args.options.contains_key("status") {
+        if args.options.contains_key("check") {
+            return Err(
+                "--status asks a running server and --check a directory: one at a time".to_owned(),
+            );
+        }
         return backups::status(&args, DEFAULT_PORT);
     }
     // These never touch a log.

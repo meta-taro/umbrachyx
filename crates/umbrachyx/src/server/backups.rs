@@ -16,8 +16,11 @@
 
 //!
 //! `UMBRA.BACKUP` says to any client how that goes: how many records the
-//! backup holds of the store's, how long ago the last one finished, and
-//! whether backups fail. It does not say where the backup is kept, nor
+//! backup holds of the store's, how long ago the last one ran to its
+//! end, and whether backups fail. A backup is taken only when something
+//! was written since the last, so a place lost while nothing is written
+//! is not found until the next write: this says how the last backup
+//! went, not that the place still holds it. It does not say where the backup is kept, nor
 //! why one failed: the reason can name the place, and is said to
 //! whoever runs the server.
 
@@ -39,7 +42,7 @@ const BACKUP: &str = "UMBRA.BACKUP";
 pub(super) struct Kept {
     /// How many records the backup holds, once one has finished.
     held: Option<u64>,
-    /// When the last backup that copied anything finished.
+    /// When the last backup ran to its end.
     finished: Option<Instant>,
     is_failing: bool,
 }
@@ -108,7 +111,7 @@ struct Backups {
     dir: PathBuf,
     /// How many records the backup holds, once one has finished.
     held: Option<u64>,
-    /// When the last backup that copied anything finished.
+    /// When the last backup ran to its end.
     finished: Option<Instant>,
     /// Why the last backup failed, if it did.
     failure: Option<String>,

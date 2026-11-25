@@ -1268,14 +1268,18 @@ from the copy.
 - **A running server says how its backup goes, and not where it is.**
   `UMBRA.BACKUP` answers any client, as reads do: how many records the
   backup holds of the store's, how many seconds ago the last backup
-  that copied anything finished, and whether backups fail. The place is
+  ran to its end, and whether backups fail. The place is
   whoever started the server's to know, and the reason a backup failed
   can name it (a path that is in use, or no longer holds the backup),
   so the reply carries neither: the reason stays on the server's
   standard error. The time is an age the server works out, not a
   moment, so the asker's clock does not enter. `backup --status` prints
   it and exits with 1 when backups fail; a server that keeps no backup
-  says so and that is not a failure.
+  says so and that is not a failure. A backup is taken only when
+  something was written since the last, so this says how the last
+  backup went and not that the place still holds it: a place lost while
+  nothing is written is found at the next write. `backup <directory>
+  --check` is what asks the place itself.
 - **A backup read while another finishes is read again.** A backup
   writes its key file, then its manifest, then removes the key file of
   the backup before; a restore or a check that began with the old

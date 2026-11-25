@@ -36,18 +36,25 @@ impl TempDir {
         command
     }
 
-    /// Starts `serve` on a port the system chooses and returns it with
-    /// that port.
+    /// Starts `serve` on the store `store`, new but for its branch, on a
+    /// port the system chooses, and returns it with that port.
     fn serve(&self, options: &[&str]) -> (Server, u16) {
         let made = self
             .umbrachyx("store", &["branch", BRANCH, "--from", "main"])
             .output()
             .expect("runs");
         assert!(made.status.success());
+        let (server, port, _) = self.start("store", options);
+        (server, port)
+    }
+
+    /// Starts `serve` on the store `db` and returns it with its port and
+    /// what it said on starting.
+    fn start(&self, db: &str, options: &[&str]) -> (Server, u16, String) {
         let mut args = vec!["serve", BRANCH, "--port", "0"];
         args.extend_from_slice(options);
         let mut child = self
-            .umbrachyx("store", &args)
+            .umbrachyx(db, &args)
             .stderr(Stdio::piped())
             .spawn()
             .expect("starts");
@@ -69,7 +76,7 @@ impl TempDir {
             let mut rest = Vec::new();
             let _ = stderr.read_to_end(&mut rest);
         });
-        (server, port)
+        (server, port, all)
     }
 
     /// What `umbrachyx backup --status` says of the server on `port`:
@@ -203,6 +210,12 @@ fn status_takes_no_directory_and_goes_with_backup_only() {
         .output()
         .expect("runs");
 
+    let both = dir
+        .umbrachyx("no-such-log", &["backup", "--status", "--check"])
+        .output()
+        .expect("runs");
+    assert_eq!(said(&both).0, 2);
+    assert!(said(&both).2.contains("one at a time"), "{:?}", said(&both));
     assert_eq!(said(&with_a_place).0, 2);
     assert_eq!(said(&elsewhere).0, 2);
     assert!(
@@ -226,4 +239,42 @@ fn nothing_listening_is_an_error() {
 
     assert_eq!(code, 2, "{out}{err}");
     assert!(err.contains(&format!("127.0.0.1:{port}")), "{err}");
+}
+
+#[test]
+fn a_replica_that_keeps_a_backup_counts_the_records_it_was_sent() {
+    let dir = TempDir::new("replica");
+    let run = |db: &str, args: &[&str]| {
+        let output = dir.umbrachyx(db, args).output().expect("runs");
+        assert!(output.status.success(), "{args:?}: {:?}", said(&output));
+    };
+    run("store", &["branch", BRANCH, "--from", "main"]);
+    let who = ["--who", "test", "--why", "a synthetic player"];
+    run(
+        "store",
+        &[&["commit", BRANCH, "player/1/gems=55"][..], &who[..]].concat(),
+    );
+    run("store", &["backup", &dir.path("seed")]);
+    run("replica", &["restore", &dir.path("seed")]);
+    let (_primary, primary_port, said) = dir.start("store", &["--feed-replicas-on", "0"]);
+    let feed = said
+        .lines()
+        .find_map(|line| line.strip_prefix("handing the log to replicas that ask on "))
+        .expect("says where replicas ask");
+    let place = dir.path("replica-backup");
+    let options = [
+        "--follow",
+        feed,
+        "--backup-to",
+        &place,
+        "--backup-every",
+        "0.05",
+    ];
+    let (_replica, replica_port, _) = dir.start("replica", &options);
+
+    // The third record of the log: the replica takes no write itself.
+    set(primary_port, "player/1/gems", "70");
+    let (code, out, err) = dir.status_with(replica_port, "records: 3 of the store's 3\n");
+
+    assert_eq!(code, 0, "{out}{err}");
 }
