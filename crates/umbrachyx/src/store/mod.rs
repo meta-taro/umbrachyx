@@ -53,6 +53,7 @@ mod plain;
 mod replica;
 mod replicas;
 mod seal;
+mod siv;
 mod tables;
 mod unsynced;
 mod view;
