@@ -211,6 +211,8 @@ pub struct Keys<S: KeyStorage> {
     /// The entries of keys in use that the file does not hold yet
     /// ([`Self::make_keys_held`]), in the order they were made.
     held: Vec<u8>,
+    /// Whose keys those are.
+    held_subjects: Vec<Vec<u8>>,
 }
 
 /// Shows how many keys there are, never the keys.
@@ -237,6 +239,7 @@ impl<S: KeyStorage> Keys<S> {
             by_fingerprint,
             stale: !is_whole,
             held: Vec::new(),
+            held_subjects: Vec::new(),
         })
     }
 
@@ -297,6 +300,8 @@ impl<S: KeyStorage> Keys<S> {
             added.extend(entry(subject, key)?);
         }
         self.held.extend(added);
+        self.held_subjects
+            .extend(made.iter().map(|(subject, _)| subject.to_vec()));
         self.use_keys(&made);
         Ok(())
     }
@@ -323,6 +328,7 @@ impl<S: KeyStorage> Keys<S> {
             return Err(error.into());
         }
         self.held.clear();
+        self.held_subjects.clear();
         Ok(())
     }
 
@@ -418,13 +424,26 @@ impl<S: KeyStorage> Keys<S> {
         self.stale = false;
         // Every key in use went into the file just written.
         self.held.clear();
+        self.held_subjects.clear();
         Ok(true)
     }
 
     /// Every key in memory as the file's bytes: the header, then the keys
     /// in subject order.
     pub(crate) fn entries(&self) -> Result<Vec<u8>, KeyError> {
-        let mut subjects: Vec<&Vec<u8>> = self.keys.keys().collect();
+        self.entries_of(|_| true)
+    }
+
+    /// As [`Self::entries`], without the keys the file does not hold
+    /// yet: what may be copied elsewhere. A key that is only held is
+    /// lost with the process, and the subject is then given another; a
+    /// copy that kept the first would keep it against the second.
+    pub fn durable_entries(&self) -> Result<Vec<u8>, KeyError> {
+        self.entries_of(|subject| !self.held_subjects.iter().any(|held| held == subject))
+    }
+
+    fn entries_of(&self, is_wanted: impl Fn(&Vec<u8>) -> bool) -> Result<Vec<u8>, KeyError> {
+        let mut subjects: Vec<&Vec<u8>> = self.keys.keys().filter(|s| is_wanted(s)).collect();
         subjects.sort();
         let mut bytes = header().to_vec();
         for subject in subjects {

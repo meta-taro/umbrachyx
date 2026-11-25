@@ -641,3 +641,23 @@ fn erasing_a_subject_whose_key_is_held_leaves_the_file_without_it() {
     assert_eq!(reopened.get(b"session/1"), None);
     assert_eq!(reopened.get(b"session/2"), Some(&other));
 }
+
+/// What may be copied elsewhere leaves out the keys the file does not
+/// hold yet, and has them once it does.
+#[test]
+fn keys_held_are_not_among_those_copied_elsewhere() {
+    let dir = TempDir::new("held-not-copied");
+    let mut keys = dir.open().expect("opens");
+    let durable = keys.key_for(b"player/1").expect("makes a durable key");
+    keys.make_keys_held(std::iter::once(&b"session/1"[..]))
+        .expect("makes a held key");
+    let held = *keys.get(b"session/1").expect("in use");
+
+    let copied = keys.durable_entries().expect("lists the keys");
+
+    assert!(contains(&copied, &durable));
+    assert!(!contains(&copied, &held));
+    keys.write_held().expect("writes it");
+    let copied = keys.durable_entries().expect("lists the keys");
+    assert!(contains(&copied, &held));
+}

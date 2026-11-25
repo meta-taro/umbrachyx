@@ -1034,8 +1034,11 @@ impl<S: Storage, C: Clock> Store<S, C> {
 
     /// Makes durable the keys that were put in use with the puts they
     /// sealed and held like them. Before every record: a value is never
-    /// on disk under a key that is not. If the key file refuses them,
-    /// the puts held under them will never be written either.
+    /// on disk under a key that is not. If the key file refuses them
+    /// while puts are held, they are counted lost, which stops a
+    /// server: the next write would try the key file again, but a
+    /// server whose key file fails is not left answering puts it may
+    /// never be able to keep.
     pub(crate) fn write_held_keys(&mut self) -> Result<(), StoreError> {
         let Some(sealer) = self.sealer.as_mut().filter(|sealer| sealer.has_held_keys()) else {
             return Ok(());

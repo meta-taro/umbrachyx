@@ -115,7 +115,11 @@ impl Sealer {
     /// Every key held now, as a key file's bytes: what a backup keeps
     /// beside its copy of the log.
     pub(crate) fn key_file(&self) -> Result<Vec<u8>, KeyError> {
-        self.keys.entries()
+        // Not the keys still held with puts answered early: no record
+        // a backup copies was sealed under one, and a backup that kept
+        // one would keep it after this store has lost it and given its
+        // subject another.
+        self.keys.durable_entries()
     }
 
     pub(crate) fn ring(&self) -> Ring {
