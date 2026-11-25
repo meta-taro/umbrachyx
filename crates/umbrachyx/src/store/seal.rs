@@ -18,9 +18,7 @@ use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
-use aes_siv::KeyInit;
-use aes_siv::siv::Aes256Siv;
-
+use super::siv::Siv;
 use crate::keys::{FINGERPRINT_LEN, Fingerprint, Key, KeyError, KeyStorage, Keys, fingerprint};
 use crate::tree::Bytes;
 
@@ -68,7 +66,7 @@ pub(crate) struct Sealer {
     /// The cipher of each key sealed with so far. Setting one up expands
     /// the key, which costs more than sealing a short value; and a key
     /// here is already in the ring, so sealing takes no lock.
-    ciphers: HashMap<Fingerprint, Aes256Siv>,
+    ciphers: HashMap<Fingerprint, Siv>,
 }
 
 impl Sealer {
@@ -169,14 +167,12 @@ impl Sealer {
 /// Ciphers kept per sealer and per reading thread before starting over.
 const MAX_CIPHERS: usize = 1_024;
 
-fn cipher_of(subject_key: &Key) -> Aes256Siv {
-    Aes256Siv::new_from_slice(subject_key).expect("keys are KEY_LEN bytes")
+fn cipher_of(subject_key: &Key) -> Siv {
+    Siv::new(subject_key)
 }
 
-fn seal_with(cipher: &mut Aes256Siv, print: &Fingerprint, key: &[u8], value: &[u8]) -> Vec<u8> {
-    let sealed = cipher
-        .encrypt([key], value)
-        .expect("AES-SIV seals any value with one header");
+fn seal_with(cipher: &mut Siv, print: &Fingerprint, key: &[u8], value: &[u8]) -> Vec<u8> {
+    let sealed = cipher.seal(key, value);
     let mut bytes = Vec::with_capacity(HEADER_LEN + sealed.len());
     bytes.push(SEALED);
     bytes.extend(print);
@@ -192,7 +188,7 @@ fn seal_with(cipher: &mut Aes256Siv, print: &Fingerprint, key: &[u8], value: &[u
 struct Openers {
     ring: u64,
     erasures: u64,
-    ciphers: HashMap<Fingerprint, Aes256Siv>,
+    ciphers: HashMap<Fingerprint, Siv>,
 }
 
 thread_local! {
@@ -220,10 +216,7 @@ pub(crate) fn open(ring: &Ring, key: &[u8], sealed: &[u8]) -> Option<Bytes> {
                 unknown.insert(cipher_of(&subject_key))
             }
         };
-        cipher
-            .decrypt([key], &sealed[HEADER_LEN..])
-            .ok()
-            .map(Bytes::from)
+        cipher.open(key, &sealed[HEADER_LEN..]).map(Bytes::from)
     })
 }
 
