@@ -322,10 +322,7 @@ impl Server {
         Some(Step::Reply(match (name.as_str(), args) {
             ("PING", []) => Reply::Simple("PONG"),
             ("PING", [message]) => Reply::Bulk(Some(message.clone())),
-            ("GET", [key]) => {
-                let value = self.reader.view().get(&self.branch, key);
-                Reply::Bulk(value.map(|value| value.to_vec()))
-            }
+            ("GET", [key]) => Reply::Bulk(self.reader.view().get_once(&self.branch, key)),
             ("AUTH", args) => session.authenticate(self.public_key, args),
             ("SET", [key, value]) => {
                 match session.may_write(&self.branch, key, self.require_auth) {

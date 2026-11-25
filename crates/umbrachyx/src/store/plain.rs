@@ -169,6 +169,13 @@ impl Value {
         }
     }
 
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::InPlace(held) => held,
+            Self::Shared(held) => held,
+        }
+    }
+
     fn bytes(&self) -> Bytes {
         match self {
             Self::InPlace(held) => Bytes::from(held.as_slice()),
@@ -197,6 +204,17 @@ impl PlainMap {
     pub fn get(&self, key: &[u8]) -> Option<Bytes> {
         let (asked, part) = self.asked(key);
         read(part).get(&asked as &dyn Probe).map(Value::bytes)
+    }
+
+    /// What `read` makes of what `key` holds, as it was stored, without
+    /// a copy of it being made first. `read` runs with the key's part of
+    /// the map held: it is for opening or copying the value, nothing
+    /// that waits.
+    pub fn read<T>(&self, key: &[u8], read: impl FnOnce(&[u8]) -> T) -> Option<T> {
+        let (asked, part) = self.asked(key);
+        let part = self::read(part);
+        part.get(&asked as &dyn Probe)
+            .map(|value| read(value.as_slice()))
     }
 
     pub fn contains(&self, key: &[u8]) -> bool {

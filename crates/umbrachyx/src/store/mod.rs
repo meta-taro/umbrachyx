@@ -1725,6 +1725,15 @@ fn encode_cell(commit: &CommitId, value: Option<&[u8]>) -> Bytes {
     Arc::from(bytes)
 }
 
+/// The value a cell holds, where it lies in the cell: `None` for a
+/// removal.
+fn cell_value(bytes: &[u8]) -> Option<&[u8]> {
+    match bytes.get(COMMIT_ID_LEN..)?.split_first() {
+        Some((&PRESENT, value)) => Some(value),
+        _ => None,
+    }
+}
+
 /// Cells are only written by `encode_cell`, so their layout is known.
 fn decode_cell(bytes: &[u8]) -> Cell {
     let (id, rest) = bytes.split_at(COMMIT_ID_LEN);
