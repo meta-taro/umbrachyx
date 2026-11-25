@@ -72,6 +72,14 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               and a subject erased since has no key in the
                               backup afterwards. Not while a server has the
                               log open: serve --backup-to does it then
+  backup <directory> --check  says whether the backup in <directory> would
+                              restore, without restoring it: every record
+                              of its copy of the log and its key file are
+                              what the backup says it holds. Opens no store
+                              and writes nothing, so it can run where only
+                              the backup is, and beside a running server
+                              (on Windows it is refused while that server
+                              is writing a backup there: ask again)
   restore <directory>         writes the store the backup in <directory>
                               holds to $UMBRACHYX_DB, which must not exist yet
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
@@ -198,7 +206,7 @@ fn main() -> ExitCode {
 const LOG_RESERVE: u64 = 16 * 1024 * 1024;
 
 /// Options that take no value.
-const FLAGS: &[&str] = &["require-auth", "current-values-only"];
+const FLAGS: &[&str] = &["require-auth", "current-values-only", "check"];
 
 struct Args {
     positional: Vec<String>,
@@ -271,6 +279,12 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let Some(command) = args.positional.first() else {
         return Err(USAGE.to_owned());
     };
+    // Said to `restore` it would be taken and the backup restored.
+    if args.options.contains_key("check") && command != "backup" {
+        return Err(format!(
+            "--check goes with backup, not {command}: backup <directory> --check"
+        ));
+    }
     // These never touch a log.
     match command.as_str() {
         "keygen" => return tokens::keygen(&args),
@@ -281,6 +295,10 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let path = std::env::var(DB_ENV).unwrap_or_else(|_| DEFAULT_DB.to_owned());
     if command == "restore" {
         return restore(&path, &args);
+    }
+    // Asked of the backup alone: no store is opened, here or anywhere.
+    if command == "backup" && args.options.contains_key("check") {
+        return backups::verify(&args);
     }
     // A server syncs for every write, so its log is zeroed ahead of what it
     // writes and a sync has only the record to make durable. Other commands

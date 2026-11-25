@@ -14,7 +14,7 @@ use std::time::Duration;
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
 use umbrachyx::log::{Edit, FileStorage};
 use umbrachyx::store::backup::{
-    BackupError, DirSource, DirTarget, Moment, Origin, Source, Target, back_up, restore,
+    BackupError, DirSource, DirTarget, Moment, Origin, Source, Target, back_up, restore, verify,
 };
 use umbrachyx::store::{CommitId, Committer, MAIN_BRANCH, Provenance, Store, SystemClock};
 
@@ -787,4 +787,54 @@ fn a_backup_taken_through_the_committer_holds_a_moment_of_what_others_were_writi
     assert_eq!(restored.log_records(), held);
     assert_eq!(ids(&restored).len() as u64, held);
     assert!(ids(&source).ends_with(&ids(&restored)));
+}
+
+/// A backup's directory, read; once the copy of the log has been read,
+/// `then` runs: what another process does while this one reads.
+struct Meanwhile<F: FnMut()> {
+    backup: DirSource,
+    then: Option<F>,
+}
+
+impl<F: FnMut()> Source for Meanwhile<F> {
+    fn log_len(&mut self) -> io::Result<u64> {
+        self.backup.log_len()
+    }
+
+    fn log_read(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        let read = self.backup.log_read(offset, len);
+        if let Some(mut then) = self.then.take() {
+            then();
+        }
+        read
+    }
+
+    fn read(&mut self, name: &str) -> io::Result<Option<Vec<u8>>> {
+        self.backup.read(name)
+    }
+}
+
+#[test]
+fn a_backup_that_finishes_while_the_one_before_is_checked_is_not_called_damaged() {
+    let dir = TempDir::new("checked-meanwhile");
+    let mut store = dir.open("source");
+    commit(&mut store, "player/1/gems", "55");
+    back_up(&mut store, &mut dir.target()).expect("backs up");
+    let first = dir.backup_files();
+    let mut source = Meanwhile {
+        backup: DirSource::new(&dir.backup_dir()),
+        // A player the backup before had no key for: this backup writes
+        // a new key file and removes the one the reader is about to ask
+        // for.
+        then: Some(|| {
+            commit(&mut store, "player/2/gems", "7");
+            back_up(&mut store, &mut dir.target()).expect("backs up");
+        }),
+    };
+
+    let checked = verify(&mut source).expect("checks out");
+
+    drop(source);
+    assert_ne!(dir.backup_files(), first, "the key file was not replaced");
+    assert_eq!(checked.records, store.log_records());
 }

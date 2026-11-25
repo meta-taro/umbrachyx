@@ -1258,6 +1258,20 @@ from the copy.
   It refuses to write where a log or a key file exists. The backup is
   only read, nothing is made or locked in it, so it can be restored
   from a copy that cannot be written to, such as a snapshot.
+- **A backup can be asked whether it would restore** (`backup
+  <directory> --check`): the same checks, by the same code, and nothing
+  written. It opens no store, so it runs where only the backup is. What
+  it does not say is what restoring does not check either: that the key
+  file holds a key for every subject in the log. A store restored
+  without one says so when it opens. It reads the whole copy of the log
+  into memory, as restoring still does.
+- **A backup read while another finishes is read again.** A backup
+  writes its key file, then its manifest, then removes the key file of
+  the backup before; a restore or a check that began with the old
+  manifest could find its key file gone and call a good backup damaged.
+  One that fails is read again if the manifest has changed since, four
+  times at most, and reported only when it fails under the manifest it
+  was read with.
 - **With no record written since, a backup writes nothing.** A key made
   since has sealed nothing that is in the log yet, and writing the key
   file again under the name the manifest holds a hash of would leave a
