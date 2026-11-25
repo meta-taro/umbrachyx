@@ -382,7 +382,14 @@ impl Server {
             key: key.to_vec(),
             value: Some(value.to_vec()),
         };
-        if self.reader.view().is_plain(key) {
+        let view = self.reader.view();
+        if let Some(held) = view.held_early(key, value) {
+            return Step::Early(Edit {
+                key: edit.key,
+                value: Some(held),
+            });
+        }
+        if view.is_plain(key) {
             return Step::Put(self.writer.put(vec![edit]));
         }
         let provenance = session.provenance("SET");
@@ -414,6 +421,9 @@ enum Step {
     Sent(Pending),
     /// A SET to a table that keeps no history, answered the same way.
     Put(PendingPut),
+    /// A SET to a plain-async table, its value ready to be held: the
+    /// thread that read it applies it, with the others it read.
+    Early(Edit),
 }
 
 fn is_set(command: &Command) -> bool {

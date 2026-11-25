@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::Answer;
 use crate::log::MAX_PAYLOAD_LEN;
@@ -42,13 +42,15 @@ pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub(super) struct Turns {
     pub(super) queue: Mutex<Queue>,
     /// Told whenever a turn ends.
-    pub(super) ended: Condvar,
+    ended: Condvar,
 }
 
 #[derive(Default)]
 pub(super) struct Queue {
     pub(super) jobs: VecDeque<Job>,
     pub(super) is_taken: bool,
+    /// How many threads wait to be told that a turn ended.
+    waiting: usize,
     /// Whether whoever has the turn waits for a replica to hold what it
     /// wrote, and lets replicas be answered meanwhile.
     is_lent: bool,
@@ -63,20 +65,72 @@ pub(super) struct Turn<'a>(pub(super) &'a Turns);
 
 impl Drop for Turn<'_> {
     fn drop(&mut self) {
-        lock(&self.0.queue).is_taken = false;
-        self.0.ended.notify_all();
+        let mut queue = lock(&self.0.queue);
+        queue.is_taken = false;
+        // Telling costs a system call on some systems even when nobody
+        // listens, and a thread that answers puts itself ends a turn
+        // for every connection it reads.
+        let is_awaited = queue.waiting > 0;
+        drop(queue);
+        if is_awaited {
+            self.0.ended.notify_all();
+        }
     }
 }
 
 impl Turns {
+    /// Waits to be told that a turn ended. Every wait for that goes
+    /// through here or [`Turns::wait_at_most`]: a turn that ends tells
+    /// only the threads counted.
+    pub(super) fn wait<'a>(&self, mut queue: MutexGuard<'a, Queue>) -> MutexGuard<'a, Queue> {
+        queue.waiting += 1;
+        let mut queue = self
+            .ended
+            .wait(queue)
+            .unwrap_or_else(PoisonError::into_inner);
+        queue.waiting -= 1;
+        queue
+    }
+
+    fn wait_at_most<'a>(
+        &self,
+        mut queue: MutexGuard<'a, Queue>,
+        at_most: Duration,
+    ) -> MutexGuard<'a, Queue> {
+        queue.waiting += 1;
+        let (mut queue, _) = self
+            .ended
+            .wait_timeout(queue, at_most)
+            .unwrap_or_else(PoisonError::into_inner);
+        queue.waiting -= 1;
+        queue
+    }
+
+    /// The turn to write, if within `at_most` nobody has it and nothing
+    /// is queued: for a thread that must not sleep, and whose write must
+    /// not go ahead of one queued before it. It looks again and again
+    /// rather than sleep, so `at_most` is a few turns' length, no more.
+    pub(super) fn take_if_idle(&self, at_most: Duration) -> Option<Turn<'_>> {
+        let since = Instant::now();
+        loop {
+            let mut queue = lock(&self.queue);
+            if !queue.is_taken && queue.jobs.is_empty() {
+                queue.is_taken = true;
+                return Some(Turn(self));
+            }
+            drop(queue);
+            if since.elapsed() >= at_most {
+                return None;
+            }
+            std::hint::spin_loop();
+        }
+    }
+
     /// Waits for the turn to write.
     pub(super) fn take(&self) -> Turn<'_> {
         let mut queue = lock(&self.queue);
         while queue.is_taken {
-            queue = self
-                .ended
-                .wait(queue)
-                .unwrap_or_else(PoisonError::into_inner);
+            queue = self.wait(queue);
         }
         queue.is_taken = true;
         Turn(self)
@@ -90,11 +144,7 @@ impl Turns {
     pub(super) fn take_after_a_writer(&self) -> Turn<'_> {
         let queue = lock(&self.queue);
         if queue.is_taken || !queue.jobs.is_empty() {
-            drop(
-                self.ended
-                    .wait_timeout(queue, LET_A_WRITER_GO)
-                    .unwrap_or_else(PoisonError::into_inner),
-            );
+            drop(self.wait_at_most(queue, LET_A_WRITER_GO));
         } else {
             drop(queue);
         }
@@ -108,11 +158,7 @@ impl Turns {
     pub(super) fn take_to_feed(&self) -> Option<Turn<'_>> {
         let mut queue = lock(&self.queue);
         if !queue.is_lent && (queue.is_taken || !queue.jobs.is_empty()) {
-            queue = self
-                .ended
-                .wait_timeout(queue, LET_A_WRITER_GO)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
+            queue = self.wait_at_most(queue, LET_A_WRITER_GO);
         }
         drop(queue);
         self.take_to_read()
@@ -131,10 +177,7 @@ impl Turns {
                 queue.is_taken = true;
                 return Some(Turn(self));
             }
-            queue = self
-                .ended
-                .wait(queue)
-                .unwrap_or_else(PoisonError::into_inner);
+            queue = self.wait(queue);
         }
     }
 

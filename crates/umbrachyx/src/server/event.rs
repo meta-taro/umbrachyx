@@ -17,6 +17,15 @@
 //! commands stay in order: one that is not a `SET` is not carried out
 //! until the `SET`s before it are answered, so it reads what they wrote.
 //!
+//! `SET`s to a plain-async table wait for no sync, so the thread that
+//! reads them holds them itself, those of one connection together, and
+//! answers at once: handing each to the thread that writes and being
+//! woken with the answer cost more than applying it, and the values are
+//! sealed here, on every serving thread at once, where the store does
+//! one thing at a time. A serving thread still never sleeps for them: if
+//! they would have to wait, for another thread or for the disk, they go
+//! to the thread that writes like the rest.
+//!
 //! Reads are answered from a view, on every serving thread at once, which
 //! one thread serving every connection could not.
 //!
@@ -38,12 +47,16 @@ use mio::{Events, Interest, Poll, Token, Waker};
 use super::resp::{self, Reply};
 use super::session::Session;
 use super::{MAX_PENDING_OUT, READ_CHUNK, Server, Slot, Step, is_set, set_reply};
-use crate::store::{Pending, PendingPut, Writer};
+use crate::log::Edit;
+use crate::store::{HeldEarly, Pending, PendingPut, Writer};
 
 /// The token of the waker that announces new connections.
 const WAKE: Token = Token(usize::MAX);
 /// Events taken from the operating system at a time.
 const EVENTS: usize = 1024;
+/// `SET`s to plain-async tables held together at most, so that their
+/// replies do not wait for a long pipeline's end.
+const MAX_EARLY: usize = 256;
 /// Bytes read from one connection before the others get their turn.
 const READ_BUDGET: usize = 1024 * 1024;
 
@@ -235,6 +248,12 @@ struct Connection {
     /// A command that is not a `SET` waits in `input` for the `SET`s
     /// before it to be answered.
     is_waiting: bool,
+    /// `SET`s to plain-async tables read and not yet held.
+    early: Vec<Edit>,
+    /// Whether the thread that writes has to be told: puts are held
+    /// that it must have on disk in time, and it counts from when it
+    /// hears.
+    must_tell: bool,
     _slot: Slot,
 }
 
@@ -331,6 +350,7 @@ impl Loop {
                 let before = connection.unanswered.len();
                 connection.read(&self.server, &mut self.chunk);
                 has_queued |= connection.unanswered.len() > before;
+                has_queued |= std::mem::take(&mut connection.must_tell);
             }
         }
         if has_queued {
@@ -397,6 +417,8 @@ impl Loop {
                     is_blocked: false,
                     has_backlog: false,
                     is_waiting: false,
+                    early: Vec::new(),
+                    must_tell: false,
                     _slot: slot,
                 },
             );
@@ -510,12 +532,25 @@ impl Connection {
                     break Ok(());
                 }
                 Ok(Some((command, len))) => {
+                    if !is_set(&command) || self.early.len() >= MAX_EARLY {
+                        self.hold_early(server);
+                        if !is_set(&command) && !self.unanswered.is_empty() {
+                            // They went to the thread that writes after
+                            // all, and the command waits for them.
+                            self.is_waiting = true;
+                            break Ok(());
+                        }
+                    }
                     used += len;
                     match server.execute(&command, &mut self.session) {
+                        Some(Step::Early(put)) => self.early.push(put),
                         Some(Step::Sent(commit)) => {
+                            // Replies go out in the order asked.
+                            self.hold_early(server);
                             self.unanswered.push_back(Outgoing::Waiting(commit));
                         }
                         Some(Step::Put(put)) => {
+                            self.hold_early(server);
                             self.unanswered.push_back(Outgoing::WaitingPut(put));
                         }
                         Some(Step::Reply(reply)) => self.reply(reply),
@@ -526,10 +561,42 @@ impl Connection {
                 Err(error) => break Err(error),
             }
         };
+        self.hold_early(server);
         self.input.drain(..used);
         if let Err(error) = result {
             self.reply(Reply::Error(format!("ERR {error}")));
             self.is_closing = true;
+        }
+    }
+
+    /// Holds the `SET`s to plain-async tables read so far and answers
+    /// them, on this thread; or queues them for the thread that writes,
+    /// if they would have to wait.
+    fn hold_early(&mut self, server: &Server) {
+        if self.early.is_empty() {
+            return;
+        }
+        let puts = std::mem::take(&mut self.early);
+        let count = puts.len();
+        match server.writer.hold_early(puts) {
+            Ok(HeldEarly::Held { is_first }) => {
+                self.must_tell |= is_first;
+                for _ in 0..count {
+                    self.reply(Reply::Simple("OK"));
+                }
+            }
+            Ok(HeldEarly::Refused(error)) => {
+                let reply = set_reply::<()>(Err(error));
+                for _ in 0..count {
+                    self.reply(reply.clone());
+                }
+            }
+            Err(puts) => {
+                for put in puts {
+                    let put = server.writer.put_sealed(vec![put]);
+                    self.unanswered.push_back(Outgoing::WaitingPut(put));
+                }
+            }
         }
     }
 

@@ -44,6 +44,9 @@ const PROCESS_CRASH_PERCENT: u64 = 8;
 const SYNC_FAULT_PERCENT: u64 = 8;
 /// Small, so writes keep overwriting and removing each other's keys.
 const KEY_SPACE: u64 = 40;
+/// How often puts answered early are held by the thread that read
+/// them, in a hundred.
+const HELD_BY_THE_READER_PERCENT: u64 = 50;
 const MAX_REQUESTS: u64 = 4;
 const MAX_EDITS: u64 = 4;
 const REMOVE_PERCENT: u64 = 20;
@@ -214,8 +217,18 @@ impl Run {
             .collect();
         let edits = edits_of(&requests);
         let records = self.store.log_records();
-        answers(self.store.write_requests(requests, true))
-            .map_err(|e| format!("step {step}: a put answered early failed: {e}"))?;
+        if self.rng.percent(HELD_BY_THE_READER_PERCENT) {
+            // As the thread that read them holds them: no values are
+            // sealed in this store, so they are ready as they are.
+            match self.store.hold_sealed(edits.clone()) {
+                Ok(None) => {}
+                Ok(Some(_)) => return Err(format!("step {step}: puts were given back")),
+                Err(e) => return Err(format!("step {step}: puts held early failed: {e}")),
+            }
+        } else {
+            answers(self.store.write_requests(requests, true))
+                .map_err(|e| format!("step {step}: a put answered early failed: {e}"))?;
+        }
         if self.store.log_records() != records {
             return Err(format!("step {step}: a put answered early was written"));
         }
@@ -423,7 +436,9 @@ impl Run {
             .collect();
         let waits = requests.iter().any(|request| match request {
             Request::Commit(_) => true,
-            Request::Put(edits) => !edits[0].key.starts_with(EARLY_TABLE.as_bytes()),
+            Request::Put(edits) | Request::SealedPut(edits) => {
+                !edits[0].key.starts_with(EARLY_TABLE.as_bytes())
+            }
         });
         if !waits {
             requests.push(Request::Put(self.random_edits(PLAIN_TABLE)));

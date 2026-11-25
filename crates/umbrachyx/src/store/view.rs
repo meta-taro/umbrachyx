@@ -5,13 +5,14 @@
 //! its latest-value map, nothing more: both share their nodes and never
 //! change once built.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use super::plain::PlainMap;
 use super::seal::Ring;
 use super::{decode_cell, reveal};
 use crate::hamt::Hamt;
+use crate::log::Engine;
 use crate::tree::{Bytes, Tree};
 
 #[derive(Debug, Clone)]
@@ -26,7 +27,7 @@ pub struct View {
     /// a view reads what such a table holds now.
     plain: Arc<PlainMap>,
     /// The tables that keep no history, by name.
-    plain_tables: Arc<HashSet<Vec<u8>>>,
+    plain_tables: Arc<HashMap<Vec<u8>, Engine>>,
 }
 
 impl View {
@@ -34,7 +35,7 @@ impl View {
         states: BTreeMap<String, (Tree, Hamt)>,
         ring: Option<Ring>,
         plain: Arc<PlainMap>,
-        plain_tables: Arc<HashSet<Vec<u8>>>,
+        plain_tables: Arc<HashMap<Vec<u8>, Engine>>,
     ) -> Self {
         Self {
             states,
@@ -47,8 +48,32 @@ impl View {
     /// Whether `key` is in a table that keeps no history, and so is
     /// written with a put rather than a commit.
     pub fn is_plain(&self, key: &[u8]) -> bool {
-        !self.plain_tables.is_empty()
-            && super::tables::table_of(key).is_some_and(|table| self.plain_tables.contains(table))
+        self.plain_engine_of(key).is_some()
+    }
+
+    /// `value` as the store would hold it for `key`, if a put of it
+    /// through a committer is answered before it is on disk and this
+    /// thread can make it ready without the store: the key's table is
+    /// plain-async, and the value is sealed here if values are
+    /// encrypted. `None` if the put is for the store to take whole: the
+    /// table is of another kind, or the key's subject has no key the
+    /// store has sealed with yet, and only the store makes keys.
+    pub fn held_early(&self, key: &[u8], value: &[u8]) -> Option<Vec<u8>> {
+        if self.plain_engine_of(key) != Some(Engine::PlainAsync) {
+            return None;
+        }
+        match &self.ring {
+            Some(ring) => super::seal::seal_apart(ring, key, value),
+            None => Some(value.to_vec()),
+        }
+    }
+
+    fn plain_engine_of(&self, key: &[u8]) -> Option<Engine> {
+        if self.plain_tables.is_empty() {
+            return None;
+        }
+        let table = super::tables::table_of(key)?;
+        self.plain_tables.get(table).copied()
     }
 
     pub fn has_branch(&self, branch: &str) -> bool {

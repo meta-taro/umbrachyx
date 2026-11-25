@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A `SET` to a plain-async table is held by the thread that read
+  it.** It was handed to the one thread that writes and the serving
+  thread woken with the answer. A serving thread now seals the value
+  and holds the put itself, those of one connection together, and
+  answers at once; it still goes to the thread that writes if it would
+  have to wait. On one laptop: 41,000 to 65,000 writes a second from one
+  client, 141,000 to 222,000 from eight, 880,000 to 1,210,000 sent 64 at
+  a time (`bench/results/2026-11-25-laptop-plain-async/`). What a
+  plain-async table promises is unchanged.
 - **Sealing and opening a value set its key up once.** The store puts
   AES-SIV together from RustCrypto's `aes`, `cmac` and `ctr` itself,
   where it used their `aes-siv`, which expands a key for every value.
