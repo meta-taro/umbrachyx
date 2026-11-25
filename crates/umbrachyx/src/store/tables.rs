@@ -9,7 +9,7 @@
 //! it from the log, which is not built; refusing keeps the store as it is
 //! written equal to the store as the log replays.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::log::Engine;
@@ -20,10 +20,10 @@ pub(super) struct Tables {
     /// Tables some commit has written to, on any branch, including keys
     /// removed since.
     written: HashSet<Vec<u8>>,
-    /// The declared tables that keep no history, to hand to views: made
-    /// anew when a declaration changes it, which is seldom, and shared
-    /// otherwise.
-    plain: Arc<HashSet<Vec<u8>>>,
+    /// The declared tables that keep no history, and which of the two
+    /// engines holds each, to hand to views: made anew when a
+    /// declaration changes it, which is seldom, and shared otherwise.
+    plain: Arc<HashMap<Vec<u8>, Engine>>,
 }
 
 /// Why a table cannot be declared.
@@ -50,7 +50,7 @@ impl Tables {
     }
 
     /// The names of the tables that keep no history.
-    pub fn plain(&self) -> Arc<HashSet<Vec<u8>>> {
+    pub fn plain(&self) -> Arc<HashMap<Vec<u8>, Engine>> {
         Arc::clone(&self.plain)
     }
 
@@ -85,9 +85,14 @@ impl Tables {
     pub fn declare(&mut self, name: &[u8], engine: Engine) -> Result<(), Refusal> {
         self.check(name)?;
         self.declared.insert(name.to_vec(), engine);
-        if engine.is_plain() != self.plain.contains(name) {
+        let held = engine.is_plain().then_some(engine);
+        if held != self.plain.get(name).copied() {
             let plain = self.declared.iter().filter(|(_, engine)| engine.is_plain());
-            self.plain = Arc::new(plain.map(|(name, _)| name.clone()).collect());
+            self.plain = Arc::new(
+                plain
+                    .map(|(name, engine)| (name.clone(), *engine))
+                    .collect(),
+            );
         }
         Ok(())
     }

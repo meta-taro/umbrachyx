@@ -42,6 +42,12 @@ const PIPELINE: usize = 16;
 const MIN_KILL_DELAY_MILLIS: u64 = 20;
 const MAX_KILL_DELAY_MILLIS: u64 = 300;
 const SEED: u64 = 0x5EED_0002;
+/// How long a put answered before the disk may wait for it: short beside
+/// the time until the kill, so that some are on disk by then and some
+/// are not.
+const SYNC_EVERY_MILLIS: &str = "20";
+/// The table every key here is in.
+const TABLE: &str = "round";
 /// The log grows every round and the server replays all of it before it
 /// listens, which by the last rounds takes seconds on a slow CI runner.
 const START_TIMEOUT: Duration = Duration::from_secs(120);
@@ -132,10 +138,20 @@ impl Drop for Server {
 fn start_server(log: &Path, errors: &Path) -> (Server, u16) {
     let error_file = File::create(errors).expect("creates the error file");
     let mut server = Server(
-        umbrachyx(log, &["serve", BRANCH, "--port", "0"])
-            .stderr(error_file)
-            .spawn()
-            .expect("starts the server"),
+        umbrachyx(
+            log,
+            &[
+                "serve",
+                BRANCH,
+                "--port",
+                "0",
+                "--sync-every",
+                SYNC_EVERY_MILLIS,
+            ],
+        )
+        .stderr(error_file)
+        .spawn()
+        .expect("starts the server"),
     );
     let started = Instant::now();
     while started.elapsed() < START_TIMEOUT {
@@ -166,7 +182,13 @@ fn set(key: &str, value: &str) -> Vec<u8> {
 
 /// Writes until the server goes away; returns the writes it acknowledged,
 /// and says so once it has one.
-fn client(port: u16, round: u32, client: usize, has_written: &AtomicBool) -> Vec<(String, String)> {
+fn client(
+    port: u16,
+    round: u32,
+    client: usize,
+    pause: Duration,
+    has_written: &AtomicBool,
+) -> Vec<(String, String)> {
     let mut acknowledged = Vec::new();
     let Ok(stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return acknowledged;
@@ -204,6 +226,7 @@ fn client(port: u16, round: u32, client: usize, has_written: &AtomicBool) -> Vec
                 _ => return acknowledged,
             }
         }
+        thread::sleep(pause);
     }
     acknowledged
 }
@@ -215,14 +238,55 @@ fn rounds() -> u32 {
         .unwrap_or(FULL_ROUNDS)
 }
 
-fn kill_rounds(name: &str, rounds: u32) {
+/// What a table promises of a write that was acknowledged.
+#[derive(Clone, Copy, PartialEq)]
+enum Promise {
+    /// It is there after any failure.
+    Kept,
+    /// It may be lost, with every write the same client had acknowledged
+    /// after it: a plain-async table.
+    KeptUpToSomeMoment,
+}
+
+impl Promise {
+    /// How long a client waits between its requests. Writes that wait
+    /// for no sync come by the tens of thousands in a round, and a
+    /// hundred rounds of them are all kept and all read back: paced,
+    /// the kill still falls between two syncs of what is held.
+    fn pause(self) -> Duration {
+        match self {
+            Self::Kept => Duration::ZERO,
+            Self::KeptUpToSomeMoment => Duration::from_millis(1),
+        }
+    }
+}
+
+fn kill_rounds(name: &str, rounds: u32, promise: Promise) {
     let dir = TempDir::new(name);
+    if promise == Promise::KeptUpToSomeMoment {
+        let declared = umbrachyx(
+            &dir.log(),
+            &[
+                "table",
+                TABLE,
+                "plain-async",
+                "--who",
+                "test",
+                "--why",
+                "it may lose its last writes",
+            ],
+        )
+        .status()
+        .expect("runs");
+        assert!(declared.success(), "declares the table");
+    }
     let created = umbrachyx(&dir.log(), &["branch", BRANCH, "--from", MAIN_BRANCH])
         .status()
         .expect("runs");
     assert!(created.success(), "creates the branch");
     let mut random = SEED;
     let mut acknowledged = Vec::new();
+    let mut lost = 0;
 
     for round in 0..rounds {
         let span = MAX_KILL_DELAY_MILLIS - MIN_KILL_DELAY_MILLIS;
@@ -232,7 +296,7 @@ fn kill_rounds(name: &str, rounds: u32) {
         let clients: Vec<_> = (0..CLIENTS)
             .map(|n| {
                 let has_written = Arc::clone(&has_written);
-                thread::spawn(move || client(port, round, n, &has_written))
+                thread::spawn(move || client(port, round, n, promise.pause(), &has_written))
             })
             .collect();
         let started = Instant::now();
@@ -241,9 +305,10 @@ fn kill_rounds(name: &str, rounds: u32) {
         }
         thread::sleep(Duration::from_millis(delay));
         server.kill();
-        for handle in clients {
-            acknowledged.extend(handle.join().expect("client finishes"));
-        }
+        let by_client: Vec<Vec<(String, String)>> = clients
+            .into_iter()
+            .map(|handle| handle.join().expect("client finishes"))
+            .collect();
 
         let storage = FileStorage::open(&dir.log()).expect("opens storage");
         let mut keys_path = dir.log().into_os_string();
@@ -256,6 +321,27 @@ fn kill_rounds(name: &str, rounds: u32) {
         let store = Store::open_sealed(storage, keys, SystemClock).unwrap_or_else(|e| {
             panic!("round {round} (seed {SEED:#x}): the store fails to open: {e}")
         });
+        for writes in by_client {
+            // What is kept of a client's writes, in the order they were
+            // acknowledged: all of them, or all up to some moment.
+            let kept = match promise {
+                Promise::Kept => writes.len(),
+                Promise::KeptUpToSomeMoment => writes
+                    .iter()
+                    .position(|(key, _)| store.get(BRANCH, key.as_bytes()).is_none())
+                    .unwrap_or(writes.len()),
+            };
+            for (key, _) in &writes[kept..] {
+                assert_eq!(
+                    store.get(BRANCH, key.as_bytes()),
+                    None,
+                    "round {round} (seed {SEED:#x}): {key} is there without a write before it"
+                );
+            }
+            lost += writes.len() - kept;
+            acknowledged.extend(writes.into_iter().take(kept));
+        }
+        // Those of this round, and every one an earlier round kept.
         for (key, value) in &acknowledged {
             assert_eq!(
                 store.get(BRANCH, key.as_bytes()),
@@ -266,21 +352,35 @@ fn kill_rounds(name: &str, rounds: u32) {
     }
     assert!(
         !acknowledged.is_empty(),
-        "no write was ever acknowledged; the test proved nothing"
+        "no write was ever kept; the test proved nothing"
     );
     println!(
-        "{rounds} rounds, {} acknowledged SETs, none lost",
+        "{rounds} rounds, {} acknowledged SETs kept, {lost} lost with the writes after them",
         acknowledged.len()
     );
 }
 
 #[test]
 fn quick_kill_the_server_during_writes() {
-    kill_rounds("quick", QUICK_ROUNDS);
+    kill_rounds("quick", QUICK_ROUNDS, Promise::Kept);
+}
+
+/// A plain-async table: a client's writes that are there after the kill
+/// are the first so many it had acknowledged, and what one round kept
+/// the next still holds.
+#[test]
+fn quick_kill_the_server_during_writes_answered_before_the_disk() {
+    kill_rounds("quick-early", QUICK_ROUNDS, Promise::KeptUpToSomeMoment);
+}
+
+#[test]
+#[ignore = "100 rounds; run with --ignored"]
+fn kill_the_server_during_writes_answered_before_the_disk() {
+    kill_rounds("full-early", rounds(), Promise::KeptUpToSomeMoment);
 }
 
 #[test]
 #[ignore = "100 rounds; run with --ignored"]
 fn kill_the_server_during_writes() {
-    kill_rounds("full", rounds());
+    kill_rounds("full", rounds(), Promise::Kept);
 }

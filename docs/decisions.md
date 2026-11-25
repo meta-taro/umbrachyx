@@ -1904,8 +1904,8 @@ So a table can be declared to keep no history at all.
   writes answered are lost and nothing else. What comes back is
   everything answered up to some moment, never a later write without an
   earlier one.
-- **How.** The thread that writes applies such a put and answers it,
-  and holds it in memory. The next record written for any reason, a
+- **How.** Such a put is applied and answered, and held in memory.
+  The next record written for any reason, a
   commit, a put that waits, a new branch, carries the held puts first,
   in the same frame when it fits; otherwise a timer writes them. So the
   log keeps the order things were answered in, and a write that waited
@@ -1913,6 +1913,43 @@ So a table can be declared to keep no history at all.
   log still has at most one unsynced frame, so recovery is unchanged.
   What is held is bounded at 4 MiB: past it a put waits for the disk
   like any other.
+- **The thread that reads a put holds it** (measured, taken). A put
+  that waits for no sync was still handed to the one thread that
+  writes, which applied it and woke the serving thread with the answer:
+  two wakes and several locks for a few hundred nanoseconds of work,
+  and every value sealed by that one thread. Now a serving thread seals
+  the values it read itself, on as many threads as serve, and then
+  takes the turn to write for as long as holding them takes: the puts
+  of one connection together, under the store's lock, so the map and
+  the held puts keep one order and everything above still holds as
+  written. It never sleeps for them. It looks for the turn for 100
+  microseconds at most (none on a machine with one processor), and only
+  while whoever has it is another thread holding puts: if a write that
+  waits for the disk has the turn or is queued, if something is queued
+  that they must not go ahead of, or if 4 MiB is held already, they go
+  to the thread that writes as before. Looking through a sync was tried
+  first and kept every connection of the serving thread waiting: beside
+  clients writing a table with history, in a Linux container, reads
+  fell from about 200,000 a second to 65,000–108,000 and their 99th
+  percentile rose from 0.18 ms to 0.9; not looking then, 188,000–193,000
+  and 0.18. Only the store makes keys: a subject's first value is sealed
+  there, and the serving threads seal for the subject from then on.
+  On one laptop, two builds in turn (`bench/ab.sh <old> <new> 3
+  plain-async`,
+  [`bench/results/2026-11-25-laptop-plain-async/`](../bench/results/2026-11-25-laptop-plain-async/)),
+  writes a second went from 42,500 to 63,000–65,000 from one client,
+  144,000–146,000 to 220,000–223,000 from eight, 207,000–209,000 to
+  241,000–242,000 from 64, and 1,000,000 to 1,200,000 sent 64 at a
+  time. Tried on the way and not
+  kept: looking for the turn for 20 microseconds (with two serving
+  threads four puts in five went to the thread that writes after all)
+  and for 2,000 (fewer writes than 100), and a higher bound on what is
+  held (48 MiB gave a tenth more sent 64 at a time, and was not what
+  held the rate down). A subject for every key changes nothing while
+  the subjects are new, since each new one waits for the key file
+  ([#36](https://github.com/meta-taro/umbrachyx/issues/36)), and gains
+  as above once they have keys. The release machines have not measured
+  it.
 - **Only the server's path answers first.** A put made with the
   command-line tool or the MCP tool is on disk when answered, whatever
   the table: there the caller waits anyway, and one promise fewer has to

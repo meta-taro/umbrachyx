@@ -38,6 +38,11 @@ pub(crate) struct Keyring {
     id: u64,
     erasures: AtomicU64,
     keys: RwLock<HashMap<Fingerprint, Key>>,
+    /// Which key each subject the store has sealed for is sealed under,
+    /// for the threads that seal without the store ([`seal_apart`]).
+    /// Only what the store put here: a subject missing from it is one
+    /// for the store to seal.
+    subjects: RwLock<HashMap<Vec<u8>, Fingerprint>>,
 }
 
 /// Never the keys themselves.
@@ -57,6 +62,29 @@ impl Keyring {
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<Fingerprint, Key>> {
         self.keys.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn print_of(&self, subject: &[u8]) -> Option<Fingerprint> {
+        let subjects = self.subjects.read().unwrap_or_else(PoisonError::into_inner);
+        subjects.get(subject).copied()
+    }
+
+    fn note_subject(&self, subject: &[u8], print: Fingerprint) {
+        let mut subjects = self
+            .subjects
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if subjects.len() >= MAX_SUBJECTS_APART {
+            subjects.clear();
+        }
+        subjects.insert(subject.to_vec(), print);
+    }
+
+    fn forget_subject(&self, subject: &[u8]) {
+        self.subjects
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(subject);
     }
 }
 
@@ -78,6 +106,7 @@ impl Sealer {
                 id: NEXT_RING.fetch_add(1, Ordering::Relaxed),
                 erasures: AtomicU64::new(0),
                 keys: RwLock::new(ring),
+                subjects: RwLock::new(HashMap::new()),
             }),
             ciphers: HashMap::new(),
         }
@@ -105,13 +134,17 @@ impl Sealer {
 
     /// Seals `value` for `key`, making its subject's key first if needed.
     pub(crate) fn seal(&mut self, key: &[u8], value: &[u8]) -> Result<Vec<u8>, KeyError> {
-        let subject_key = self.keys.key_for(subject(key))?;
+        let subject = subject(key);
+        let subject_key = self.keys.key_for(subject)?;
         let print = fingerprint(&subject_key);
         if !self.ciphers.contains_key(&print) {
             if self.ciphers.len() >= MAX_CIPHERS {
                 self.ciphers.clear();
             }
             self.ring.write().insert(print, subject_key);
+            // After the key is in the ring: whoever finds the subject
+            // here finds its key there.
+            self.ring.note_subject(subject, print);
             self.ciphers.insert(print, cipher_of(&subject_key));
         }
         let cipher = self.ciphers.get_mut(&print).expect("just put there");
@@ -147,6 +180,7 @@ impl Sealer {
     /// here on even if the key file cannot be written; the store finishes
     /// the file when it next opens.
     pub(crate) fn erase(&mut self, subject: &[u8], key: &Fingerprint) -> Result<(), KeyError> {
+        self.ring.forget_subject(subject);
         self.ring.write().remove(key);
         // After the key has left the ring, so a reader that sees the new
         // count and drops its ciphers cannot find the key there again.
@@ -166,6 +200,10 @@ impl Sealer {
 
 /// Ciphers kept per sealer and per reading thread before starting over.
 const MAX_CIPHERS: usize = 1_024;
+/// Subjects whose key is named for the threads that seal without the
+/// store, before starting over. One that is forgotten is sealed by the
+/// store once more, which names it again.
+const MAX_SUBJECTS_APART: usize = 65_536;
 
 fn cipher_of(subject_key: &Key) -> Siv {
     Siv::new(subject_key)
@@ -217,6 +255,50 @@ pub(crate) fn open(ring: &Ring, key: &[u8], sealed: &[u8]) -> Option<Bytes> {
             }
         };
         cipher.open(key, &sealed[HEADER_LEN..]).map(Bytes::from)
+    })
+}
+
+/// The ciphers a thread has sealed with without the store, by subject,
+/// kept under the same rule as its [`Openers`].
+#[derive(Default)]
+struct Sealers {
+    ring: u64,
+    erasures: u64,
+    ciphers: HashMap<Vec<u8>, (Fingerprint, Siv)>,
+}
+
+thread_local! {
+    static SEALERS: std::cell::RefCell<Sealers> = std::cell::RefCell::default();
+}
+
+/// `value` sealed for `key` on this thread, without the store, exactly
+/// as the store would seal it; or `None` if the store has not sealed for
+/// the key's subject yet. Only the store makes keys, and it names a
+/// subject for this once it has sealed for it.
+///
+/// So that many threads can seal at once: sealing is most of what a put
+/// costs, and the store does one thing at a time.
+pub(crate) fn seal_apart(ring: &Ring, key: &[u8], value: &[u8]) -> Option<Vec<u8>> {
+    let subject = subject(key);
+    SEALERS.with_borrow_mut(|sealers| {
+        // Read before the ring, as `open` does: a cipher made for a key
+        // erased after this is dropped on the next call.
+        let erasures = ring.erasures.load(Ordering::SeqCst);
+        let is_stale = sealers.ring != ring.id || sealers.erasures != erasures;
+        if is_stale || sealers.ciphers.len() >= MAX_CIPHERS {
+            sealers.ciphers.clear();
+            sealers.ring = ring.id;
+            sealers.erasures = erasures;
+        }
+        if !sealers.ciphers.contains_key(subject) {
+            let print = ring.print_of(subject)?;
+            let subject_key = *ring.read().get(&print)?;
+            sealers
+                .ciphers
+                .insert(subject.to_vec(), (print, cipher_of(&subject_key)));
+        }
+        let (print, cipher) = sealers.ciphers.get_mut(subject)?;
+        Some(seal_with(cipher, print, key, value))
     })
 }
 
