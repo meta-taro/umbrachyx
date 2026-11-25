@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
-use umbrachyx::log::{Edit, FileStorage};
+use umbrachyx::log::{Edit, FileStorage, Storage};
 use umbrachyx::store::backup::{
     BackupError, DirSource, DirTarget, Moment, Origin, Source, Target, back_up, restore, verify,
 };
@@ -837,4 +837,126 @@ fn a_backup_that_finishes_while_the_one_before_is_checked_is_not_called_damaged(
     drop(source);
     assert_ne!(dir.backup_files(), first, "the key file was not replaced");
     assert_eq!(checked.records, store.log_records());
+}
+
+/// A megabyte: how much of the copy of the log is read at a time.
+const PART: usize = 1024 * 1024;
+
+/// A backup's directory, read, that notes the most it was asked for at a
+/// time and, once told to, changes a byte of the copy of the log each
+/// time its start is read again.
+struct Watched {
+    backup: DirSource,
+    most_asked: usize,
+    /// How many times the start of the copy has been read.
+    passes: u32,
+    /// From which pass on a byte of the copy reads changed.
+    changes_from_pass: Option<u32>,
+}
+
+impl Watched {
+    fn new(dir: &TempDir) -> Self {
+        Self {
+            backup: DirSource::new(&dir.backup_dir()),
+            most_asked: 0,
+            passes: 0,
+            changes_from_pass: None,
+        }
+    }
+}
+
+impl Source for Watched {
+    fn log_len(&mut self) -> io::Result<u64> {
+        self.backup.log_len()
+    }
+
+    fn log_read(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.most_asked = self.most_asked.max(len);
+        if offset == 0 {
+            self.passes += 1;
+        }
+        let mut read = self.backup.log_read(offset, len)?;
+        let is_changed = self
+            .changes_from_pass
+            .is_some_and(|from| self.passes >= from);
+        // Not in the first part: past the header, in some record.
+        if is_changed && offset != 0 {
+            let last = read.len() - 1;
+            read[last] ^= 0x01;
+        }
+        Ok(read)
+    }
+
+    fn read(&mut self, name: &str) -> io::Result<Option<Vec<u8>>> {
+        self.backup.read(name)
+    }
+}
+
+/// A store of ten players whose values make a log of about three parts,
+/// backed up.
+fn backed_up_in_several_parts(dir: &TempDir) -> FileStore {
+    let mut store = dir.open("source");
+    for player in 0..10 {
+        let value = player.to_string().repeat(300 * 1024);
+        commit(&mut store, &format!("player/{player}/notes"), &value);
+    }
+    back_up(&mut store, &mut dir.target()).expect("backs up");
+    store
+}
+
+#[test]
+fn restoring_and_checking_read_the_copy_of_the_log_a_part_at_a_time() {
+    let dir = TempDir::new("in-parts");
+    let store = backed_up_in_several_parts(&dir);
+    let mut log = FileStorage::open(&dir.log("restored")).expect("opens file");
+    let mut keys = FileKeyStorage::new(&dir.keys("restored"));
+    let mut source = Watched::new(&dir);
+
+    let checked = verify(&mut source).expect("checks out");
+    let restored = restore(&mut source, &mut log, Some(&mut keys)).expect("restores");
+
+    assert!(checked.bytes > 2 * PART as u64, "{} bytes", checked.bytes);
+    assert_eq!(source.most_asked, PART);
+    assert_eq!(restored.records, store.log_records());
+    drop(log);
+    assert_same(&dir.open("restored"), &store);
+}
+
+#[test]
+fn a_record_longer_than_a_part_restores() {
+    let dir = TempDir::new("long-record");
+    let mut store = dir.open("source");
+    commit(&mut store, "player/1/gems", "55");
+    commit(&mut store, "player/1/notes", &"n".repeat(PART + PART / 2));
+    commit(&mut store, "player/2/gems", "7");
+    back_up(&mut store, &mut dir.target()).expect("backs up");
+
+    let restored = dir.restored("restored");
+
+    assert_same(&restored, &store);
+}
+
+#[test]
+fn a_copy_that_changes_between_the_check_and_the_writing_leaves_no_store() {
+    let dir = TempDir::new("changes");
+    let store = backed_up_in_several_parts(&dir);
+    let mut log = FileStorage::open(&dir.log("restored")).expect("opens file");
+    let mut keys = FileKeyStorage::new(&dir.keys("restored"));
+    let mut source = Watched::new(&dir);
+    // The first pass checks the copy; the second writes it.
+    source.changes_from_pass = Some(2);
+
+    let refused = restore(&mut source, &mut log, Some(&mut keys));
+
+    assert!(
+        matches!(refused, Err(BackupError::Damaged(_))),
+        "{refused:?}"
+    );
+    assert!(log.read_all().expect("reads").is_empty(), "part of a log");
+    assert!(keys.read_all().expect("reads").is_empty(), "a key file");
+    // Nothing is left in the way of restoring the backup as it is.
+    let mut honest = DirSource::new(&dir.backup_dir());
+    restore(&mut honest, &mut log, Some(&mut keys)).expect("restores");
+    drop(log);
+    assert_same(&dir.open("restored"), &store);
 }

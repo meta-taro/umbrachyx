@@ -1263,8 +1263,21 @@ from the copy.
   written. It opens no store, so it runs where only the backup is. What
   it does not say is what restoring does not check either: that the key
   file holds a key for every subject in the log. A store restored
-  without one says so when it opens. It reads the whole copy of the log
-  into memory, as restoring still does.
+  without one says so when it opens.
+- **A backup is read a part at a time, and restoring reads it twice.**
+  The copy of the log can be larger than the memory of the machine that
+  restores it. It is read a megabyte at a time, and what is held is a
+  part and the record that runs across its end. Checking everything
+  before writing anything then takes two reads: one to check, one to
+  write. A hash of the bytes is taken both times, and if the second
+  differs the copy changed in between: the place restored to is emptied
+  again, the keys too, and the backup refused, because a part of a log
+  opens as a shorter store. On one laptop a backup of 1,000,000 SETs
+  (131 MB of log) took 590 MB to check or restore before and takes 8 MB,
+  in the same time to check and 0.01 to 0.03 s longer to restore
+  (`bench/results/2026-11-25-laptop-restore/`); the second read came
+  from the system's cache there, and on a disk that has to be read again
+  it costs a second read of the copy.
 - **A running server says how its backup goes, and not where it is.**
   `UMBRA.BACKUP` answers any client, as reads do: how many records the
   backup holds of the store's, how many seconds ago the last backup

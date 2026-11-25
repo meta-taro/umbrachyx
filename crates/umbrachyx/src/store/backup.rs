@@ -54,7 +54,7 @@ use std::io;
 
 use super::{Clock, Store};
 use crate::keys::{KeyError, KeyStorage};
-use crate::log::{self, Chain, HEADER_LEN, LogError, LogId, Storage};
+use crate::log::{self, Chain, CopyCheck, HEADER_LEN, LogError, LogId, Storage};
 
 mod dir;
 
@@ -531,11 +531,41 @@ pub struct Checked {
 /// time another backup finished while it was read.
 const MAX_READS: usize = 4;
 
-/// A backup read whole and found to be what its manifest says.
+/// How much of the copy of the log is read at a time. What is held of
+/// it is a part and the record that runs across its end: one record at
+/// most, however long the log.
+const PART: usize = 1024 * 1024;
+
+/// A backup read through and found to be what its manifest says.
 struct Read {
     manifest: Manifest,
-    log: Vec<u8>,
+    /// A hash of every byte of the copy of the log that was checked.
+    digest: [u8; 32],
     keys: Option<Vec<u8>>,
+}
+
+/// Reads the bytes of the copy of the log the manifest names, a part at
+/// a time and in order, and hands each to `each`. Never more than the
+/// manifest names: what comes after is an unfinished backup's.
+fn log_parts(
+    target: &mut impl Source,
+    manifest: &Manifest,
+    mut each: impl FnMut(&[u8]) -> Result<(), BackupError>,
+) -> Result<(), BackupError> {
+    let mut offset = 0;
+    while offset < manifest.log_len {
+        let len = usize::try_from(manifest.log_len - offset).map_or(PART, |left| left.min(PART));
+        let part = target.log_read(offset, len)?;
+        let part = &part[..part.len().min(len)];
+        if part.is_empty() {
+            return Err(BackupError::Damaged(
+                "the copy of the log is shorter than the manifest says",
+            ));
+        }
+        each(part)?;
+        offset += part.len() as u64;
+    }
+    Ok(())
 }
 
 /// Reads the backup at `target` and checks it as restoring does: every
@@ -564,15 +594,14 @@ fn read_once(target: &mut impl Source) -> Result<Read, BackupError> {
     let manifest = Manifest::read(target)?
         .filter(Manifest::is_started)
         .ok_or(BackupError::NoBackup)?;
-    let len = usize::try_from(manifest.log_len)
-        .map_err(|_| BackupError::Damaged("the manifest names more bytes than fit in memory"))?;
     if target.log_len()? < manifest.log_len {
         return Err(BackupError::Damaged(
             "the copy of the log is shorter than the manifest says",
         ));
     }
-    let log = target.log_read(0, len)?;
-    let copied = log::check_copy(&log)?;
+    let mut check = CopyCheck::new();
+    log_parts(target, &manifest, |part| Ok(check.feed(part)?))?;
+    let copied = check.finish()?;
     if (copied.id, copied.records, copied.chain) != (manifest.id, manifest.records, manifest.chain)
     {
         return Err(BackupError::Damaged(
@@ -595,7 +624,7 @@ fn read_once(target: &mut impl Source) -> Result<Read, BackupError> {
     };
     Ok(Read {
         manifest,
-        log,
+        digest: copied.digest,
         keys,
     })
 }
@@ -620,34 +649,59 @@ pub fn verify(target: &mut impl Source) -> Result<Checked, BackupError> {
 /// backup that does not check out is refused before anything is written.
 /// The backup is only read.
 ///
+/// The copy of the log is read twice, a part at a time: once to check
+/// it, once to write it. If what is read the second time is not what was
+/// checked, the place is emptied again and the backup refused.
+///
 /// The store is then opened as any other is.
 pub fn restore(
     target: &mut impl Source,
     log: &mut impl Storage,
-    keys: Option<&mut dyn KeyStorage>,
+    mut keys: Option<&mut dyn KeyStorage>,
 ) -> Result<Restored, BackupError> {
     let Read {
         manifest,
-        log: bytes,
+        digest,
         keys: key_file,
     } = read_whole(target)?;
-    let key_file = match key_file {
-        Some(bytes) => Some((keys.ok_or(BackupError::NeedsKeys)?, bytes)),
-        None => None,
-    };
+    if key_file.is_some() && keys.is_none() {
+        return Err(BackupError::NeedsKeys);
+    }
     if !log.read_all()?.iter().all(|&byte| byte == 0) {
         return Err(BackupError::NotEmpty);
     }
     // The keys first: a log without its keys does not open, and keys
     // without a log are a store with nothing in it.
-    if let Some((keys, bytes)) = key_file {
+    let mut wrote_keys = false;
+    if let (Some(keys), Some(bytes)) = (keys.as_deref_mut(), &key_file) {
         if !keys.read_all()?.is_empty() {
             return Err(BackupError::NotEmpty);
         }
-        keys.replace(&bytes)?;
+        keys.replace(bytes)?;
+        wrote_keys = true;
     }
     log.truncate(0)?;
-    log.append(&bytes)?;
+    let mut written = blake3::Hasher::new();
+    let copied = log_parts(target, &manifest, |part| {
+        written.update(part);
+        Ok(log.append(part)?)
+    });
+    let refused = match copied {
+        Err(error) => Some(error),
+        Ok(()) if *written.finalize().as_bytes() != digest => Some(BackupError::Damaged(
+            "the copy of the log changed while it was restored",
+        )),
+        Ok(()) => None,
+    };
+    if let Some(refused) = refused {
+        // A part of a log opens as a shorter store: nothing is left of it.
+        log.truncate(0)?;
+        log.sync()?;
+        if let (Some(keys), true) = (keys, wrote_keys) {
+            keys.replace(&[])?;
+        }
+        return Err(refused);
+    }
     log.sync()?;
     Ok(Restored {
         records: manifest.records,

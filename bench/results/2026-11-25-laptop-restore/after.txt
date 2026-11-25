@@ -1,0 +1,8 @@
+measured: the binary built from this tree
+sets: 1000000, copy of the log: 131008871 bytes
+backup --check  run 1: 8 MB  0.27 s
+backup --check  run 2: 8 MB  0.26 s
+backup --check  run 3: 8 MB  0.26 s
+restore         run 1: 8 MB  0.39 s
+restore         run 2: 8 MB  0.37 s
+restore         run 3: 8 MB  0.37 s
