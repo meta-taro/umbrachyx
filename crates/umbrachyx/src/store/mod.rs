@@ -62,7 +62,7 @@ use seal::{Ring, Sealer};
 use tables::{Refusal, Tables};
 
 pub use approvals::{Approved, PendingChange};
-pub use committer::{Committer, Pending, PendingPut, Reader, Writer};
+pub use committer::{Committer, HeldEarly, Pending, PendingPut, Reader, Writer};
 pub use inspect::{Inspect, Review};
 pub use merge::{Conflict, Merged, Reverted, ValueChange};
 pub use view::View;
@@ -123,13 +123,16 @@ pub struct CommitRequest {
 pub(crate) enum Request {
     Commit(CommitRequest),
     Put(Vec<Edit>),
+    /// Puts whose values are as the store holds them already: sealed by
+    /// the thread that read them ([`View::held_early`]).
+    SealedPut(Vec<Edit>),
 }
 
 impl Request {
     pub(crate) fn edits(&self) -> &[Edit] {
         match self {
             Self::Commit(request) => &request.edits,
-            Self::Put(edits) => edits,
+            Self::Put(edits) | Self::SealedPut(edits) => edits,
         }
     }
 }
@@ -724,6 +727,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         if let Some(sealer) = &mut self.sealer {
             let written = requests
                 .iter()
+                .filter(|request| !matches!(request, Request::SealedPut(_)))
                 .flat_map(Request::edits)
                 .filter(|edit| edit.value.is_some());
             sealer.make_keys_for(written.map(|edit| edit.key.as_slice()))?;
@@ -752,6 +756,14 @@ impl<S: Storage, C: Clock> Store<S, C> {
                     Ok(()) => {
                         is_early &= self.may_answer_early(&edits);
                         puts.extend(self.seal(edits)?);
+                        Outcome::Put
+                    }
+                    Err(error) => Outcome::Refused(error),
+                },
+                Request::SealedPut(edits) => match self.refuse_not_plain(&edits) {
+                    Ok(()) => {
+                        is_early &= self.may_answer_early(&edits);
+                        puts.extend(edits);
                         Outcome::Put
                     }
                     Err(error) => Outcome::Refused(error),

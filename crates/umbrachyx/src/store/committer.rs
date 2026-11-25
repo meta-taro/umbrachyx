@@ -45,7 +45,7 @@ use crate::log::{Edit, LogError, Storage};
 mod copies;
 mod turns;
 
-use turns::{Job, Slot, Turn, Turns, lock};
+use turns::{Job, Slot, Turns, lock};
 
 type Answer = Result<CommitId, StoreError>;
 
@@ -68,6 +68,10 @@ trait Engine: Send + Sync {
     fn write(&self, group: Vec<Job>);
     /// Writes everything queued. The caller holds the turn.
     fn write_queue(&self);
+    /// See [`Writer::hold_early`].
+    fn hold_early(&self, puts: Vec<Edit>) -> Result<HeldEarly, Vec<Edit>>;
+    /// See [`Writer::puts_held_early`].
+    fn puts_held_early(&self) -> u64;
     /// Whether the store was there to ask. The caller holds the turn.
     fn inspect(&self, question: Question<'_>) -> bool;
     /// As `inspect`, without writing the queue first and without the
@@ -138,6 +142,10 @@ struct Core<S: Storage, C: Clock> {
     /// What replicas hold, if a write is answered only once one holds
     /// it.
     replicas: Option<Replicas>,
+    /// How long a thread that must not sleep looks for the turn.
+    look_for_the_turn: Duration,
+    /// How many puts were held by the thread that read them.
+    held_early: AtomicU64,
 }
 
 impl<S: Storage, C: Clock> Core<S, C> {
@@ -189,6 +197,39 @@ impl<S: Storage, C: Clock> Core<S, C> {
             }
             self.write(group);
         }
+    }
+
+    /// See [`Writer::hold_early`].
+    fn hold_early(&self, puts: Vec<Edit>) -> Result<HeldEarly, Vec<Edit>> {
+        if self.is_following || self.replicas.is_some() {
+            // A store that follows refuses writes, and one that waits
+            // for replicas may have to: both are for the thread that
+            // writes to say.
+            return Err(puts);
+        }
+        let Some(_turn) = self.turns.take_if_idle(self.look_for_the_turn) else {
+            return Err(puts);
+        };
+        let mut store = lock(&self.store);
+        let Some(store) = store.as_mut() else {
+            return Err(puts);
+        };
+        let count = puts.len() as u64;
+        let had_unsynced = store.has_unsynced_puts();
+        // No view is published: these puts make no key, and the map
+        // they change is the one every view reads already.
+        let held = match store.hold_sealed(puts) {
+            Ok(None) => HeldEarly::Held {
+                is_first: !had_unsynced,
+            },
+            Ok(Some(puts)) => return Err(puts),
+            Err(error) => HeldEarly::Refused(error),
+        };
+        if matches!(held, HeldEarly::Held { .. }) {
+            self.held_early.fetch_add(count, Ordering::Relaxed);
+            self.has_unsynced_puts.store(true, Ordering::Release);
+        }
+        Ok(held)
     }
 
     fn publish(&self, store: &Store<S, C>) {
@@ -263,6 +304,14 @@ where
 
     fn write_queue(&self) {
         Core::write_queue(self);
+    }
+
+    fn hold_early(&self, puts: Vec<Edit>) -> Result<HeldEarly, Vec<Edit>> {
+        Core::hold_early(self, puts)
+    }
+
+    fn puts_held_early(&self) -> u64 {
+        self.held_early.load(Ordering::Relaxed)
     }
 
     fn inspect(&self, question: Question<'_>) -> bool {
@@ -445,6 +494,10 @@ where
                 grew: Condvar::new(),
                 erased_through: AtomicU64::new(erased_through),
                 replicas,
+                look_for_the_turn: look_for_the_turn_with(
+                    std::thread::available_parallelism().map_or(1, usize::from),
+                ),
+                held_early: AtomicU64::new(0),
             }),
         }
     }
@@ -521,7 +574,8 @@ impl Writer {
         if self.engine.is_following() {
             answer.fill(Err(StoreError::ReadOnly));
         } else {
-            lock(&self.engine.turns().queue).jobs.push_back(Job {
+            self.engine.turns().queue(Job {
+                waits_for_the_disk: !matches!(request, Request::SealedPut(_)),
                 request,
                 len,
                 answer: Arc::clone(&answer),
@@ -538,8 +592,37 @@ impl Writer {
     /// commits need not wait for the sync: they ask each [`Pending`] with
     /// [`Pending::poll`] afterwards.
     pub fn write_queued(&self) {
-        let _turn = self.engine.turns().take();
+        let _turn = self.engine.turns().take_to_write_the_queue();
         self.engine.write_queue();
+    }
+
+    /// As [`Writer::put`], for puts [`Writer::hold_early`] gave back:
+    /// their values are as the store holds them already.
+    pub fn put_sealed(&self, edits: Vec<Edit>) -> PendingPut {
+        let len = edits_len(&edits);
+        PendingPut(self.queue(Request::SealedPut(edits), len))
+    }
+
+    /// Applies `puts` and holds them for the log, on this thread, and
+    /// says so at once: for puts to plain-async tables, whose values
+    /// [`View::held_early`](super::View::held_early) made ready. For a
+    /// thread that serves connections: handing such puts to the thread
+    /// that writes and being woken with the answer costs more than
+    /// applying them.
+    ///
+    /// It never waits for the disk, and looks for another thread's turn
+    /// to end no longer than a few turns take. The puts come back, for
+    /// [`Writer::put_sealed`], if they would have to wait: somebody is
+    /// writing, something is queued that they must not go ahead of, or
+    /// the store holds as much ahead of the disk as it may.
+    pub fn hold_early(&self, puts: Vec<Edit>) -> Result<HeldEarly, Vec<Edit>> {
+        self.engine.hold_early(puts)
+    }
+
+    /// How many puts [`Writer::hold_early`] has held since the committer
+    /// started.
+    pub fn puts_held_early(&self) -> u64 {
+        self.engine.puts_held_early()
     }
 
     /// Whether puts to plain-async tables were answered that are not on
@@ -599,6 +682,36 @@ impl Writer {
     }
 }
 
+/// What [`Writer::hold_early`] did with the puts it kept.
+#[derive(Debug)]
+pub enum HeldEarly {
+    /// They are applied, and every reader sees them. `is_first` if they
+    /// are the first the log does not hold: from now somebody has to
+    /// call [`Writer::sync_puts`] in time.
+    Held { is_first: bool },
+    /// The store refused them.
+    Refused(StoreError),
+}
+
+/// How long a thread that must not sleep looks for the turn to write,
+/// on a machine with more than one processor. A turn that holds puts for
+/// one connection takes a few microseconds, so this is several turns of
+/// the other serving threads. Too short, and with two serving threads
+/// four puts in five went to the thread that writes after all, which
+/// then held the turn for all of them; measured at 20, 100, 500 and
+/// 2,000 microseconds, 100 gave the most writes.
+const LOOK_FOR_THE_TURN: Duration = Duration::from_micros(100);
+
+/// With one processor, the thread that has the turn cannot end it while
+/// this one looks.
+fn look_for_the_turn_with(processors: usize) -> Duration {
+    if processors > 1 {
+        LOOK_FOR_THE_TURN
+    } else {
+        Duration::ZERO
+    }
+}
+
 /// A commit sent to a [`Committer`] and not yet answered.
 pub struct Pending {
     answer: Arc<Slot>,
@@ -625,16 +738,11 @@ impl Pending {
                 return answer;
             }
             if queue.is_taken {
-                queue = turns
-                    .ended
-                    .wait(queue)
-                    .unwrap_or_else(PoisonError::into_inner);
+                queue = turns.wait(queue);
                 continue;
             }
-            queue.is_taken = true;
-            drop(queue);
             {
-                let _turn = Turn(turns);
+                let _turn = turns.take_found_free(queue);
                 let group = turns.next_group();
                 self.engine.write(group);
             }

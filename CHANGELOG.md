@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A `SET` to a plain-async table is held by the thread that read
+  it.** It was handed to the one thread that writes and the serving
+  thread woken with the answer. A serving thread now seals the value
+  and holds the put itself, those of one connection together, and
+  answers at once; it still goes to the thread that writes if it would
+  have to wait. On one laptop: 42,500 to 64,000 writes a second from one
+  client, 145,000 to 221,000 from eight, 1,000,000 to 1,200,000 sent 64
+  at a time (`bench/results/2026-11-25-laptop-plain-async/`). What a
+  plain-async table promises is unchanged.
 - **A socket that said it has no more is not read again until it says
   otherwise.** A connection waiting for its `SET`s to be written was
   read each time the thread that writes finished a group, to hear only

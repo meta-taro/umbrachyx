@@ -87,6 +87,17 @@ impl<S: Storage, C: Clock> Store<S, C> {
         Ok(None)
     }
 
+    /// Applies `puts`, sealed already, and holds them for the log, as
+    /// [`Store::hold`] does, if every one is to a plain-async table.
+    /// Gives them back if they would have to be written now.
+    pub(crate) fn hold_sealed(&mut self, puts: Vec<Edit>) -> Result<Option<Vec<Edit>>, StoreError> {
+        self.check_writes_for_itself()?;
+        if !self.may_answer_early(&puts) {
+            return Ok(Some(puts));
+        }
+        self.hold(puts)
+    }
+
     /// Whether every key is in a table whose writes may be answered
     /// before they are on disk.
     pub(super) fn may_answer_early(&self, edits: &[Edit]) -> bool {

@@ -10,12 +10,21 @@
 # umbrachyx`), and `valkey-benchmark` and `valkey-cli` on the PATH. The
 # logs go to the temporary directory: point TMPDIR at the disk to measure.
 #
-# Usage: bench/ab.sh <old-checkout> <new-checkout> [rounds]
+# Usage: bench/ab.sh <old-checkout> <new-checkout> [rounds] [plain-async]
+#
+# With `plain-async` as the last word, only the writes to a plain-async
+# table are measured: for a change that touches nothing else, and for a
+# machine whose sync is too slow to wait for the other rows.
 set -euo pipefail
 
 old="$1"
 new="$2"
 rounds="${3:-3}"
+only="${4:-}"
+case "$only" in
+  "" | plain-async) ;;
+  *) echo "bench/ab.sh: the last word is plain-async or nothing, not $only" >&2; exit 2 ;;
+esac
 port=6390
 keys=1000000
 value=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -71,9 +80,13 @@ for _ in $(seq 1 "$rounds"); do
   for side in old new; do
     checkout="$old"
     [ "$side" = new ] && checkout="$new"
+    bin="$checkout/target/release/umbrachyx"
+    if [ -n "$only" ]; then
+      plain_rows "$side" "$bin" plain-async
+      continue
+    fi
     dir="$(mktemp -d)"
     export UMBRACHYX_DB="$dir/log"
-    bin="$checkout/target/release/umbrachyx"
     "$bin" branch bench --from main >/dev/null
     "$bin" serve bench --port "$port" 2>/dev/null &
     server=$!
