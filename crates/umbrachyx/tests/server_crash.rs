@@ -19,7 +19,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -98,9 +98,12 @@ fn umbrachyx(log: &Path, args: &[&str]) -> Command {
     command
 }
 
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
-    listener.local_addr().expect("has an address").port()
+/// The port a server says it serves on, once it has said the whole
+/// line: its error output may be read while the line is being written.
+fn serving_port(said: &str) -> Option<u16> {
+    said.split_inclusive('\n')
+        .filter(|line| line.starts_with("serving ") && line.ends_with('\n'))
+        .find_map(|line| line.trim_end().rsplit_once(':')?.1.parse().ok())
 }
 
 /// Kills the server when dropped, so a failed round leaves no process.
@@ -121,33 +124,32 @@ impl Drop for Server {
     }
 }
 
-/// Starts the server, its error output going to `errors`, and waits until
-/// it listens. A server that exits or never listens fails the round with
+/// Starts the server on a port the system chooses, its error output
+/// going to `errors`, and waits until it says there which port it
+/// holds: naming a free port first would let another test be handed the
+/// same one. A server that exits or never says fails the round with
 /// what it wrote.
 fn start_server(log: &Path, errors: &Path) -> (Server, u16) {
-    let port = free_port();
     let error_file = File::create(errors).expect("creates the error file");
     let mut server = Server(
-        umbrachyx(log, &["serve", BRANCH, "--port", &port.to_string()])
+        umbrachyx(log, &["serve", BRANCH, "--port", "0"])
             .stderr(error_file)
             .spawn()
             .expect("starts the server"),
     );
     let started = Instant::now();
     while started.elapsed() < START_TIMEOUT {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        let said = std::fs::read_to_string(errors).unwrap_or_default();
+        if let Some(port) = serving_port(&said) {
             return (server, port);
         }
         if let Some(status) = server.0.try_wait().expect("checks the server") {
-            panic!(
-                "the server exited with {status}: {}",
-                std::fs::read_to_string(errors).unwrap_or_default()
-            );
+            panic!("the server exited with {status}: {said}");
         }
         thread::sleep(START_WAIT);
     }
     panic!(
-        "the server did not listen on {port} within {:?}: {}",
+        "the server did not say where it serves within {:?}: {}",
         started.elapsed(),
         std::fs::read_to_string(errors).unwrap_or_default()
     );

@@ -2,7 +2,7 @@
 //! second process on a log already in use.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output};
 use std::thread;
@@ -53,9 +53,44 @@ impl Drop for Server {
     }
 }
 
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
-    listener.local_addr().expect("has an address").port()
+/// Starts the server `command` describes, which names port 0, and
+/// returns it with what it says up to the line that names where it
+/// listens, and the port the system gave it. A test that named a free
+/// port first could be handed the same one as another test.
+fn start_serving(mut command: Command) -> (Server, String, u16) {
+    use std::io::{BufRead, BufReader};
+
+    let mut child = command
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("starts");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr is piped"));
+    let server = Server(child);
+    let mut said = String::new();
+    let port = loop {
+        let mut line = String::new();
+        let read = stderr.read_line(&mut line).expect("reads stderr");
+        assert!(read > 0, "the server did not say where it serves: {said}");
+        said.push_str(&line);
+        if line.starts_with("serving ") {
+            let (_, port) = line.trim_end().rsplit_once(':').expect("an address");
+            break port.parse::<u16>().expect("a port");
+        }
+    };
+    // Whatever it says later is read and dropped, so it never blocks.
+    thread::spawn(move || {
+        let mut rest = Vec::new();
+        let _ = stderr.read_to_end(&mut rest);
+    });
+    (server, said, port)
+}
+
+/// Where a server that feeds replicas says they ask.
+fn feed_address(said: &str) -> String {
+    said.lines()
+        .find_map(|line| line.strip_prefix("handing the log to replicas that ask on "))
+        .unwrap_or_else(|| panic!("the server did not say where replicas ask: {said}"))
+        .to_owned()
 }
 
 fn connect(port: u16) -> TcpStream {
@@ -76,20 +111,8 @@ fn serve_turns_away_connections_past_max_connections() {
             .status
             .success()
     );
-    let port = free_port();
-    let port_arg = port.to_string();
-    let _server = Server(
-        dir.umbrachyx(&[
-            "serve",
-            BRANCH,
-            "--port",
-            &port_arg,
-            "--max-connections",
-            "1",
-        ])
-        .spawn()
-        .expect("starts"),
-    );
+    let (_server, _, port) =
+        start_serving(dir.umbrachyx(&["serve", BRANCH, "--port", "0", "--max-connections", "1"]));
 
     let mut first = connect(port);
     first.write_all(b"*1\r\n$4\r\nPING\r\n").expect("sends");
@@ -133,13 +156,7 @@ fn a_second_process_on_a_log_in_use_is_refused_at_once() {
             .status
             .success()
     );
-    let port = free_port();
-    let port_arg = port.to_string();
-    let _server = Server(
-        dir.umbrachyx(&["serve", BRANCH, "--port", &port_arg])
-            .spawn()
-            .expect("starts"),
-    );
+    let (_server, _, port) = start_serving(dir.umbrachyx(&["serve", BRANCH, "--port", "0"]));
     drop(connect(port));
 
     let started = Instant::now();
@@ -178,21 +195,15 @@ fn serve_with_require_auth_refuses_writes_without_auth() {
         .expect("text")
         .trim()
         .to_owned();
-    let port = free_port();
-    let port_arg = port.to_string();
-    let _server = Server(
-        dir.umbrachyx(&[
-            "serve",
-            BRANCH,
-            "--port",
-            &port_arg,
-            "--public-key",
-            &public,
-            "--require-auth",
-        ])
-        .spawn()
-        .expect("starts"),
-    );
+    let (_server, _, port) = start_serving(dir.umbrachyx(&[
+        "serve",
+        BRANCH,
+        "--port",
+        "0",
+        "--public-key",
+        &public,
+        "--require-auth",
+    ]));
 
     let mut client = connect(port);
     client
@@ -247,23 +258,14 @@ fn serve_reserves_its_log_and_other_commands_still_read_it() {
         client.read_exact(&mut reply).expect("reads");
         assert_eq!(&reply, b"+OK\r\n");
     };
-    let serve = |port: u16| {
-        let port_arg = port.to_string();
-        Server(
-            dir.umbrachyx(&["serve", BRANCH, "--port", &port_arg])
-                .spawn()
-                .expect("starts"),
-        )
-    };
+    let serve = || start_serving(dir.umbrachyx(&["serve", BRANCH, "--port", "0"]));
 
-    let port = free_port();
-    let server = serve(port);
+    let (server, _, port) = serve();
     set(port, "a", "1");
     let reserved = std::fs::metadata(dir.0.join("log")).expect("stats").len();
     drop(server);
     let read = dir.run(&["get", BRANCH, "a"]);
-    let port = free_port();
-    let server = serve(port);
+    let (server, _, port) = serve();
     set(port, "b", "2");
     drop(server);
 
@@ -335,13 +337,8 @@ fn serve_takes_a_number_of_serving_threads_and_refuses_what_is_not_one() {
             "{bad}: {stderr}"
         );
     }
-    let port = free_port();
-    let port_arg = port.to_string();
-    let _server = Server(
-        dir.umbrachyx(&["serve", BRANCH, "--port", &port_arg, "--threads", "1"])
-            .spawn()
-            .expect("starts"),
-    );
+    let (_server, _, port) =
+        start_serving(dir.umbrachyx(&["serve", BRANCH, "--port", "0", "--threads", "1"]));
 
     // One thread serves both connections.
     let mut first = connect(port);
@@ -363,39 +360,16 @@ fn serve_and_its_first_words(dir: &TempDir, extra: &[&str]) -> (Server, String) 
 
 /// As `serve_and_its_first_words`, with the port it listens on.
 fn serve_on_a_free_port(dir: &TempDir, extra: &[&str]) -> (Server, String, u16) {
-    use std::io::{BufRead, BufReader};
-
     assert!(
         dir.run(&["branch", BRANCH, "--from", "main"])
             .status
             .success()
     );
-    // Port 0: the system gives the server a free one, which it says.
-    // Naming a port here first would let two tests name the same.
     let mut args = vec!["serve", BRANCH, "--port", "0"];
     args.extend_from_slice(extra);
-    let mut child = dir
-        .umbrachyx(&args)
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("starts");
-    let stderr = BufReader::new(child.stderr.take().expect("stderr is piped"));
-    let server = Server(child);
-    let mut said = String::new();
-    let mut port = None;
-    for line in stderr.lines() {
-        let line = line.expect("reads stderr");
-        said.push_str(&line);
-        said.push('\n');
-        if line.starts_with("serving ") {
-            port = line
-                .rsplit_once(':')
-                .and_then(|(_, port)| port.parse::<u16>().ok());
-            break;
-        }
-    }
-    let port = port.unwrap_or_else(|| panic!("the server did not say where it serves: {said}"));
-    let said = said.replace(&format!(":{port}"), ":PORT");
+    let (server, said, port) = start_serving(dir.umbrachyx(&args));
+    // Only the line that names where it serves ends with its port.
+    let said = said.replace(&format!(":{port}\n"), ":PORT\n");
     (server, said, port)
 }
 
@@ -635,22 +609,16 @@ fn serve_with_follow_answers_reads_from_a_restored_backup_of_the_server_it_follo
     let dir = TempDir::new("serve-follow");
     let backup = dir.0.join("backup");
     let backup = backup.to_str().expect("utf-8 path");
-    let feed_port = free_port().to_string();
     let options = [
         "--feed-replicas-on",
-        &feed_port,
+        "0",
         "--backup-to",
         backup,
         "--backup-every",
         "0.05",
     ];
     let (_primary, said, port) = serve_on_a_free_port(&dir, &options);
-    assert!(
-        said.contains(&format!(
-            "handing the log to replicas that ask on 127.0.0.1:{feed_port}"
-        )),
-        "{said}"
-    );
+    let follow = feed_address(&said);
     let mut primary = connect(port);
     assert_eq!(
         first_line(&mut primary, &["SET", "player/1/gems", "55"]),
@@ -669,22 +637,9 @@ fn serve_with_follow_answers_reads_from_a_restored_backup_of_the_server_it_follo
         assert!(start.elapsed() < Duration::from_secs(30), "no backup");
         thread::sleep(Duration::from_millis(50));
     }
-    let replica_port = free_port();
-    let follow = format!("127.0.0.1:{feed_port}");
-    let _replica = Server(
-        dir.umbrachyx(&[
-            "serve",
-            BRANCH,
-            "--port",
-            &replica_port.to_string(),
-            "--follow",
-            &follow,
-        ])
-        .env("UMBRACHYX_DB", dir.0.join("replica"))
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("starts"),
-    );
+    let mut following = dir.umbrachyx(&["serve", BRANCH, "--port", "0", "--follow", &follow]);
+    following.env("UMBRACHYX_DB", dir.0.join("replica"));
+    let (_replica, _, replica_port) = start_serving(following);
     let mut replica = connect(replica_port);
 
     assert_eq!(
@@ -711,16 +666,16 @@ fn serve_that_follows_can_keep_current_values_only_and_says_so_when_asked_about_
     let dir = TempDir::new("serve-current");
     let backup = dir.0.join("backup");
     let backup = backup.to_str().expect("utf-8 path");
-    let feed_port = free_port().to_string();
     let options = [
         "--feed-replicas-on",
-        &feed_port,
+        "0",
         "--backup-to",
         backup,
         "--backup-every",
         "0.05",
     ];
-    let (_primary, _, port) = serve_on_a_free_port(&dir, &options);
+    let (_primary, said, port) = serve_on_a_free_port(&dir, &options);
+    let follow = feed_address(&said);
     let mut primary = connect(port);
     assert_eq!(
         first_line(&mut primary, &["SET", "player/1/gems", "55"]),
@@ -738,23 +693,17 @@ fn serve_that_follows_can_keep_current_values_only_and_says_so_when_asked_about_
         assert!(start.elapsed() < Duration::from_secs(30), "no backup");
         thread::sleep(Duration::from_millis(50));
     }
-    let replica_port = free_port();
-    let follow = format!("127.0.0.1:{feed_port}");
-    let _replica = Server(
-        dir.umbrachyx(&[
-            "serve",
-            BRANCH,
-            "--port",
-            &replica_port.to_string(),
-            "--follow",
-            &follow,
-            "--current-values-only",
-        ])
-        .env("UMBRACHYX_DB", dir.0.join("replica"))
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("starts"),
-    );
+    let mut following = dir.umbrachyx(&[
+        "serve",
+        BRANCH,
+        "--port",
+        "0",
+        "--follow",
+        &follow,
+        "--current-values-only",
+    ]);
+    following.env("UMBRACHYX_DB", dir.0.join("replica"));
+    let (_replica, _, replica_port) = start_serving(following);
     let mut replica = connect(replica_port);
 
     assert_eq!(
@@ -813,13 +762,7 @@ fn serve_refuses_to_follow_what_is_not_a_host_and_a_port() {
 #[test]
 fn serve_that_waits_for_a_replica_says_which_writes_no_replica_holds() {
     let dir = TempDir::new("serve-wait");
-    let feed_port = free_port().to_string();
-    let options = [
-        "--feed-replicas-on",
-        &feed_port,
-        "--wait-for-replica",
-        "0.05",
-    ];
+    let options = ["--feed-replicas-on", "0", "--wait-for-replica", "0.05"];
     let (_primary, said, port) = serve_on_a_free_port(&dir, &options);
     let mut primary = connect(port);
 
