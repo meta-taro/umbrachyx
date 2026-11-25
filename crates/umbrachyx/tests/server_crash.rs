@@ -182,7 +182,13 @@ fn set(key: &str, value: &str) -> Vec<u8> {
 
 /// Writes until the server goes away; returns the writes it acknowledged,
 /// and says so once it has one.
-fn client(port: u16, round: u32, client: usize, has_written: &AtomicBool) -> Vec<(String, String)> {
+fn client(
+    port: u16,
+    round: u32,
+    client: usize,
+    pause: Duration,
+    has_written: &AtomicBool,
+) -> Vec<(String, String)> {
     let mut acknowledged = Vec::new();
     let Ok(stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return acknowledged;
@@ -220,6 +226,7 @@ fn client(port: u16, round: u32, client: usize, has_written: &AtomicBool) -> Vec
                 _ => return acknowledged,
             }
         }
+        thread::sleep(pause);
     }
     acknowledged
 }
@@ -239,6 +246,19 @@ enum Promise {
     /// It may be lost, with every write the same client had acknowledged
     /// after it: a plain-async table.
     KeptUpToSomeMoment,
+}
+
+impl Promise {
+    /// How long a client waits between its requests. Writes that wait
+    /// for no sync come by the tens of thousands in a round, and a
+    /// hundred rounds of them are all kept and all read back: paced,
+    /// the kill still falls between two syncs of what is held.
+    fn pause(self) -> Duration {
+        match self {
+            Self::Kept => Duration::ZERO,
+            Self::KeptUpToSomeMoment => Duration::from_millis(1),
+        }
+    }
 }
 
 fn kill_rounds(name: &str, rounds: u32, promise: Promise) {
@@ -276,7 +296,7 @@ fn kill_rounds(name: &str, rounds: u32, promise: Promise) {
         let clients: Vec<_> = (0..CLIENTS)
             .map(|n| {
                 let has_written = Arc::clone(&has_written);
-                thread::spawn(move || client(port, round, n, &has_written))
+                thread::spawn(move || client(port, round, n, promise.pause(), &has_written))
             })
             .collect();
         let started = Instant::now();

@@ -188,7 +188,15 @@ fn a_server_whose_backups_fail_says_so_and_exits_one() {
     dir.status_with(port, " s ago\n");
 
     // The place goes, as when its disk does, and something is written.
-    std::fs::remove_dir_all(&place).expect("removes the backup");
+    // A backup may be writing a file into it at this moment, and the
+    // place is then not empty when it is removed: until it is gone.
+    let started = std::time::Instant::now();
+    while let Err(error) = std::fs::remove_dir_all(&place) {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "removes the backup: {error}"
+        );
+    }
     set(port, "player/1/gems", "70");
     let (code, out, err) = dir.status_with(port, "failing: yes");
 
