@@ -1950,6 +1950,24 @@ So a table can be declared to keep no history at all.
   ([#36](https://github.com/meta-taro/umbrachyx/issues/36)), and gains
   as above once they have keys. The release machines have not measured
   it.
+- **The map hashes a key once, and writes a short value over where it
+  is** (measured, taken). The map of these tables is in 64 parts, each a
+  hash table of its own; a key was hashed once to choose the part and
+  again by the part, and every put gave the old value's memory back and
+  took memory for the new one. Now the hash that chooses the part is
+  the one the part uses (still the keyed hash, so keys chosen to collide
+  cannot pile up), and a value of up to 1,024 bytes is overwritten in
+  its own bytes. A reader of such a value gets a copy, made under the
+  part's lock, which is why longer values are still shared and replaced
+  whole. On one laptop with the change above it in, writes sent 64 at a
+  time went from 1,188,000–1,195,000 to 1,263,000–1,301,000 with
+  32-byte values, and with two serving threads by 8 to 19% at 128
+  bytes; at 512, 1,024 and 4,096 bytes, from clients that wait for each
+  reply, and for reads at every length, the ranges of before and after
+  overlap
+  ([`bench/results/2026-11-26-laptop-plain-map/`](../bench/results/2026-11-26-laptop-plain-map/)).
+  Before that change it gave nothing: the one thread that writes was
+  not what the rate waited on.
 - **Only the server's path answers first.** A put made with the
   command-line tool or the MCP tool is on disk when answered, whatever
   the table: there the caller waits anyway, and one promise fewer has to

@@ -1,0 +1,115 @@
+value_bytes,build,row,writes_or_reads_a_second
+128,before,50 clients, 64 at a time,1124859.38
+128,before,8 clients,227531.28
+128,after,50 clients, 64 at a time,1206272.62
+128,after,8 clients,230414.75
+128,before,50 clients, 64 at a time,1035732.81
+128,before,8 clients,221238.94
+128,after,50 clients, 64 at a time,1216545.00
+128,after,8 clients,225479.14
+128,before,50 clients, 64 at a time,1005530.44
+128,before,8 clients,229357.80
+128,after,50 clients, 64 at a time,1199040.75
+128,after,8 clients,229885.06
+128,before,50 clients, 64 at a time,1063264.25
+128,before,8 clients,220507.17
+128,after,50 clients, 64 at a time,1191895.12
+128,after,8 clients,205338.81
+128,before,50 clients, 64 at a time,1002506.25
+128,before,8 clients,223214.28
+128,after,50 clients, 64 at a time,1206272.62
+128,after,8 clients,224215.23
+512,before,50 clients, 64 at a time,478583.41
+512,before,8 clients,182315.41
+512,after,50 clients, 64 at a time,460617.22
+512,after,8 clients,178094.39
+512,before,50 clients, 64 at a time,414851.69
+512,before,8 clients,171969.05
+512,after,50 clients, 64 at a time,447527.44
+512,after,8 clients,131839.16
+512,before,50 clients, 64 at a time,456308.47
+512,before,8 clients,173160.17
+512,after,50 clients, 64 at a time,435350.47
+512,after,8 clients,174520.06
+512,before,50 clients, 64 at a time,444839.88
+512,before,8 clients,168634.06
+512,after,50 clients, 64 at a time,466309.16
+512,after,8 clients,128865.98
+512,before,50 clients, 64 at a time,454959.06
+512,before,8 clients,161812.31
+512,after,50 clients, 64 at a time,446328.94
+512,after,8 clients,175746.92
+1024,before,50 clients, 64 at a time,252812.55
+1024,before,8 clients,131147.55
+1024,after,50 clients, 64 at a time,258131.12
+1024,after,8 clients,138792.50
+1024,before,50 clients, 64 at a time,259067.36
+1024,before,8 clients,137551.58
+1024,after,50 clients, 64 at a time,255754.47
+1024,after,8 clients,143163.92
+1024,before,50 clients, 64 at a time,246852.62
+1024,before,8 clients,137741.05
+1024,after,50 clients, 64 at a time,251382.61
+1024,after,8 clients,143781.45
+1024,before,50 clients, 64 at a time,246669.97
+1024,before,8 clients,140745.95
+1024,after,50 clients, 64 at a time,250657.97
+1024,after,8 clients,121506.68
+1024,before,50 clients, 64 at a time,244259.91
+1024,before,8 clients,140944.33
+1024,after,50 clients, 64 at a time,248911.02
+1024,after,8 clients,138888.89
+32,before,GET, 50 clients,244498.77
+32,before,GET, 50 clients, 16 at a time,2554278.50
+32,after,GET, 50 clients,267022.69
+32,after,GET, 50 clients, 16 at a time,2600780.25
+32,before,GET, 50 clients,265957.47
+32,before,GET, 50 clients, 16 at a time,2551020.50
+32,after,GET, 50 clients,263852.25
+32,after,GET, 50 clients, 16 at a time,2574002.50
+32,before,GET, 50 clients,260078.03
+32,before,GET, 50 clients, 16 at a time,2525252.50
+32,after,GET, 50 clients,261096.61
+32,after,GET, 50 clients, 16 at a time,2580645.25
+512,before,GET, 50 clients,261437.91
+512,before,GET, 50 clients, 16 at a time,1763668.50
+512,after,GET, 50 clients,260416.67
+512,after,GET, 50 clients, 16 at a time,1777777.75
+512,before,GET, 50 clients,259740.27
+512,before,GET, 50 clients, 16 at a time,1765225.00
+512,after,GET, 50 clients,261437.91
+512,after,GET, 50 clients, 16 at a time,1603849.25
+512,before,GET, 50 clients,233918.12
+512,before,GET, 50 clients, 16 at a time,1777777.75
+512,after,GET, 50 clients,260416.67
+512,after,GET, 50 clients, 16 at a time,1766784.50
+4096,before,GET, 50 clients,246002.45
+4096,before,GET, 50 clients, 16 at a time,499625.31
+4096,after,GET, 50 clients,244498.77
+4096,after,GET, 50 clients, 16 at a time,493583.41
+4096,before,GET, 50 clients,245700.25
+4096,before,GET, 50 clients, 16 at a time,499500.47
+4096,after,GET, 50 clients,245700.25
+4096,after,GET, 50 clients, 16 at a time,504413.62
+4096,before,GET, 50 clients,247831.48
+4096,before,GET, 50 clients, 16 at a time,530363.31
+4096,after,GET, 50 clients,247218.78
+4096,after,GET, 50 clients, 16 at a time,504159.31
+4096,before,8 clients,56641.18
+4096,before,64 clients,68917.99
+4096,before,50 clients, 64 at a time,85708.16
+4096,after,8 clients,52397.17
+4096,after,64 clients,66291.02
+4096,after,50 clients, 64 at a time,86303.62
+4096,before,8 clients,52980.13
+4096,before,64 clients,65724.62
+4096,before,50 clients, 64 at a time,86240.35
+4096,after,8 clients,51480.05
+4096,after,64 clients,66555.73
+4096,after,50 clients, 64 at a time,85766.97
+4096,before,8 clients,52273.91
+4096,before,64 clients,67681.90
+4096,before,50 clients, 64 at a time,87750.09
+4096,after,8 clients,52784.38
+4096,after,64 clients,66269.05
+4096,after,50 clients, 64 at a time,87696.22

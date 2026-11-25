@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **The map of tables that keep no history hashes a key once and
+  writes a short value over where it is.** On one laptop, writes to a
+  plain-async table sent 64 at a time: 1,190,000 to 1,280,000 a second
+  with 32-byte values; other rows and reads the same
+  (`bench/results/2026-11-26-laptop-plain-map/`).
 - **A `SET` to a plain-async table is held by the thread that read
   it.** It was handed to the one thread that writes and the serving
   thread woken with the answer. A serving thread now seals the value
