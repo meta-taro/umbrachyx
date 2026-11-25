@@ -14,7 +14,8 @@ use std::time::Duration;
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
 use umbrachyx::log::{Edit, FileStorage, Storage};
 use umbrachyx::store::backup::{
-    BackupError, DirSource, DirTarget, Moment, Origin, Source, Target, back_up, restore, verify,
+    BackupError, DirSource, DirTarget, Moment, Origin, Source, Target, back_up, restore,
+    restore_to, verify,
 };
 use umbrachyx::store::{CommitId, Committer, MAIN_BRANCH, Provenance, Store, SystemClock};
 
@@ -959,4 +960,169 @@ fn a_copy_that_changes_between_the_check_and_the_writing_leaves_no_store() {
     restore(&mut honest, &mut log, Some(&mut keys)).expect("restores");
     drop(log);
     assert_same(&dir.open("restored"), &store);
+}
+
+/// A backup's directory, read; when the copy of the log starts being
+/// read the second time, `then` runs. Restoring reads it once to check
+/// and once to write, so that is while the store is being written.
+struct WhileWritten<F: FnMut()> {
+    backup: DirSource,
+    starts: u32,
+    then: Option<F>,
+}
+
+impl<F: FnMut()> WhileWritten<F> {
+    fn new(dir: &TempDir, then: F) -> Self {
+        Self {
+            backup: DirSource::new(&dir.backup_dir()),
+            starts: 0,
+            then: Some(then),
+        }
+    }
+}
+
+impl<F: FnMut()> Source for WhileWritten<F> {
+    fn log_len(&mut self) -> io::Result<u64> {
+        self.backup.log_len()
+    }
+
+    fn log_read(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        if offset == 0 {
+            self.starts += 1;
+            if self.starts == 2
+                && let Some(mut then) = self.then.take()
+            {
+                then();
+            }
+        }
+        self.backup.log_read(offset, len)
+    }
+
+    fn read(&mut self, name: &str) -> io::Result<Option<Vec<u8>>> {
+        self.backup.read(name)
+    }
+}
+
+/// The names of the files in the test's directory that belong to the
+/// store `name`: its log, its keys, and anything left beside them.
+fn files_of(dir: &TempDir, name: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(&dir.0)
+        .expect("lists")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .into_string()
+                .expect("name")
+        })
+        .filter(|file| file.starts_with(&format!("{name}.log")))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_store_being_restored_is_not_at_its_place_until_it_is_whole() {
+    let dir = TempDir::new("into-place");
+    let store = backed_up_in_several_parts(&dir);
+    let (log, keys) = (dir.log("restored"), dir.keys("restored"));
+    let mut seen = None;
+    let mut source = WhileWritten::new(&dir, || {
+        seen = Some((log.exists(), keys.exists(), files_of(&dir, "restored")));
+    });
+
+    let restored = restore_to(&mut source, &log, &keys).expect("restores");
+
+    drop(source);
+    let (log_was_there, keys_were_there, beside) = seen.expect("the copy was read twice");
+    assert!(
+        !log_was_there && !keys_were_there,
+        "at its place: {beside:?}"
+    );
+    assert!(!beside.is_empty(), "nothing was being written");
+    assert_eq!(restored.records, store.log_records());
+    assert_eq!(
+        files_of(&dir, "restored"),
+        ["restored.log", "restored.log.keys"]
+    );
+    assert_same(&dir.open("restored"), &store);
+}
+
+#[test]
+fn a_store_made_at_the_place_meanwhile_is_not_replaced() {
+    let dir = TempDir::new("not-replaced");
+    backed_up_in_several_parts(&dir);
+    let (log, keys) = (dir.log("restored"), dir.keys("restored"));
+    let mut source = WhileWritten::new(&dir, || {
+        // Another process starts a store there while this one writes.
+        std::fs::write(&log, b"another store's log").expect("writes");
+        std::fs::write(&keys, b"another store's keys").expect("writes");
+    });
+
+    let refused = restore_to(&mut source, &log, &keys);
+
+    drop(source);
+    assert!(matches!(refused, Err(BackupError::NotEmpty)), "{refused:?}");
+    assert_eq!(std::fs::read(&log).expect("reads"), b"another store's log");
+    assert_eq!(
+        std::fs::read(&keys).expect("reads"),
+        b"another store's keys"
+    );
+    assert_eq!(
+        files_of(&dir, "restored"),
+        ["restored.log", "restored.log.keys"]
+    );
+}
+
+#[test]
+fn what_an_interrupted_restore_left_does_not_stop_the_next() {
+    let dir = TempDir::new("leftovers");
+    let store = backed_up_in_several_parts(&dir);
+    let (log, keys) = (dir.log("restored"), dir.keys("restored"));
+    for left in ["restored.log.restoring", "restored.log.keys.restoring"] {
+        std::fs::write(dir.0.join(left), b"part of a store that was being restored")
+            .expect("writes");
+    }
+
+    restore_to(&mut DirSource::new(&dir.backup_dir()), &log, &keys).expect("restores");
+
+    assert_eq!(
+        files_of(&dir, "restored"),
+        ["restored.log", "restored.log.keys"]
+    );
+    assert_same(&dir.open("restored"), &store);
+}
+
+#[test]
+fn a_backup_that_is_refused_leaves_no_file_at_or_beside_the_place() {
+    let dir = TempDir::new("refused-clean");
+    backed_up_in_several_parts(&dir);
+    let (log, keys) = (dir.log("restored"), dir.keys("restored"));
+    let mut source = Watched::new(&dir);
+    source.changes_from_pass = Some(2);
+
+    let refused = restore_to(&mut source, &log, &keys);
+
+    assert!(
+        matches!(refused, Err(BackupError::Damaged(_))),
+        "{refused:?}"
+    );
+    assert_eq!(files_of(&dir, "restored"), [] as [&str; 0]);
+}
+
+#[test]
+fn a_place_that_holds_a_store_is_refused_before_anything_is_read() {
+    let dir = TempDir::new("holds-a-store");
+    let store = backed_up_in_several_parts(&dir);
+    let before = files_of(&dir, "source");
+
+    let refused = restore_to(
+        &mut DirSource::new(&dir.backup_dir()),
+        &dir.log("source"),
+        &dir.keys("source"),
+    );
+
+    assert!(matches!(refused, Err(BackupError::NotEmpty)), "{refused:?}");
+    assert_eq!(files_of(&dir, "source"), before);
+    drop(store);
 }

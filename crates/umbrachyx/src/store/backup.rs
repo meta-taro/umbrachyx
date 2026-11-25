@@ -58,7 +58,7 @@ use crate::log::{self, Chain, CopyCheck, HEADER_LEN, LogError, LogId, Storage};
 
 mod dir;
 
-pub use dir::{DirSource, DirTarget};
+pub use dir::{DirSource, DirTarget, restore_to};
 
 const MANIFEST: &str = "manifest";
 const KEYS_PREFIX: &str = "keys-";

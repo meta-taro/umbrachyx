@@ -1258,6 +1258,21 @@ from the copy.
   It refuses to write where a log or a key file exists. The backup is
   only read, nothing is made or locked in it, so it can be restored
   from a copy that cannot be written to, such as a snapshot.
+- **A restored store is moved into its place when it is whole.** The
+  log and the keys are written beside the place, under names ending in
+  `.restoring`, made durable, and then given their names: the keys
+  first, the log last. A restore stopped by a signal or a power cut
+  while it writes leaves no log at the place, where before it left the
+  keys and the start of the log, which opens as a store with only some
+  of its records. What it left beside the place is cleared by the next
+  restore. Stopped between the two moves it leaves a key file and no
+  log: a store with nothing in it, which `restore` then refuses to
+  write over until that file is removed. The files are given their
+  names with a link, not a rename: nothing holds the place while the
+  store is written, and a rename would replace a store that a server
+  started there meanwhile. Such a store is left as it is and the
+  restore refused. If only its log was made in that time, the restored
+  key file is already there and stays: that store may have opened it.
 - **A backup can be asked whether it would restore** (`backup
   <directory> --check`): the same checks, by the same code, and nothing
   written. It opens no store, so it runs where only the backup is. What
