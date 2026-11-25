@@ -56,6 +56,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
         if self.unsynced.edits.is_empty() {
             return Ok(());
         }
+        self.write_held_keys()?;
         let held = self.take_held();
         if let Err(error) = self.log.append(&Record::Puts(held)) {
             self.unsynced.is_lost = true;

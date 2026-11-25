@@ -132,6 +132,26 @@ impl Sealer {
         self.keys.make_keys(keys.map(subject))
     }
 
+    /// As [`Sealer::make_keys_for`], without writing the key file: the
+    /// keys are durable once [`Sealer::write_held_keys`] returns. Only
+    /// for values that are not written before that.
+    pub(crate) fn hold_keys_for<'a>(
+        &mut self,
+        keys: impl Iterator<Item = &'a [u8]>,
+    ) -> Result<(), KeyError> {
+        self.keys.make_keys_held(keys.map(subject))
+    }
+
+    /// Whether keys are in use that the key file does not hold yet.
+    pub(crate) fn has_held_keys(&self) -> bool {
+        self.keys.has_held()
+    }
+
+    /// Makes durable the keys [`Sealer::hold_keys_for`] made.
+    pub(crate) fn write_held_keys(&mut self) -> Result<(), KeyError> {
+        self.keys.write_held()
+    }
+
     /// Seals `value` for `key`, making its subject's key first if needed.
     pub(crate) fn seal(&mut self, key: &[u8], value: &[u8]) -> Result<Vec<u8>, KeyError> {
         let subject = subject(key);

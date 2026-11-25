@@ -724,13 +724,26 @@ impl<S: Storage, C: Clock> Store<S, C> {
     ) -> Result<Vec<Result<CommitId, StoreError>>, StoreError> {
         self.check_writes_for_itself()?;
         let time = self.next_time();
+        // Puts that are answered before they are on disk need their keys
+        // no sooner than they are written: the keys are held with them.
+        // Anything else in the group, and its keys are durable first.
+        let holds_keys = may_answer_early
+            && requests.iter().all(|request| match request {
+                Request::Commit(_) => false,
+                Request::Put(edits) | Request::SealedPut(edits) => self.may_answer_early(edits),
+            });
         if let Some(sealer) = &mut self.sealer {
             let written = requests
                 .iter()
                 .filter(|request| !matches!(request, Request::SealedPut(_)))
                 .flat_map(Request::edits)
-                .filter(|edit| edit.value.is_some());
-            sealer.make_keys_for(written.map(|edit| edit.key.as_slice()))?;
+                .filter(|edit| edit.value.is_some())
+                .map(|edit| edit.key.as_slice());
+            if holds_keys {
+                sealer.hold_keys_for(written)?;
+            } else {
+                sealer.make_keys_for(written)?;
+            }
         }
         let mut commits = Vec::new();
         let mut puts = Vec::new();
@@ -972,6 +985,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             return Ok(Vec::new());
         }
         self.check_writes_for_itself()?;
+        self.write_held_keys()?;
         let len: usize =
             BATCH_OVERHEAD + edits_len(&puts) + commits.iter().map(written_len).sum::<usize>();
         if self.unsynced.len + len > MAX_PAYLOAD_LEN {
@@ -1014,7 +1028,23 @@ impl<S: Storage, C: Clock> Store<S, C> {
     fn append(&mut self, record: &Record) -> Result<(), StoreError> {
         self.check_writes_for_itself()?;
         self.sync_puts()?;
+        self.write_held_keys()?;
         Ok(self.log.append(record)?)
+    }
+
+    /// Makes durable the keys that were put in use with the puts they
+    /// sealed and held like them. Before every record: a value is never
+    /// on disk under a key that is not. If the key file refuses them,
+    /// the puts held under them will never be written either.
+    pub(crate) fn write_held_keys(&mut self) -> Result<(), StoreError> {
+        let Some(sealer) = self.sealer.as_mut().filter(|sealer| sealer.has_held_keys()) else {
+            return Ok(());
+        };
+        if let Err(error) = sealer.write_held_keys() {
+            self.unsynced.is_lost |= !self.unsynced.edits.is_empty();
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     /// Makes a branch that starts where `from` is now.

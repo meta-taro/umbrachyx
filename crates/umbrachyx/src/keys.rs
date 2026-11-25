@@ -8,8 +8,11 @@
 //! layout's number (four bytes, little-endian) and a CRC-32 of the two.
 //! After them it is a run of entries, each the subject's length (two bytes,
 //! little-endian), the subject, the key, and a CRC-32 of the three. A new
-//! key is appended and synced before anything is encrypted under it, so a
-//! crash never leaves ciphertext whose key was lost. Erasing writes the
+//! key is appended and synced before anything encrypted under it is
+//! written, so a crash never leaves ciphertext whose key was lost: as a
+//! rule before it is used at all, and for values that are held in memory
+//! and written later ([`Keys::make_keys_held`]), before they are.
+//! Erasing writes the
 //! file again without the subject and renames it over the old one.
 //!
 //! Opening only reads. A torn entry at the end, left by a crash while a key
@@ -205,6 +208,9 @@ pub struct Keys<S: KeyStorage> {
     /// The file holds bytes memory has let go of: a torn entry at its end,
     /// or a key whose erasure did not reach it. The next write replaces it.
     stale: bool,
+    /// The entries of keys in use that the file does not hold yet
+    /// ([`Self::make_keys_held`]), in the order they were made.
+    held: Vec<u8>,
 }
 
 /// Shows how many keys there are, never the keys.
@@ -230,6 +236,7 @@ impl<S: KeyStorage> Keys<S> {
             keys,
             by_fingerprint,
             stale: !is_whole,
+            held: Vec::new(),
         })
     }
 
@@ -270,6 +277,60 @@ impl<S: KeyStorage> Keys<S> {
         &mut self,
         subjects: impl Iterator<Item = &'a [u8]>,
     ) -> Result<(), KeyError> {
+        let made = self.new_keys(subjects)?;
+        self.keep(&made)
+    }
+
+    /// Makes a key for each of `subjects` that has none and puts them in
+    /// use, without writing the file: they are durable once
+    /// [`Self::write_held`] returns. For values that are themselves not
+    /// durable yet, and are written only after that call: until then a
+    /// failure loses the keys and the values together, and no value is
+    /// ever on disk under a key that is not.
+    pub fn make_keys_held<'a>(
+        &mut self,
+        subjects: impl Iterator<Item = &'a [u8]>,
+    ) -> Result<(), KeyError> {
+        let made = self.new_keys(subjects)?;
+        let mut added = Vec::new();
+        for (subject, key) in &made {
+            added.extend(entry(subject, key)?);
+        }
+        self.held.extend(added);
+        self.use_keys(&made);
+        Ok(())
+    }
+
+    /// Whether keys are in use that the file does not hold yet.
+    pub fn has_held(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// Writes the keys made with [`Self::make_keys_held`], durable when
+    /// this returns. If it fails they stay in use and held, and the next
+    /// call writes them.
+    pub fn write_held(&mut self) -> Result<(), KeyError> {
+        if self.held.is_empty() {
+            return Ok(());
+        }
+        if self.stale {
+            let bytes = self.entries()?;
+            self.storage.replace(&bytes)?;
+            self.stale = false;
+        } else if let Err(error) = self.storage.append(&self.held) {
+            // As in `keep`: part of them may be on disk.
+            self.stale = true;
+            return Err(error.into());
+        }
+        self.held.clear();
+        Ok(())
+    }
+
+    /// A new key for each of `subjects` that has none.
+    fn new_keys<'a>(
+        &self,
+        subjects: impl Iterator<Item = &'a [u8]>,
+    ) -> Result<Vec<(&'a [u8], Key)>, KeyError> {
         let mut made: Vec<(&[u8], Key)> = Vec::new();
         for subject in subjects {
             let is_new =
@@ -281,7 +342,15 @@ impl<S: KeyStorage> Keys<S> {
             getrandom::getrandom(&mut key).map_err(|e| KeyError::Io(io::Error::other(e)))?;
             made.push((subject, key));
         }
-        self.keep(&made)
+        Ok(made)
+    }
+
+    fn use_keys(&mut self, new: &[(&[u8], Key)]) {
+        for (subject, key) in new {
+            self.keys.insert(subject.to_vec(), *key);
+            self.by_fingerprint
+                .insert(fingerprint(key), subject.to_vec());
+        }
     }
 
     /// Keeps keys made elsewhere: what a replica does with the keys its
@@ -302,6 +371,9 @@ impl<S: KeyStorage> Keys<S> {
 
     /// Makes `new` durable with one write, then puts them to use.
     fn keep(&mut self, new: &[(&[u8], Key)]) -> Result<(), KeyError> {
+        // The keys held go first: the file keeps the order keys were
+        // made in, and none is left out of it behind a later one.
+        self.write_held()?;
         if new.is_empty() {
             return Ok(());
         }
@@ -320,11 +392,7 @@ impl<S: KeyStorage> Keys<S> {
             self.stale = true;
             return Err(error.into());
         }
-        for (subject, key) in new {
-            self.keys.insert(subject.to_vec(), *key);
-            self.by_fingerprint
-                .insert(fingerprint(key), subject.to_vec());
-        }
+        self.use_keys(new);
         Ok(())
     }
 
@@ -348,6 +416,8 @@ impl<S: KeyStorage> Keys<S> {
         let bytes = self.entries()?;
         self.storage.replace(&bytes)?;
         self.stale = false;
+        // Every key in use went into the file just written.
+        self.held.clear();
         Ok(true)
     }
 

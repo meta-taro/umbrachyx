@@ -394,3 +394,67 @@ fn commits_written_together_make_their_new_keys_with_one_write() {
         Some("sword")
     );
 }
+
+/// A put to a plain-async table is answered before it is on disk, and
+/// the key its subject needs is held with it: the key file is not
+/// written for it. When the put is written its key is written first, so
+/// what is on disk at either moment opens as a store.
+#[test]
+fn a_put_answered_early_holds_its_new_key_until_the_put_is_written() {
+    let dir = TempDir::new("held-key");
+    let mut store = dir.open().expect("opens");
+    store
+        .declare_table(
+            b"cache",
+            umbrachyx::log::Engine::PlainAsync,
+            by("ops", "it may lose its last writes"),
+        )
+        .expect("declares");
+    store
+        .commit(MAIN_BRANCH, vec![set("player/1/gems", "10")], by("a", "b"))
+        .expect("commits");
+    let committer = Committer::start(store);
+    let writer = committer.writer();
+    let key_on_disk = |subject: &[u8]| {
+        let keys = Keys::open(FileKeyStorage::new(&dir.keys())).expect("opens the key file");
+        keys.get(subject).copied()
+    };
+    // What a failure now would leave: the two files as they are, opened
+    // from copies of them.
+    let opens_from_disk = |name: &str| {
+        let copy = TempDir::new(name);
+        std::fs::copy(dir.log(), copy.log()).expect("copies the log");
+        std::fs::copy(dir.keys(), copy.keys()).expect("copies the key file");
+        let store = copy.open().expect("what is on disk opens");
+        store.get(MAIN_BRANCH, b"cache/7/top")
+    };
+
+    writer
+        .put(vec![set("cache/7/top", "first")])
+        .wait()
+        .expect("is answered");
+
+    assert_eq!(
+        key_on_disk(b"cache/7"),
+        None,
+        "the key is held, not written"
+    );
+    assert!(key_on_disk(b"player/1").is_some());
+    if cfg!(unix) {
+        assert_eq!(opens_from_disk("held-key-before"), None);
+    }
+
+    writer.sync_puts().expect("writes the held puts");
+
+    assert!(key_on_disk(b"cache/7").is_some(), "written with the put");
+    if cfg!(unix) {
+        let value = opens_from_disk("held-key-after");
+        assert_eq!(value.as_deref(), Some(&b"first"[..]));
+    }
+    drop(writer);
+    let store = committer.stop();
+    assert_eq!(
+        store.get(MAIN_BRANCH, b"cache/7/top").as_deref(),
+        Some(&b"first"[..])
+    );
+}
