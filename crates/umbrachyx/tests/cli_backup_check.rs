@@ -149,6 +149,9 @@ fn a_changed_byte_in_the_copy_of_the_log_does_not_check_out() {
 
     assert_eq!(checked.status.code(), Some(2), "{}", out(&checked));
     assert!(out(&checked).is_empty(), "{}", out(&checked));
+    let said = err(&checked);
+    assert!(said.contains(&dir.path("backup")), "{said}");
+    assert!(!said.contains("usage:"), "{said}");
     assert_eq!(dir.backup_files(), before, "the backup was changed");
 }
 
@@ -176,4 +179,21 @@ fn a_backup_whose_restore_is_refused_for_the_place_still_checks_out() {
 
     assert_eq!(restore.status.code(), Some(2));
     assert_eq!(checked.status.code(), Some(0), "{}", err(&checked));
+}
+
+#[test]
+fn check_said_to_restore_is_refused_and_nothing_is_restored() {
+    let dir = TempDir::new("restore-check");
+    dir.backed_up();
+
+    let refused = dir.run("elsewhere", &["restore", &dir.path("backup"), "--check"]);
+
+    assert_eq!(refused.status.code(), Some(2), "{}", out(&refused));
+    assert!(
+        err(&refused).contains("backup <directory> --check"),
+        "{}",
+        err(&refused)
+    );
+    assert!(!dir.0.join("elsewhere").exists(), "a store was restored");
+    assert!(!dir.0.join("elsewhere.keys").exists(), "keys were restored");
 }

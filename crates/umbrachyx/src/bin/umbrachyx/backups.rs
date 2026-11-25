@@ -42,7 +42,7 @@ pub fn place(store: &mut FileStore, args: &Args) -> Result<Option<(PathBuf, Dura
 /// `backup <directory> --check`: reads the backup in the directory and
 /// says whether it would restore. Nothing is written, the directory
 /// included: a place with no backup is not made into one.
-pub fn check(args: &Args) -> Result<ExitCode, String> {
+pub fn verify(args: &Args) -> Result<ExitCode, String> {
     let [dir] = args.exactly()?;
     let checked =
         backup::verify(&mut DirSource::new(dir.as_ref())).map_err(|e| format!("{dir}: {e}"))?;

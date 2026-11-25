@@ -1265,6 +1265,13 @@ from the copy.
   file holds a key for every subject in the log. A store restored
   without one says so when it opens. It reads the whole copy of the log
   into memory, as restoring still does.
+- **A backup read while another finishes is read again.** A backup
+  writes its key file, then its manifest, then removes the key file of
+  the backup before; a restore or a check that began with the old
+  manifest could find its key file gone and call a good backup damaged.
+  One that fails is read again if the manifest has changed since, four
+  times at most, and reported only when it fails under the manifest it
+  was read with.
 - **With no record written since, a backup writes nothing.** A key made
   since has sealed nothing that is in the log yet, and writing the key
   file again under the name the manifest holds a hash of would leave a

@@ -279,6 +279,12 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let Some(command) = args.positional.first() else {
         return Err(USAGE.to_owned());
     };
+    // Said to `restore` it would be taken and the backup restored.
+    if args.options.contains_key("check") && command != "backup" {
+        return Err(format!(
+            "--check goes with backup, not {command}: backup <directory> --check"
+        ));
+    }
     // These never touch a log.
     match command.as_str() {
         "keygen" => return tokens::keygen(&args),
@@ -292,7 +298,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     }
     // Asked of the backup alone: no store is opened, here or anywhere.
     if command == "backup" && args.options.contains_key("check") {
-        return backups::check(&args);
+        return backups::verify(&args);
     }
     // A server syncs for every write, so its log is zeroed ahead of what it
     // writes and a sync has only the record to make durable. Other commands

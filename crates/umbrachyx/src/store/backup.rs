@@ -527,6 +527,10 @@ pub struct Checked {
     pub has_keys: bool,
 }
 
+/// How many times a backup is read before it is given up on, when each
+/// time another backup finished while it was read.
+const MAX_READS: usize = 4;
+
 /// A backup read whole and found to be what its manifest says.
 struct Read {
     manifest: Manifest,
@@ -537,7 +541,26 @@ struct Read {
 /// Reads the backup at `target` and checks it as restoring does: every
 /// record of the copy of the log decodes and they are the records the
 /// manifest names, and the key file is the one it names.
+///
+/// A backup may finish at `target` meanwhile: it writes its key file,
+/// then its manifest, then removes the key file of the backup before,
+/// so a reader that began with the old manifest can find its key file
+/// gone. A backup that does not check out is read again if its manifest
+/// has changed since, and only one that fails under the manifest it was
+/// read with is called damaged.
 fn read_whole(target: &mut impl Source) -> Result<Read, BackupError> {
+    let mut reads = 1;
+    loop {
+        let before = target.read(MANIFEST)?;
+        let read = read_once(target);
+        if read.is_ok() || reads == MAX_READS || target.read(MANIFEST)? == before {
+            return read;
+        }
+        reads += 1;
+    }
+}
+
+fn read_once(target: &mut impl Source) -> Result<Read, BackupError> {
     let manifest = Manifest::read(target)?
         .filter(Manifest::is_started)
         .ok_or(BackupError::NoBackup)?;
