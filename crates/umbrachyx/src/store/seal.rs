@@ -260,6 +260,13 @@ thread_local! {
 /// The value sealed in `sealed` for `key`, or `None` if its key is not in
 /// the ring or the bytes do not open under it.
 pub(crate) fn open(ring: &Ring, key: &[u8], sealed: &[u8]) -> Option<Bytes> {
+    open_once(ring, key, sealed).map(Bytes::from)
+}
+
+/// As [`open`], giving the value in the bytes it was opened into: for a
+/// reader that sends it on and keeps nothing, and would otherwise pay
+/// for a copy it can share with nobody.
+pub(crate) fn open_once(ring: &Ring, key: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
     let needed = key_fingerprint(sealed)?;
     OPENERS.with_borrow_mut(|openers| {
         // Read before the ring: if a key is erased after this, the cipher
@@ -278,7 +285,7 @@ pub(crate) fn open(ring: &Ring, key: &[u8], sealed: &[u8]) -> Option<Bytes> {
                 unknown.insert(cipher_of(&subject_key))
             }
         };
-        cipher.open(key, &sealed[HEADER_LEN..]).map(Bytes::from)
+        cipher.open(key, &sealed[HEADER_LEN..])
     })
 }
 

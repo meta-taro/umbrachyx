@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **A `GET` copies its value once.** It is opened straight from where
+  it is stored into the bytes that are sent, where it was copied to be
+  shared, opened into new memory, and copied twice more on the way out.
 - **A write to a new subject on a plain-async table no longer waits for
   the key file.** The subject's key is held with the put and written
   before it, with one write for all the keys held, where each new

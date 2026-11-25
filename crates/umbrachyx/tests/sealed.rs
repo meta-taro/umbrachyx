@@ -458,3 +458,73 @@ fn a_put_answered_early_holds_its_new_key_until_the_put_is_written() {
         Some(&b"first"[..])
     );
 }
+
+/// A value read to be sent on is the value any other read gives: for a
+/// key in the tree, one removed, one never written, keys of a table
+/// without history holding short and long values, and a branch that is
+/// not there; with values sealed.
+#[test]
+fn a_value_read_once_is_the_value_read() {
+    let dir = TempDir::new("read-once");
+    let mut store = dir.open().expect("opens");
+    store
+        .declare_table(
+            b"cache",
+            umbrachyx::log::Engine::Plain,
+            by("ops", "it needs no past"),
+        )
+        .expect("declares");
+    let long = "x".repeat(5_000);
+    store
+        .commit(
+            MAIN_BRANCH,
+            vec![set("player/1/gems", "10"), set("player/2/gems", "20")],
+            by("a", "b"),
+        )
+        .expect("commits");
+    store
+        .commit(
+            MAIN_BRANCH,
+            vec![Edit {
+                key: b"player/2/gems".to_vec(),
+                value: None,
+            }],
+            by("a", "removes"),
+        )
+        .expect("commits");
+    store
+        .put(vec![
+            set("cache/1/top", "short"),
+            set("cache/2/top", &long),
+            set("cache/1/top", "shorter"),
+        ])
+        .expect("puts");
+    let view = store.view();
+
+    for key in [
+        "player/1/gems",
+        "player/2/gems",
+        "player/3/gems",
+        "cache/1/top",
+        "cache/2/top",
+        "cache/3/top",
+    ] {
+        let read = view.get(MAIN_BRANCH, key.as_bytes());
+        let once = view.get_once(MAIN_BRANCH, key.as_bytes());
+        assert_eq!(once.as_deref(), read.as_deref(), "{key}");
+    }
+    assert_eq!(
+        view.get_once(MAIN_BRANCH, b"player/1/gems").as_deref(),
+        Some(&b"10"[..])
+    );
+    assert_eq!(
+        view.get_once(MAIN_BRANCH, b"cache/1/top").as_deref(),
+        Some(&b"shorter"[..])
+    );
+    assert_eq!(
+        view.get_once(MAIN_BRANCH, b"cache/2/top").map(|v| v.len()),
+        Some(5_000)
+    );
+    assert_eq!(view.get_once("no-such-branch", b"player/1/gems"), None);
+    assert_eq!(view.get_once("no-such-branch", b"cache/1/top"), None);
+}

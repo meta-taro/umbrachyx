@@ -128,6 +128,23 @@ impl View {
         (keys, has_more)
     }
 
+    /// As [`View::get`], for a reader that sends the value on and keeps
+    /// nothing: the value is copied once, when it is opened, where `get`
+    /// hands out bytes that can be shared and copies it for that.
+    pub fn get_once(&self, branch: &str, key: &[u8]) -> Option<Vec<u8>> {
+        let open = |held: &[u8]| match &self.ring {
+            Some(ring) => super::seal::open_once(ring, key, held),
+            None => Some(held.to_vec()),
+        };
+        match self.cell(branch, key) {
+            Some(cell) => open(super::cell_value(cell)?),
+            None => {
+                self.states.get(branch)?;
+                self.plain.read(key, open)?
+            }
+        }
+    }
+
     /// The live value of `key` on `branch` at this moment.
     pub fn get(&self, branch: &str, key: &[u8]) -> Option<Bytes> {
         let value = match self.cell(branch, key) {
