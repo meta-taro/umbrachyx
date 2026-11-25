@@ -1,6 +1,7 @@
 //! Where `serve` keeps a backup of the store, and how often it brings it
 //! up to date. And `backup --check`, which asks a backup whether it
-//! would restore.
+//! would restore, and `backup --status`, which asks a running server how
+//! its backup is going.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -8,7 +9,7 @@ use std::time::Duration;
 
 use umbrachyx::store::backup::{self, DirSource, DirTarget};
 
-use crate::{Args, FileStore};
+use crate::{Args, FileStore, replication};
 
 /// How often a served store is backed up unless told otherwise.
 const DEFAULT_EVERY: Duration = Duration::from_secs(60);
@@ -55,5 +56,46 @@ pub fn verify(args: &Args) -> Result<ExitCode, String> {
         "the backup in {dir} would restore: {} records ({} bytes of log) and {keys}, as it says",
         checked.records, checked.bytes
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `UMBRA.BACKUP`, as the protocol sends a command.
+const ASK: &[u8] = b"*1\r\n$12\r\nUMBRA.BACKUP\r\n";
+
+/// `backup --status`: asks the server on `--host` and `--port` how its
+/// backup is going and prints the answer a line per fact. It opens no
+/// log. The server does not say where the backup is kept nor why one
+/// failed, so neither is printed: the reason is on its standard error.
+pub fn status(args: &Args, default_port: u16) -> Result<ExitCode, String> {
+    let [] = args.exactly()?;
+    let (host, port) = replication::server(args, default_port)?;
+    let answered =
+        replication::ask(&host, port, ASK).map_err(|why| format!("{host}:{port}: {why}"))?;
+    let not_a_status = || format!("{host}:{port}: {}", replication::NOT_A_STATUS);
+    if !answered["keeps_a_backup"]
+        .as_bool()
+        .ok_or_else(not_a_status)?
+    {
+        println!("keeps a backup: no");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let is_failing = answered["failing"].as_bool().ok_or_else(not_a_status)?;
+    let store = answered["store_records"]
+        .as_u64()
+        .ok_or_else(not_a_status)?;
+    println!("keeps a backup: yes");
+    match answered["records"].as_u64() {
+        Some(held) => println!("records: {held} of the store's {store}"),
+        None => println!("records: none yet of the store's {store}"),
+    }
+    match answered["finished_seconds_ago"].as_u64() {
+        Some(seconds) => println!("last finished: {seconds} s ago"),
+        None => println!("last finished: not since the server started"),
+    }
+    if is_failing {
+        println!("failing: yes; the server says why on its standard error");
+        return Ok(ExitCode::from(replication::NOT_WELL));
+    }
+    println!("failing: no");
     Ok(ExitCode::SUCCESS)
 }

@@ -318,3 +318,111 @@ fn measure_sets_while_a_large_first_backup_is_taken() {
         shown(alone)
     );
 }
+
+/// What the server answers to `UMBRA.BACKUP`, and the text of it.
+fn backup_status(client: &mut TcpStream) -> (serde_json::Value, String) {
+    client
+        .write_all(b"*1\r\n$12\r\nUMBRA.BACKUP\r\n")
+        .expect("sends");
+    let mut reply = Vec::new();
+    let mut byte = [0];
+    while !reply.ends_with(b"\r\n") {
+        client.read_exact(&mut byte).expect("reads");
+        reply.push(byte[0]);
+    }
+    let header = String::from_utf8(reply).expect("text");
+    let length: usize = header
+        .trim_end()
+        .strip_prefix('$')
+        .unwrap_or_else(|| panic!("not a value: {header}"))
+        .parse()
+        .expect("a length");
+    let mut value = vec![0; length + 2];
+    client.read_exact(&mut value).expect("reads");
+    let text = String::from_utf8(value)
+        .expect("text")
+        .trim_end()
+        .to_owned();
+    (serde_json::from_str(&text).expect("is JSON"), text)
+}
+
+/// Asks until the status is one `wanted` accepts.
+fn backup_status_when(
+    client: &mut TcpStream,
+    wanted: impl Fn(&serde_json::Value) -> bool,
+) -> (serde_json::Value, String) {
+    let start = Instant::now();
+    loop {
+        let status = backup_status(client);
+        if wanted(&status.0) {
+            return status;
+        }
+        assert!(start.elapsed() < LIMIT, "never: {}", status.1);
+        thread::sleep(EVERY);
+    }
+}
+
+#[test]
+fn a_server_says_how_many_records_its_backup_holds_and_not_where_it_is() {
+    let dir = TempDir::new("status");
+    let mut client = serve(store(&dir.0.join("log")), &dir.backup());
+    set(&mut client, "player/1/gems", "100");
+
+    let (status, text) = backup_status_when(&mut client, |status| {
+        status["records"].is_u64() && status["records"] == status["store_records"]
+    });
+
+    assert_eq!(status["keeps_a_backup"], true, "{text}");
+    assert_eq!(status["failing"], false, "{text}");
+    assert!(status["finished_seconds_ago"].is_u64(), "{text}");
+    dir.wait_for_a_backup_with("player/1/gems", "100");
+    let place = dir.backup();
+    assert!(
+        !text.contains(place.to_str().expect("utf-8 path")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_server_whose_backups_fail_says_so_and_neither_why_nor_where() {
+    let dir = TempDir::new("status-failing");
+    // The place holds the backup of another store.
+    let mut other = store(&dir.0.join("other"));
+    let mut target = DirTarget::open(&dir.backup()).expect("opens the backup");
+    other.backup(&mut target).expect("backs up");
+    drop(target);
+    let mut client = serve(store(&dir.0.join("log")), &dir.backup());
+    set(&mut client, "player/1/gems", "100");
+
+    let (status, text) = backup_status_when(&mut client, |status| status["failing"] == true);
+
+    assert!(status["records"].is_null(), "{text}");
+    assert!(status["finished_seconds_ago"].is_null(), "{text}");
+    assert!(status["store_records"].is_u64(), "{text}");
+    let place = dir.backup();
+    assert!(
+        !text.contains(place.to_str().expect("utf-8 path")),
+        "{text}"
+    );
+    assert!(!text.contains("another log"), "{text}");
+}
+
+#[test]
+fn a_server_that_keeps_no_backup_says_so() {
+    let dir = TempDir::new("status-none");
+    let committer = Committer::start(store(&dir.0.join("log")));
+    let server =
+        Server::new(BRANCH, committer.writer(), committer.reader()).expect("serves a branch");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+    let address = listener.local_addr().expect("has an address");
+    thread::spawn(move || {
+        let _committer = committer;
+        server.serve(listener)
+    });
+    let mut client = TcpStream::connect(address).expect("connects");
+
+    let (status, text) = backup_status(&mut client);
+
+    assert_eq!(text, r#"{"keeps_a_backup":false}"#);
+    assert_eq!(status["keeps_a_backup"], false);
+}

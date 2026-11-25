@@ -7,8 +7,9 @@
 //! The log file is named by `UMBRACHYX_DB`. Values are encrypted under a key
 //! per subject, kept in the file next to it with `.keys` added to its name.
 //! Exit status is 0 on success, 1 when a merge or undo stopped on
-//! conflicts or when `replication` found a server whose replication is
-//! not going well, and 2 on any other error.
+//! conflicts or when `replication` or `backup --status` found a server
+//! whose replication or backup is not going well, and 2 on any other
+//! error.
 
 use std::collections::HashMap;
 use std::io::{BufWriter, ErrorKind, Write};
@@ -80,6 +81,18 @@ usage: umbrachyx <command> ...   (log file: $UMBRACHYX_DB, default umbrachyx.log
                               the backup is, and beside a running server
                               (on Windows it is refused while that server
                               is writing a backup there: ask again)
+  backup --status [--host A] [--port P]
+                              asks the server running on this machine, or
+                              on A, how the backup it keeps is going: how
+                              many of the store's records it holds, how
+                              long ago the last one ran to its end, and whether
+                              backups fail. Opens no log. The server does
+                              not say where the backup is kept or why one
+                              failed; the reason is on its standard error.
+                              Exit status 1 if backups fail. A backup is
+                              taken when something was written, so a place
+                              lost meanwhile is found at the next write:
+                              backup <directory> --check asks the place
   restore <directory>         writes the store the backup in <directory>
                               holds to $UMBRACHYX_DB, which must not exist yet
   serve <branch> [--port P] [--bind A] [--max-connections N] [--threads T]
@@ -206,7 +219,7 @@ fn main() -> ExitCode {
 const LOG_RESERVE: u64 = 16 * 1024 * 1024;
 
 /// Options that take no value.
-const FLAGS: &[&str] = &["require-auth", "current-values-only", "check"];
+const FLAGS: &[&str] = &["require-auth", "current-values-only", "check", "status"];
 
 struct Args {
     positional: Vec<String>,
@@ -279,11 +292,23 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let Some(command) = args.positional.first() else {
         return Err(USAGE.to_owned());
     };
-    // Said to `restore` it would be taken and the backup restored.
-    if args.options.contains_key("check") && command != "backup" {
-        return Err(format!(
-            "--check goes with backup, not {command}: backup <directory> --check"
-        ));
+    // Said to `restore` they would be taken and the backup restored.
+    for only_backup in ["check", "status"] {
+        if args.options.contains_key(only_backup) && command != "backup" {
+            return Err(format!(
+                "--{only_backup} goes with backup, not {command}: backup <directory> --check, \
+                 backup --status"
+            ));
+        }
+    }
+    // Asked of a running server: no store is opened.
+    if command == "backup" && args.options.contains_key("status") {
+        if args.options.contains_key("check") {
+            return Err(
+                "--status asks a running server and --check a directory: one at a time".to_owned(),
+            );
+        }
+        return backups::status(&args, DEFAULT_PORT);
     }
     // These never touch a log.
     match command.as_str() {
