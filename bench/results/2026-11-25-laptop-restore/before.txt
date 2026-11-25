@@ -1,0 +1,8 @@
+measured: the binary UMBRACHYX_BIN names
+sets: 1000000, copy of the log: 131008871 bytes
+backup --check  run 1: 590 MB  0.26 s
+backup --check  run 2: 590 MB  0.25 s
+backup --check  run 3: 590 MB  0.25 s
+restore         run 1: 590 MB  0.36 s
+restore         run 2: 590 MB  0.35 s
+restore         run 3: 590 MB  0.36 s

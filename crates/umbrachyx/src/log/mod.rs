@@ -4,6 +4,7 @@
 //! tree and the history are rebuilt from this log, so if the log is wrong,
 //! everything above it is wrong too.
 
+mod copy;
 mod header;
 pub(crate) mod record;
 mod storage;
@@ -13,6 +14,7 @@ use std::io;
 
 use header::{Header, Start};
 
+pub(crate) use copy::CopyCheck;
 pub(crate) use header::HEADER_LEN;
 pub use header::LogId;
 pub(crate) use header::is_start as is_start_of_a_log;
@@ -145,18 +147,11 @@ impl Iterator for Recorded {
     }
 }
 
-/// What a copy of a log's file turned out to hold.
-pub(crate) struct Copied {
-    pub(crate) id: LogId,
-    pub(crate) records: u64,
-    /// The chain over all of them.
-    pub(crate) chain: Chain,
-}
-
-/// Checks `bytes`, a copy of a log's file from its start, and says what
-/// it holds. Every byte must belong: a copy that ends in part of a record
-/// is refused, as damage inside it is.
-pub(crate) fn check_copy(bytes: &[u8]) -> Result<Copied, LogError> {
+/// A copy of a log's file from its start, checked all at once: what it
+/// is, how many records it holds and the chain over them. Kept for the
+/// tests of [`CopyCheck`], which reads the copy in parts and must agree.
+#[cfg(test)]
+pub(crate) fn check_copy_at_once(bytes: &[u8]) -> Result<(LogId, u64, Chain), LogError> {
     let header = match header::read(bytes) {
         Start::Header(header) => header,
         Start::Newer(version) => return Err(LogError::NewerFormat { version }),
@@ -187,11 +182,7 @@ pub(crate) fn check_copy(bytes: &[u8]) -> Result<Copied, LogError> {
         chain = chained(&chain, &frames[start..end as usize]);
         start = end as usize;
     }
-    Ok(Copied {
-        id: header.id,
-        records: scan.ends.len() as u64,
-        chain,
-    })
+    Ok((header.id, scan.ends.len() as u64, chain))
 }
 
 #[derive(Debug)]

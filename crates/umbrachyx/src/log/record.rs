@@ -477,6 +477,33 @@ fn check_frame(rest: &[u8]) -> Result<Option<Frame>, &'static str> {
     Ok(decode_payload(&rest[HEADER_LEN..end]).map(|record| Frame::Whole { record, len: end }))
 }
 
+/// What `rest`, bytes read so far from where a frame starts, begin with.
+pub(crate) enum Next {
+    /// A whole frame of this many bytes, its checksum holding.
+    Frame(usize),
+    /// The start of a frame, as far as can be told: more bytes are
+    /// needed to say.
+    Short,
+}
+
+/// As [`frame_len`], for bytes still arriving: a frame not all there yet
+/// is told apart from one that is wrong. Its length is checked as soon
+/// as its header is there, so no more is waited for than a record can
+/// be long.
+pub(crate) fn next_frame(rest: &[u8]) -> Result<Next, &'static str> {
+    if rest.len() < HEADER_LEN {
+        return Ok(Next::Short);
+    }
+    let len = read_u32(rest, 0) as usize;
+    if !(MIN_PAYLOAD_LEN..=MAX_PAYLOAD_LEN).contains(&len) {
+        return Err("payload length out of range");
+    }
+    if rest.len() < HEADER_LEN + len {
+        return Ok(Next::Short);
+    }
+    frame_len(rest).map(Next::Frame)
+}
+
 /// How long the frame at the start of `rest` is, header and payload, if
 /// its length is one a frame can have and its checksum holds.
 fn frame_len(rest: &[u8]) -> Result<usize, &'static str> {
