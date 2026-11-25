@@ -1560,8 +1560,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
     /// order.
     fn apply_puts(&mut self, puts: &[Edit]) {
         for edit in puts {
-            self.plain
-                .put(&edit.key, edit.value.as_deref().map(Bytes::from));
+            self.plain.put(&edit.key, edit.value.as_deref());
             self.tables.note_written(&edit.key);
         }
     }
