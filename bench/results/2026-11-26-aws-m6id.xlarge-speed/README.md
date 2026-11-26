@@ -66,9 +66,9 @@ Medians of three runs, a second (`run-*/umbrachyx.csv`, `valkey.csv`,
 | | Umbrachyx, plain-async | Valkey, `everysec` | |
 |---|---|---|---|
 | `SET`, one client | 58,309 | 33,956 | 1.7 times |
-| `SET`, 8 clients | 156,986 | 153,257 | the same: the runs overlap |
+| `SET`, 8 clients | 156,986 | 153,257 | the same: the runs overlap (but see below) |
 | `SET`, 64 clients | 148,368 | 162,999 | **9% fewer**, every run |
-| `SET`, 256 clients | 133,422 | 127,632 | the same: the runs overlap |
+| `SET`, 256 clients | 133,422 | 127,632 | the same: the runs overlap (but see below) |
 | `SET`, 50 clients sending 64 at a time | 957,396 | 703,977 | 1.4 times |
 | `GET`, one client | 60,569 | 37,864 | 1.6 times |
 | `GET`, 50 clients sending 16 at a time | 1,302,083 | 1,213,592 | 7% more, every run |
@@ -113,11 +113,38 @@ way round:
 | `GET`, 50 clients sending 16 at a time, four threads | 1,332,445 | 1,142,041 | 1.2 times |
 
 There, four serving threads gave 285,551 from 64 clients and one gave
-173,807; one thread of Valkey gives what one thread gives. So the row
-is lost where the client and the server share four virtual CPUs, and
-not elsewhere. That is still a way the server is run, and the row
-stays in the table. What the two threads spend their time on when they
-answer less than one has not been measured.
+173,807; one thread of Valkey gives what one thread gives. What the
+two threads spend their time on when they answer less than one has not
+been measured.
+
+## The rows from several clients on one machine are not settled
+
+The table beside Valkey above is what `bench/umbrachyx.sh` and
+`bench/valkey.sh` gave. The same binary on the same machine gave less
+in the two other files that measure those rows, each of which starts a
+fresh server, fills it and goes straight to them:
+
+| Plain-async `SET`s a second, `eea53bd` | `run-*/umbrachyx.csv` | `ab.csv`, `new` | `serving-threads.txt` |
+|---|---|---|---|
+| 8 clients | 152,439 to 161,290 | 109,469 to 125,945 | 117,018 (once) |
+| 64 clients | 138,217 to 150,038 | 114,351 to 118,273 | 139,639 and 142,187 |
+| 256 clients | 131,839 to 138,504 | 116,618 to 124,766 | 123,865 (once) |
+
+`serving-threads.txt` measured Valkey the same way, and there the
+default server lost all three: 117,018 against 140,924 from 8 clients,
+139,639 and 142,187 against 147,080 and 148,331 from 64, and 123,865
+against 145,356 from 256. A shared runner of this repository's CI, also
+of four virtual CPUs, gave 58,928 against 84,317 from 8 clients for the
+same commit with the release scripts.
+
+Why `bench/umbrachyx.sh` gives more from the same server has not been
+found. In it these rows come after a second of 50 clients writing;
+whether that, or where the one thread of the client lands among four
+virtual CPUs shared with two serving threads that stay awake, makes the
+difference is not known. So on one machine: one client and the rows
+sent many at a time are ahead in every file; **the rows from 8, 64 and
+256 clients sending one write at a time are behind or level, depending
+on the file**, and ahead only with the client on another machine.
 
 One more thing these rows show and do not explain: the slowest single
 write is slower for Umbrachyx in every row of `two-machines.csv`. From
