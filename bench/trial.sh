@@ -28,9 +28,11 @@ row() { # name label requests args...
   local before_cpu before_held after_held rps used
   before_cpu="$(cpu "$server")"
   before_held="$(held)"
-  /usr/bin/time -f '%U %S %e' -o "$dir/time" \
-    valkey-benchmark -p "$port" -r 1000000 -n "$requests" --csv "$@" 2>/dev/null |
-    grep -v '"test"' | cut -d, -f2,5,7,8 | tr -d '"' >"$dir/rps"
+  # The processor time is the whole pipeline's: all but the client's is
+  # too little to show.
+  local TIMEFORMAT='%U %S %R'
+  { time valkey-benchmark -p "$port" -r 1000000 -n "$requests" --csv "$@" 2>/dev/null |
+    grep -v '"test"' | cut -d, -f2,5,7,8 | tr -d '"' >"$dir/rps"; } 2>"$dir/time"
   used="$(awk -v a="$before_cpu" -v b="$(cpu "$server")" 'BEGIN {print b - a}')"
   sleep 1.2
   after_held="$(held)"
