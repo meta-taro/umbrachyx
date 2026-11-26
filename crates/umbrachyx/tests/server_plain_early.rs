@@ -257,10 +257,12 @@ fn a_pipeline_across_every_kind_of_table_is_answered_in_order() {
 }
 
 /// Several clients write the same keys at once, with values large
-/// enough that the store soon holds as much ahead of the disk as it
-/// may: some puts are held by the thread that read them and some go to
-/// the thread that writes. Whichever, the last value a reader is shown
-/// for a key is the one the log replays to.
+/// enough that what is held ahead of the disk is written again and
+/// again, and every fourth put sent behind a write that waits for the
+/// disk: some puts are held by the thread that read them, some beside
+/// the store while it writes, and some go to the thread that writes.
+/// Whichever, the last value a reader is shown for a key is the one the
+/// log replays to.
 #[test]
 fn clients_writing_the_same_keys_at_once_leave_what_the_log_replays() {
     const CLIENTS: usize = 4;
@@ -269,8 +271,7 @@ fn clients_writing_the_same_keys_at_once_leave_what_the_log_replays() {
     const VALUE_LEN: usize = 256 * 1024;
     for is_sealed in [false, true] {
         let dir = TempDir::new(if is_sealed { "same-sealed" } else { "same" });
-        // No timer empties what is held, so the bound is reached, and
-        // the put that reaches it goes to the thread that writes.
+        // No timer writes what is held: its size does.
         let (committer, address) = serve(dir.store(is_sealed), A_LONG_TIME);
         let mut client = connect(address);
         for key in 0..KEYS {
@@ -288,6 +289,17 @@ fn clients_writing_the_same_keys_at_once_leave_what_the_log_replays() {
                         let key = format!("cache/{}/blob", (id + round) % KEYS);
                         let mark = format!("{id}-{round}-");
                         let value = mark.repeat(VALUE_LEN / mark.len());
+                        if round % 4 == 0 {
+                            // Behind a write of its own that waits for
+                            // the disk, the put must not go ahead of it.
+                            let token = format!("session/{id}/token");
+                            let mut both = command(&["SET", &token, &mark]);
+                            both.extend(command(&["SET", &key, &value]));
+                            client.write_all(&both).expect("sends");
+                            assert_eq!(read_line(&mut client), "+OK");
+                            assert_eq!(read_line(&mut client), "+OK");
+                            continue;
+                        }
                         assert_eq!(ask_line(&mut client, &["SET", &key, &value]), "+OK");
                     }
                 })
@@ -411,4 +423,38 @@ fn a_set_is_answered_while_the_sets_before_it_are_being_synced() {
         text(store.get(BRANCH, b"cache/2/c")),
         Some("third".to_owned())
     );
+}
+
+/// The puts held ahead of the disk are written before their time once
+/// they are half of what may be held: a put that found no room would
+/// wait for the disk, and every put behind it.
+#[test]
+fn held_puts_are_written_early_once_they_are_half_of_what_may_be_held() {
+    const VALUE_LEN: usize = 256 * 1024;
+    const PUTS: usize = 10;
+    let dir = TempDir::new("half");
+    // No timer writes them: only their size does.
+    let (committer, address) = serve(dir.store(false), A_LONG_TIME);
+    let mut client = connect(address);
+    let value = "v".repeat(VALUE_LEN);
+    let log_len = || std::fs::metadata(dir.0.join("log")).expect("log").len();
+    let len_before = log_len();
+
+    for n in 0..PUTS {
+        let key = format!("cache/{n}/blob");
+        assert_eq!(ask_line(&mut client, &["SET", &key, &value]), "+OK");
+    }
+
+    // Nine of the ten pass half of 4 MiB; the write starts when told.
+    let written = (0..200).any(|_| {
+        thread::sleep(Duration::from_millis(10));
+        log_len() - len_before > 2 * 1024 * 1024
+    });
+    assert!(written, "the log grew by {} bytes", log_len() - len_before);
+    drop(committer.stop());
+    let store = dir.open(false);
+    for n in 0..PUTS {
+        let read = text(store.get(BRANCH, format!("cache/{n}/blob").as_bytes()));
+        assert_eq!(read.map(|value| value.len()), Some(VALUE_LEN));
+    }
 }
