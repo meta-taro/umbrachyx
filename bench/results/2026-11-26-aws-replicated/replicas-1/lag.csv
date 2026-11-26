@@ -1,0 +1,8 @@
+"what","label","writes","ms_p50","ms_p99","ms_max"
+"lag","u-history","1000","0.154","0.335","110.004"
+"lag","u-waits","1000","0.141","0.229","0.320"
+"lag","u-current","1000","0.135","1.928","178.914"
+"lag","valkey","1000","0.160","0.299","1.917"
+"lag","valkey, WAITAOF 1 1","1000","0.138","0.202","0.309"
+"replay_lag reported by the primary","postgres","95","0.284","5.277","5.277"
+"replay_lag reported by the primary","postgres, a synchronous replica","96","0.261","4.000","4.000"

@@ -1,0 +1,52 @@
+nohup: ignoring input
+valkey  | 64 clients | "148331.27" a second | server context switches a second: 2687
+    valkey-+          97.4%
+umbrachyx  | 64 clients | "139638.81" a second | server context switches a second: 3596
+    resplo+           82.2%
+    resplo+           81.8%
+    respco+            1.8%
+umbrachyx --threads 1 | 64 clients | "157869.81" a second | server context switches a second: 93
+    resplo+           98.4%
+    respco+            2.2%
+umbrachyx --threads 2 | 64 clients | "132855.06" a second | server context switches a second: 335
+    resplo+           97.6%
+    resplo+           97.4%
+    respco+            1.8%
+umbrachyx --threads 4 | 64 clients | "115052.73" a second | server context switches a second: 13411
+    resplo+           51.2%
+    resplo+           48.0%
+    resplo+           47.2%
+    resplo+           37.0%
+    respco+            1.8%
+valkey  | 64 clients | "147080.45" a second | server context switches a second: 3216
+    valkey-+          96.6%
+umbrachyx  | 64 clients | "142186.83" a second | server context switches a second: 2935
+    resplo+           86.2%
+    resplo+           84.8%
+    respco+            2.0%
+umbrachyx --threads 1 | 64 clients | "154352.73" a second | server context switches a second: 114
+    resplo+           98.2%
+    respco+            2.2%
+umbrachyx --threads 2 | 64 clients | "145779.67" a second | server context switches a second: 4002
+    resplo+           82.8%
+    resplo+           82.6%
+    respco+            1.6%
+umbrachyx --threads 4 | 64 clients | "116157.51" a second | server context switches a second: 12910
+    resplo+           52.3%
+    resplo+           45.9%
+    resplo+           42.9%
+    resplo+           41.5%
+    respco+            2.0%
+valkey  | 8 clients | "140924.47" a second | server context switches a second: 4853
+    valkey-+          95.8%
+umbrachyx  | 8 clients | "117018.38" a second | server context switches a second: 377
+    resplo+           97.2%
+    resplo+           96.8%
+    respco+            1.8%
+valkey  | 256 clients | "145355.88" a second | server context switches a second: 3304
+    valkey-+          96.4%
+umbrachyx  | 256 clients | "123864.58" a second | server context switches a second: 2532
+    resplo+           85.6%
+    resplo+           83.2%
+    respco+            2.0%
+R64-DONE
