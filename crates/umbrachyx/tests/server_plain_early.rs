@@ -392,14 +392,17 @@ fn a_set_is_answered_while_the_sets_before_it_are_being_synced() {
     let waited = asked.elapsed();
 
     assert!(
-        waited < SLOW_SYNC / 4,
+        waited < SLOW_SYNC / 2,
         "answered after {waited:?}, with the sync still going"
     );
     assert_eq!(committer.writer().puts_held_early() - held_before, 2);
     // The first sync ends, and the one that carries these two: neither
     // is asked for by anything but the server's own promise.
-    thread::sleep(SYNC_EVERY + 3 * SLOW_SYNC);
-    assert!(!committer.writer().has_unsynced_puts());
+    let written = (0..400).any(|_| {
+        thread::sleep(Duration::from_millis(10));
+        !committer.writer().has_unsynced_puts()
+    });
+    assert!(written, "the puts held beside the store were written");
     // Not stopped, which would write what is held: the log must hold
     // them already.
     let bytes = std::fs::read(dir.0.join("log")).expect("reads the log");

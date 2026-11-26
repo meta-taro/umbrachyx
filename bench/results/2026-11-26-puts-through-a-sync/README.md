@@ -27,6 +27,12 @@ keys.
 | `laptop-ab.csv` | `bench/ab.sh <old> <new> 3 plain-async` | old `d61a864`, new the commit that adds this folder |
 | `ci-runner.csv` | `ci-runner.sh <old> <new> 4`: Valkey with `appendfsync everysec`, then old and new with the default serving threads and with one, four rounds. Each row: writes a second, the median, 99th percentile and slowest in milliseconds, what the client and the server used of the processors | the same two |
 | `ci-runner.sh` | The script as it ran, from a branch made for the trial | |
+| `ci-runner-waiting.csv` | An earlier run on such a runner, of the build before only (`d61a864` with switches for the trial): the two times a serving thread waits set to nothing and to more, one, two and four serving threads, and Valkey, three rounds; written by `ci-runner-waiting.sh` | |
+
+The last column of `ci-runner.csv`, `held_by_serving_threads`, is 0 in
+every row: the builds it measured do not print that count. In
+`ci-runner-waiting.csv` it is counted once a second, so it can pass the
+row's requests by a second's worth.
 
 ## What it says
 
@@ -74,5 +80,17 @@ On the laptop, lowest to highest of three rounds, writes a second:
 More sent 64 at a time, where 4 MiB filled several times a second and
 each time a put waited for the disk; a few parts in a hundred more
 from 1, 8 and 256 clients; from 64 the rounds overlap.
+
+## What was tried first and not kept
+
+`ci-runner-waiting.csv` asked whether the serving threads' waiting was
+what cost the rows from several clients. It was not. Medians of three
+rounds, `SET`s a second from 64 clients: 85,281 as it is; 72,569 with a
+thread sleeping at once where it stays awake 50 microseconds; 82,359
+with a thread not looking for the turn to write; 79,962 staying awake
+200 microseconds; 87,367 with one serving thread and 77,519 with four;
+Valkey 85,704. In every one of those rows the client used 0.91 to 0.99
+of a processor, and the slowest write took about 100 ms whatever was
+switched: that led to the sync.
 
 Neither machine is the one releases are measured on.

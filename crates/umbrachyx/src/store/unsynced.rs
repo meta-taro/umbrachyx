@@ -9,9 +9,10 @@
 //! moment and nothing after it; a write that waited for the disk never
 //! survives without the puts answered before it.
 //!
-//! What is held is bounded by [`MAX_UNSYNCED_LEN`]. A put that would pass
-//! it waits for the disk like any other write, and takes the held ones
-//! with it.
+//! What is held is bounded by [`MAX_UNSYNCED_LEN`], the puts being
+//! written and the ones held beside the store meanwhile together. A put
+//! that would pass it waits for the disk like any other write, and
+//! takes the held ones with it.
 //!
 //! While the store writes them, which takes as long as the disk does,
 //! it can take no more: the puts that come meanwhile are held in an
@@ -57,6 +58,9 @@ pub(crate) struct Aside {
     tables: Arc<HashMap<Vec<u8>, Engine>>,
     edits: Vec<Edit>,
     len: usize,
+    /// What it may hold: what the store may, less what the store held
+    /// when it began to write.
+    room: usize,
 }
 
 impl Aside {
@@ -69,7 +73,7 @@ impl Aside {
                 == Some(&Engine::PlainAsync)
         };
         let len = edits_len(&puts);
-        if self.len + len > MAX_UNSYNCED_LEN || !puts.iter().all(is_early) {
+        if self.len + len > self.room || !puts.iter().all(is_early) {
             return Some(puts);
         }
         for edit in &puts {
@@ -82,8 +86,10 @@ impl Aside {
 }
 
 impl<S: Storage, C: Clock> Store<S, C> {
-    /// Somewhere to hold the puts that come while this store writes, or
-    /// `None` if it takes no writes of its own or its log takes no more.
+    /// Somewhere to hold the puts that come while this store writes the
+    /// ones it holds now, or `None` if it takes no writes of its own or
+    /// its log takes no more. To be made before that write begins: it
+    /// has the room the held puts leave.
     pub(crate) fn aside(&self) -> Option<Aside> {
         if self.current_only || self.log.is_poisoned() {
             return None;
@@ -93,6 +99,7 @@ impl<S: Storage, C: Clock> Store<S, C> {
             tables: self.tables.plain(),
             edits: Vec::new(),
             len: 0,
+            room: MAX_UNSYNCED_LEN.saturating_sub(self.unsynced.len),
         })
     }
 
