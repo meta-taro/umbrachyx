@@ -1,0 +1,109 @@
+side,clients,test,rps,p50_latency_ms,p99_latency_ms
+old,"50 clients, 64 at a time",SET,84695.52,36.383,52.511
+old,"64 clients",SET,50327.12,1.071,1.391
+old,"256 clients",SET,59101.65,3.431,4.639
+old,"1 client",SET,9684.29,0.103,0.143
+old,"1 client",GET,55432.37,0.015,0.031
+old,"50 clients",GET,143163.92,0.167,0.295
+old,"50 clients, 16 at a time",GET,871459.69,0.807,1.175
+old,"resident KiB after 3.5 million SETs",,2248456,,
+old,"plain, 1 clients",SET,10884.35,0.087,0.119
+old,"plain, 8 clients",SET,45745.65,0.143,0.207
+old,"plain, 64 clients",SET,91996.32,0.487,0.711
+old,"plain, 256 clients",SET,99453.02,1.727,2.607
+old,"plain, 50 clients, 64 at a time",SET,540394.50,4.919,18.335
+old,"plain-async, 1 clients",SET,29468.10,0.031,0.055
+old,"plain-async, 8 clients",SET,108873.16,0.047,0.095
+old,"plain-async, 64 clients",SET,106157.12,0.311,0.407
+old,"plain-async, 256 clients",SET,99502.48,1.295,1.727
+old,"plain-async, 50 clients, 64 at a time",SET,552181.12,4.319,25.631
+new,"50 clients, 64 at a time",SET,85382.52,36.255,53.247
+new,"64 clients",SET,51559.68,1.039,1.351
+new,"256 clients",SET,60661.21,3.327,4.495
+new,"1 client",SET,9807.77,0.103,0.143
+new,"1 client",GET,57077.62,0.015,0.031
+new,"50 clients",GET,115807.76,0.231,0.335
+new,"50 clients, 16 at a time",GET,956937.81,0.727,1.071
+new,"resident KiB after 3.5 million SETs",,2246664,,
+new,"plain, 1 clients",SET,11291.14,0.087,0.119
+new,"plain, 8 clients",SET,49407.12,0.135,0.191
+new,"plain, 64 clients",SET,93545.37,0.463,0.671
+new,"plain, 256 clients",SET,108754.76,1.583,2.455
+new,"plain, 50 clients, 64 at a time",SET,593119.81,4.479,17.727
+new,"plain-async, 1 clients",SET,58496.64,0.015,0.031
+new,"plain-async, 8 clients",SET,125944.58,0.039,0.071
+new,"plain-async, 64 clients",SET,118273.21,0.279,0.423
+new,"plain-async, 256 clients",SET,117924.53,1.039,1.711
+new,"plain-async, 50 clients, 64 at a time",SET,1012145.75,2.079,23.791
+old,"50 clients, 64 at a time",SET,84083.08,37.471,53.567
+old,"64 clients",SET,50163.03,1.071,1.407
+old,"256 clients",SET,58241.12,3.455,4.663
+old,"1 client",SET,9489.47,0.103,0.143
+old,"1 client",GET,56818.18,0.015,0.031
+old,"50 clients",GET,116754.23,0.223,0.343
+old,"50 clients, 16 at a time",GET,888099.44,0.783,1.151
+old,"resident KiB after 3.5 million SETs",,2246516,,
+old,"plain, 1 clients",SET,11044.84,0.087,0.127
+old,"plain, 8 clients",SET,47687.18,0.135,0.199
+old,"plain, 64 clients",SET,94652.16,0.471,0.687
+old,"plain, 256 clients",SET,111111.12,1.607,2.487
+old,"plain, 50 clients, 64 at a time",SET,550660.81,4.839,18.191
+old,"plain-async, 1 clients",SET,30057.11,0.031,0.055
+old,"plain-async, 8 clients",SET,109950.52,0.047,0.087
+old,"plain-async, 64 clients",SET,107469.11,0.303,0.399
+old,"plain-async, 256 clients",SET,102354.15,1.255,1.663
+old,"plain-async, 50 clients, 64 at a time",SET,557569.00,4.279,25.359
+new,"50 clients, 64 at a time",SET,88276.84,35.455,51.743
+new,"64 clients",SET,52164.84,1.023,1.335
+new,"256 clients",SET,60994.20,3.311,4.439
+new,"1 client",SET,9749.44,0.103,0.143
+new,"1 client",GET,56850.48,0.015,0.031
+new,"50 clients",GET,161812.31,0.159,0.231
+new,"50 clients, 16 at a time",GET,941176.50,0.743,1.087
+new,"resident KiB after 3.5 million SETs",,2248672,,
+new,"plain, 1 clients",SET,11245.43,0.087,0.127
+new,"plain, 8 clients",SET,49115.91,0.135,0.191
+new,"plain, 64 clients",SET,102197.24,0.471,0.647
+new,"plain, 256 clients",SET,113122.17,1.567,2.503
+new,"plain, 50 clients, 64 at a time",SET,605877.00,4.495,18.271
+new,"plain-async, 1 clients",SET,56963.83,0.015,0.031
+new,"plain-async, 8 clients",SET,109469.07,0.039,0.079
+new,"plain-async, 64 clients",SET,118133.49,0.279,0.415
+new,"plain-async, 256 clients",SET,116618.07,1.079,1.711
+new,"plain-async, 50 clients, 64 at a time",SET,958313.44,2.223,25.103
+old,"50 clients, 64 at a time",SET,84196.34,36.703,52.735
+old,"64 clients",SET,50314.46,1.071,1.391
+old,"256 clients",SET,59523.81,3.391,4.543
+old,"1 client",SET,9650.65,0.103,0.151
+old,"1 client",GET,55524.71,0.015,0.031
+old,"50 clients",GET,163934.42,0.159,0.231
+old,"50 clients, 16 at a time",GET,888494.06,0.791,1.151
+old,"resident KiB after 3.5 million SETs",,2238928,,
+old,"plain, 1 clients",SET,10858.94,0.087,0.135
+old,"plain, 8 clients",SET,47382.13,0.135,0.199
+old,"plain, 64 clients",SET,97847.36,0.487,0.679
+old,"plain, 256 clients",SET,98522.17,1.719,2.551
+old,"plain, 50 clients, 64 at a time",SET,546746.88,4.839,18.607
+old,"plain-async, 1 clients",SET,29559.56,0.031,0.055
+old,"plain-async, 8 clients",SET,108873.16,0.055,0.095
+old,"plain-async, 64 clients",SET,106439.60,0.303,0.399
+old,"plain-async, 256 clients",SET,101061.14,1.263,1.631
+old,"plain-async, 50 clients, 64 at a time",SET,558347.31,4.303,25.343
+new,"50 clients, 64 at a time",SET,83980.68,37.023,52.479
+new,"64 clients",SET,52069.77,1.023,1.335
+new,"256 clients",SET,60716.46,3.327,4.423
+new,"1 client",SET,9761.81,0.103,0.143
+new,"1 client",GET,55679.29,0.015,0.031
+new,"50 clients",GET,135409.61,0.167,0.335
+new,"50 clients, 16 at a time",GET,939849.62,0.743,1.095
+new,"resident KiB after 3.5 million SETs",,2246192,,
+new,"plain, 1 clients",SET,11020.50,0.087,0.127
+new,"plain, 8 clients",SET,48297.52,0.135,0.191
+new,"plain, 64 clients",SET,95648.01,0.471,0.679
+new,"plain, 256 clients",SET,99354.20,1.679,5.719
+new,"plain, 50 clients, 64 at a time",SET,606060.62,4.511,17.855
+new,"plain-async, 1 clients",SET,56625.14,0.015,0.031
+new,"plain-async, 8 clients",SET,110132.16,0.039,0.079
+new,"plain-async, 64 clients",SET,114351.06,0.287,0.423
+new,"plain-async, 256 clients",SET,124766.06,0.911,1.711
+new,"plain-async, 50 clients, 64 at a time",SET,987654.25,2.143,24.031
