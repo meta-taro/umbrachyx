@@ -163,13 +163,24 @@ fn sync_when_due(writer: &Writer, due: Option<Instant>, sync_every: Duration) ->
         return None;
     }
     let due = due.unwrap_or_else(|| Instant::now() + sync_every);
-    if Instant::now() < due {
+    if Instant::now() < due && !writer.should_sync_puts_now() {
         return Some(due);
     }
-    if let Err(error) = writer.sync_puts() {
-        stop_ahead_of_the_disk(&error.to_string());
+    let started = Instant::now();
+    match writer.sync_puts() {
+        Ok(()) => {}
+        // Whoever stopped the committer had it write what was held.
+        Err(crate::store::StoreError::Stopped) => return None,
+        Err(error) => stop_ahead_of_the_disk(&error.to_string()),
     }
-    None
+    if writer.should_sync_puts_now() {
+        // As many came while the disk took those as are worth writing
+        // at once.
+        return Some(started);
+    }
+    // Puts answered while the disk took those are held now, the oldest
+    // since the sync began.
+    writer.has_unsynced_puts().then(|| started + sync_every)
 }
 
 /// Ends the process: writes were answered that the disk refused, so
@@ -598,9 +609,10 @@ impl Connection {
         }
         let puts = std::mem::take(&mut self.early);
         let count = puts.len();
-        match server.writer.hold_early(puts) {
-            Ok(HeldEarly::Held { is_first }) => {
-                self.must_tell |= is_first;
+        let has_writes_out = !self.unanswered.is_empty();
+        match server.writer.hold_early(puts, has_writes_out) {
+            Ok(HeldEarly::Held { must_tell }) => {
+                self.must_tell |= must_tell;
                 for _ in 0..count {
                     self.reply(Reply::Simple("OK"));
                 }

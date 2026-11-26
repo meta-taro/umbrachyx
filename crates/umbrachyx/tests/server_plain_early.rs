@@ -11,10 +11,10 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
-use umbrachyx::log::{Engine, FileStorage};
+use umbrachyx::log::{Engine, FileStorage, Storage};
 use umbrachyx::server::Server;
 use umbrachyx::store::{Committer, MAIN_BRANCH, Provenance, Store, SystemClock};
 
@@ -257,10 +257,12 @@ fn a_pipeline_across_every_kind_of_table_is_answered_in_order() {
 }
 
 /// Several clients write the same keys at once, with values large
-/// enough that the store soon holds as much ahead of the disk as it
-/// may: some puts are held by the thread that read them and some go to
-/// the thread that writes. Whichever, the last value a reader is shown
-/// for a key is the one the log replays to.
+/// enough that what is held ahead of the disk is written again and
+/// again, and every fourth put sent behind a write that waits for the
+/// disk: some puts are held by the thread that read them, some beside
+/// the store while it writes, and some go to the thread that writes.
+/// Whichever, the last value a reader is shown for a key is the one the
+/// log replays to.
 #[test]
 fn clients_writing_the_same_keys_at_once_leave_what_the_log_replays() {
     const CLIENTS: usize = 4;
@@ -269,8 +271,7 @@ fn clients_writing_the_same_keys_at_once_leave_what_the_log_replays() {
     const VALUE_LEN: usize = 256 * 1024;
     for is_sealed in [false, true] {
         let dir = TempDir::new(if is_sealed { "same-sealed" } else { "same" });
-        // No timer empties what is held, so the bound is reached, and
-        // the put that reaches it goes to the thread that writes.
+        // No timer writes what is held: its size does.
         let (committer, address) = serve(dir.store(is_sealed), A_LONG_TIME);
         let mut client = connect(address);
         for key in 0..KEYS {
@@ -288,6 +289,17 @@ fn clients_writing_the_same_keys_at_once_leave_what_the_log_replays() {
                         let key = format!("cache/{}/blob", (id + round) % KEYS);
                         let mark = format!("{id}-{round}-");
                         let value = mark.repeat(VALUE_LEN / mark.len());
+                        if round % 4 == 0 {
+                            // Behind a write of its own that waits for
+                            // the disk, the put must not go ahead of it.
+                            let token = format!("session/{id}/token");
+                            let mut both = command(&["SET", &token, &mark]);
+                            both.extend(command(&["SET", &key, &value]));
+                            client.write_all(&both).expect("sends");
+                            assert_eq!(read_line(&mut client), "+OK");
+                            assert_eq!(read_line(&mut client), "+OK");
+                            continue;
+                        }
                         assert_eq!(ask_line(&mut client, &["SET", &key, &value]), "+OK");
                     }
                 })
@@ -312,5 +324,135 @@ fn clients_writing_the_same_keys_at_once_leave_what_the_log_replays() {
             let replayed = text(store.get(BRANCH, key.as_bytes()));
             assert!(replayed == value, "{key} replays to what was shown");
         }
+    }
+}
+
+/// A disk whose every sync takes long enough to send writes meanwhile.
+struct SlowSync(FileStorage);
+
+const SLOW_SYNC: Duration = Duration::from_millis(400);
+
+impl Storage for SlowSync {
+    fn read_all(&mut self) -> std::io::Result<Vec<u8>> {
+        self.0.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.0.append(bytes)
+    }
+
+    fn sync(&mut self) -> std::io::Result<()> {
+        thread::sleep(SLOW_SYNC);
+        self.0.sync()
+    }
+
+    fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+        self.0.truncate(len)
+    }
+}
+
+/// While the puts answered earlier are being synced the store is held
+/// for as long as the disk takes. A put that comes meanwhile is answered
+/// at once all the same, a read sees it, and it is in the log once the
+/// server has had the time it promises.
+#[test]
+fn a_set_is_answered_while_the_sets_before_it_are_being_synced() {
+    const SYNC_EVERY: Duration = Duration::from_millis(50);
+    let dir = TempDir::new("through-a-sync");
+    {
+        // Declares the table and makes the branch, on a disk of
+        // ordinary speed.
+        drop(dir.store(false));
+    }
+    let storage = SlowSync(FileStorage::open(&dir.0.join("log")).expect("opens file"));
+    let store = Store::open(storage, SystemClock).expect("opens store");
+    let committer = Committer::start(store);
+    let server = Server::new(BRANCH, committer.writer(), committer.reader())
+        .expect("serves a branch")
+        .threads(2)
+        .sync_every(SYNC_EVERY);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+    let address = listener.local_addr().expect("has an address");
+    thread::spawn(move || server.serve(listener));
+    let mut client = connect(address);
+    let mut other = connect(address);
+    assert_eq!(ask_line(&mut other, &["PING"]), "+PONG");
+
+    assert_eq!(ask_line(&mut client, &["SET", "cache/1/a", "first"]), "+OK");
+    // Its sync starts 50 ms on and ends 400 ms after that.
+    thread::sleep(SYNC_EVERY + SLOW_SYNC / 4);
+    let held_before = committer.writer().puts_held_early();
+    let asked = Instant::now();
+    assert_eq!(
+        ask_line(&mut client, &["SET", "cache/1/b", "second"]),
+        "+OK"
+    );
+    assert_eq!(ask_line(&mut other, &["SET", "cache/2/c", "third"]), "+OK");
+    assert_eq!(get(&mut other, "cache/1/b"), Some("second".to_owned()));
+    let waited = asked.elapsed();
+
+    assert!(
+        waited < SLOW_SYNC / 2,
+        "answered after {waited:?}, with the sync still going"
+    );
+    assert_eq!(committer.writer().puts_held_early() - held_before, 2);
+    // The first sync ends, and the one that carries these two: neither
+    // is asked for by anything but the server's own promise.
+    let written = (0..400).any(|_| {
+        thread::sleep(Duration::from_millis(10));
+        !committer.writer().has_unsynced_puts()
+    });
+    assert!(written, "the puts held beside the store were written");
+    // Stopping writes what is held: it must find nothing to write.
+    let log_len = || std::fs::metadata(dir.0.join("log")).expect("log").len();
+    let len_before_the_stop = log_len();
+    drop(committer.stop());
+    assert_eq!(log_len(), len_before_the_stop, "the log held them already");
+    let store = dir.open(false);
+    assert_eq!(
+        text(store.get(BRANCH, b"cache/1/a")),
+        Some("first".to_owned())
+    );
+    assert_eq!(
+        text(store.get(BRANCH, b"cache/1/b")),
+        Some("second".to_owned())
+    );
+    assert_eq!(
+        text(store.get(BRANCH, b"cache/2/c")),
+        Some("third".to_owned())
+    );
+}
+
+/// The puts held ahead of the disk are written before their time once
+/// they are half of what may be held: a put that found no room would
+/// wait for the disk, and every put behind it.
+#[test]
+fn held_puts_are_written_early_once_they_are_half_of_what_may_be_held() {
+    const VALUE_LEN: usize = 256 * 1024;
+    const PUTS: usize = 10;
+    let dir = TempDir::new("half");
+    // No timer writes them: only their size does.
+    let (committer, address) = serve(dir.store(false), A_LONG_TIME);
+    let mut client = connect(address);
+    let value = "v".repeat(VALUE_LEN);
+    let log_len = || std::fs::metadata(dir.0.join("log")).expect("log").len();
+    let len_before = log_len();
+
+    for n in 0..PUTS {
+        let key = format!("cache/{n}/blob");
+        assert_eq!(ask_line(&mut client, &["SET", &key, &value]), "+OK");
+    }
+
+    // Nine of the ten pass half of 4 MiB; the write starts when told.
+    let written = (0..200).any(|_| {
+        thread::sleep(Duration::from_millis(10));
+        log_len() - len_before > 2 * 1024 * 1024
+    });
+    assert!(written, "the log grew by {} bytes", log_len() - len_before);
+    drop(committer.stop());
+    let store = dir.open(false);
+    for n in 0..PUTS {
+        let read = text(store.get(BRANCH, format!("cache/{n}/blob").as_bytes()));
+        assert_eq!(read.map(|value| value.len()), Some(VALUE_LEN));
     }
 }
