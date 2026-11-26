@@ -49,6 +49,9 @@ const KEY_SPACE: u64 = 40;
 /// How often puts answered early are held by the thread that read
 /// them, in a hundred.
 const HELD_BY_THE_READER_PERCENT: u64 = 50;
+/// How many syncs of the held puts have more puts held beside the store
+/// meanwhile, where any are held.
+const WITH_MORE_BESIDE_PERCENT: u64 = 60;
 /// Out of 100, per write that waits for the disk, when values are
 /// sealed and its sync was not made to fail.
 const KEY_FAULT_PERCENT: u64 = 10;
@@ -88,6 +91,10 @@ pub struct Outcome {
     /// Interrupted writes that came back whole, and that did not.
     pub in_flight_kept: usize,
     pub in_flight_lost: usize,
+    /// Groups of puts held beside the store while it wrote the ones
+    /// before them, and how many of those writes failed.
+    pub beside: usize,
+    pub beside_a_failed_sync: usize,
     /// Puts refused because the log had refused a write.
     pub refused_after_a_failure: usize,
     pub replica_pulls: usize,
@@ -105,6 +112,9 @@ enum Waiting {
     Direct(Vec<Edit>),
     /// The puts held are written, and nothing else.
     SyncPuts,
+    /// The same, while puts that came meanwhile are held beside the
+    /// store, as a committer holds them, and taken in afterwards.
+    SyncPutsWithMore(Vec<Edit>),
     Branch(String),
 }
 
@@ -114,6 +124,7 @@ impl Waiting {
             Self::Group(_) => "write",
             Self::Direct(_) => "put on the store",
             Self::SyncPuts => "sync puts",
+            Self::SyncPutsWithMore(_) => "sync puts with more beside",
             Self::Branch(_) => "branch",
         }
     }
@@ -124,7 +135,8 @@ impl Waiting {
         match self {
             Self::Group(requests) => edits_of(requests),
             Self::Direct(edits) => edits.clone(),
-            Self::SyncPuts | Self::Branch(_) => Vec::new(),
+            // The puts beside are answered early, not written.
+            Self::SyncPuts | Self::SyncPutsWithMore(_) | Self::Branch(_) => Vec::new(),
         }
     }
 
@@ -133,6 +145,15 @@ impl Waiting {
             Self::Group(requests) => answers(store.write_requests(requests, true)),
             Self::Direct(edits) => store.put(edits),
             Self::SyncPuts => store.sync_puts(),
+            Self::SyncPutsWithMore(more) => {
+                let mut aside = store.aside().ok_or(StoreError::ReadOnly)?;
+                if aside.hold(more).is_some() {
+                    return Err(StoreError::ReadOnly);
+                }
+                let synced = store.sync_puts();
+                store.take_in(aside);
+                synced
+            }
             Self::Branch(name) => store.create_branch(&name, MAIN_BRANCH),
         }
     }
@@ -246,7 +267,15 @@ impl Run {
         } else if is(DIRECT_PERCENT) {
             Waiting::Direct(self.random_edits(EARLY_TABLE))
         } else if is(SYNC_PUTS_PERCENT) {
-            Waiting::SyncPuts
+            // Values are not sealed outside the store in this run.
+            let with_more = self.keys.is_none()
+                && !self.ahead.is_empty()
+                && self.rng.percent(WITH_MORE_BESIDE_PERCENT);
+            if with_more {
+                Waiting::SyncPutsWithMore(self.random_edits(EARLY_TABLE))
+            } else {
+                Waiting::SyncPuts
+            }
         } else if is(BRANCH_PERCENT) {
             self.branches += 1;
             Waiting::Branch(format!("b{}", self.branches))
@@ -304,6 +333,12 @@ impl Run {
         let has_ahead = !self.ahead.is_empty();
         // Writing the held puts when none is held writes nothing.
         let syncs = has_ahead || !matches!(waiting, Waiting::SyncPuts);
+        // Puts answered while this write was at the disk: behind every
+        // put it writes, and not written by it.
+        let beside = match &waiting {
+            Waiting::SyncPutsWithMore(more) => Some(more.clone()),
+            _ => None,
+        };
         let fault = (syncs && self.rng.percent(SYNC_FAULT_PERCENT)).then(|| {
             if self.rng.percent(50) {
                 SyncFault::KeepPending
@@ -340,13 +375,19 @@ impl Run {
         }
         match (written, fault) {
             (Ok(()), None) => {
-                if self.store.has_unsynced_puts() {
-                    return Err(format!("step {step}: {what} left puts off the disk"));
+                if self.store.has_unsynced_puts() != beside.is_some() {
+                    return Err(format!(
+                        "step {step}: {what} left the wrong puts off the disk"
+                    ));
                 }
                 for group in self.ahead.drain(..) {
                     apply(&mut self.durable, &group);
                 }
                 apply(&mut self.durable, &edits);
+                if let Some(beside) = beside {
+                    self.ahead.push(beside);
+                    self.outcome.beside += 1;
+                }
                 self.outcome.waited += 1;
                 self.outcome.carried += usize::from(has_ahead);
                 self.trace(step, what.to_owned());
@@ -355,6 +396,13 @@ impl Run {
             (Err(StoreError::Log(LogError::Io(_))), Some(fault)) => {
                 if fault == SyncFault::KeepPending {
                     self.in_flight = Some(edits);
+                }
+                if let Some(beside) = beside {
+                    // Answered, and read until the restart; the log
+                    // will never hold them.
+                    self.ahead.push(beside);
+                    self.outcome.beside_a_failed_sync += 1;
+                    self.check_reads(step)?;
                 }
                 self.trace(step, format!("{what}: sync fault {fault:?}"));
                 self.check_refuses_puts(step)?;
@@ -643,6 +691,8 @@ mod tests {
             total.in_flight_kept += outcome.in_flight_kept;
             total.in_flight_lost += outcome.in_flight_lost;
             total.refused_after_a_failure += outcome.refused_after_a_failure;
+            total.beside += outcome.beside;
+            total.beside_a_failed_sync += outcome.beside_a_failed_sync;
             total.replica_pulls += outcome.replica_pulls;
             total.key_faults += outcome.key_faults;
         }
@@ -709,6 +759,8 @@ mod tests {
         assert!(total.in_flight_lost >= 20, "{total:?}");
         assert!(total.refused_after_a_failure >= 100, "{total:?}");
         assert!(total.replica_pulls >= 3_000, "{total:?}");
+        assert!(total.beside >= 100, "{total:?}");
+        assert!(total.beside_a_failed_sync >= 5, "{total:?}");
     }
 
     #[test]
@@ -724,7 +776,7 @@ mod tests {
              {} writes that waited for it ({} carried earlier puts), {} restarts, {} of them \
              lost the last puts ({} groups in all, never anything else), interrupted writes \
              kept {} and lost {}, {} puts refused after a failed write; a replica was sent \
-             records {} times",
+             records {} times; {} syncs had puts held beside the store, {} of them failed",
             total.early,
             total.waited,
             total.carried,
@@ -735,6 +787,8 @@ mod tests {
             total.in_flight_lost,
             total.refused_after_a_failure,
             total.replica_pulls,
+            total.beside,
+            total.beside_a_failed_sync,
         );
     }
 
