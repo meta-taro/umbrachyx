@@ -111,6 +111,12 @@ impl<S: Storage, C: Clock> Store<S, C> {
         !self.unsynced.edits.is_empty()
     }
 
+    /// Whether half of what may be held ahead of the disk is held: time
+    /// to write it, while there is room for the puts that come meanwhile.
+    pub fn is_filling_with_unsynced_puts(&self) -> bool {
+        self.unsynced.len > MAX_UNSYNCED_LEN / 2
+    }
+
     /// Whether puts were answered that the log then refused. Readers
     /// see them, and no restart will bring them back: whoever serves
     /// this store should stop.

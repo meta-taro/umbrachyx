@@ -115,6 +115,8 @@ trait Engine: Send + Sync {
     /// Writes the queue, then the puts the log does not hold yet. The
     /// caller holds the turn.
     fn sync_puts(&self) -> Result<(), StoreError>;
+    /// See [`Writer::should_sync_puts_now`].
+    fn should_sync_puts_now(&self) -> bool;
     /// Whether the log refused puts that were already answered.
     fn lost_answered_puts(&self) -> bool;
 }
@@ -130,6 +132,8 @@ struct Core<S: Storage, C: Clock> {
     /// Whether the store holds puts the log does not, kept here so that
     /// asking does not wait for the store.
     has_unsynced_puts: AtomicBool,
+    /// Whether the store holds half of what it may ahead of the disk.
+    is_filling: AtomicBool,
     /// Whether the log refused puts that were already answered.
     lost_answered_puts: AtomicBool,
     /// How many records the log holds, kept here so that whoever waits
@@ -230,12 +234,17 @@ impl<S: Storage, C: Clock> Core<S, C> {
         };
         let count = puts.len() as u64;
         let had_unsynced = store.has_unsynced_puts();
+        let was_filling = store.is_filling_with_unsynced_puts();
         // No view is published: these puts make no key, and the map
         // they change is the one every view reads already.
         let held = match store.hold_sealed(puts) {
-            Ok(None) => HeldEarly::Held {
-                is_first: !had_unsynced,
-            },
+            Ok(None) => {
+                let is_filling = store.is_filling_with_unsynced_puts();
+                self.is_filling.store(is_filling, Ordering::Release);
+                HeldEarly::Held {
+                    must_tell: !had_unsynced || (is_filling && !was_filling),
+                }
+            }
             Ok(Some(puts)) => return Err(puts),
             Err(error) => HeldEarly::Refused(error),
         };
@@ -269,7 +278,7 @@ impl<S: Storage, C: Clock> Core<S, C> {
             None => {
                 self.held_early.fetch_add(count, Ordering::Relaxed);
                 // Whoever syncs looks again when its sync ends.
-                Ok(HeldEarly::Held { is_first: false })
+                Ok(HeldEarly::Held { must_tell: false })
             }
         }
     }
@@ -307,6 +316,8 @@ impl<S: Storage, C: Clock> Core<S, C> {
         self.note_records(store);
         self.has_unsynced_puts
             .store(store.has_unsynced_puts(), Ordering::Release);
+        self.is_filling
+            .store(store.is_filling_with_unsynced_puts(), Ordering::Release);
         self.lost_answered_puts
             .store(store.lost_answered_puts(), Ordering::Release);
     }
@@ -478,6 +489,10 @@ where
         Core::sync_puts(self, true)
     }
 
+    fn should_sync_puts_now(&self) -> bool {
+        self.is_filling.load(Ordering::Acquire)
+    }
+
     fn lost_answered_puts(&self) -> bool {
         self.lost_answered_puts.load(Ordering::Acquire)
     }
@@ -545,6 +560,7 @@ where
                 published,
                 is_following,
                 has_unsynced_puts: AtomicBool::new(false),
+                is_filling: AtomicBool::new(false),
                 lost_answered_puts: AtomicBool::new(false),
                 records: Mutex::new(records),
                 grew: Condvar::new(),
@@ -698,6 +714,15 @@ impl Writer {
         self.engine.has_unsynced_puts()
     }
 
+    /// Whether half of what may be held ahead of the disk is held, as
+    /// of the last put held or group written. [`Writer::sync_puts`] is
+    /// then worth calling before its time: the puts that come while it
+    /// writes are answered, where a put that finds no room waits for
+    /// the disk, and every put behind it.
+    pub fn should_sync_puts_now(&self) -> bool {
+        self.engine.should_sync_puts_now()
+    }
+
     /// Whether the log refused puts that were already answered: by a
     /// call to [`Writer::sync_puts`], or by any write that carried them.
     /// Readers see those values and no restart will bring them back, so
@@ -755,10 +780,12 @@ impl Writer {
 /// What [`Writer::hold_early`] did with the puts it kept.
 #[derive(Debug)]
 pub enum HeldEarly {
-    /// They are applied, and every reader sees them. `is_first` if they
-    /// are the first the log does not hold: from now somebody has to
-    /// call [`Writer::sync_puts`] in time.
-    Held { is_first: bool },
+    /// They are applied, and every reader sees them. `must_tell` if
+    /// whoever calls [`Writer::sync_puts`] has to hear of them: they are
+    /// the first the log does not hold, and from now it must be called
+    /// in time; or with them half of what may be held is, and it should
+    /// be called now ([`Writer::should_sync_puts_now`]).
+    Held { must_tell: bool },
     /// The store refused them.
     Refused(StoreError),
 }
