@@ -403,16 +403,11 @@ fn a_set_is_answered_while_the_sets_before_it_are_being_synced() {
         !committer.writer().has_unsynced_puts()
     });
     assert!(written, "the puts held beside the store were written");
-    // Not stopped, which would write what is held: the log must hold
-    // them already.
-    let bytes = std::fs::read(dir.0.join("log")).expect("reads the log");
-    for value in ["first", "second", "third"] {
-        assert!(
-            bytes.windows(value.len()).any(|at| at == value.as_bytes()),
-            "{value} is in the log"
-        );
-    }
+    // Stopping writes what is held: it must find nothing to write.
+    let log_len = || std::fs::metadata(dir.0.join("log")).expect("log").len();
+    let len_before_the_stop = log_len();
     drop(committer.stop());
+    assert_eq!(log_len(), len_before_the_stop, "the log held them already");
     let store = dir.open(false);
     assert_eq!(
         text(store.get(BRANCH, b"cache/1/a")),
