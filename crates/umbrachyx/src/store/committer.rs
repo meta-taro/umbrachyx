@@ -705,6 +705,13 @@ const LOOK_FOR_THE_TURN: Duration = Duration::from_micros(100);
 /// With one processor, the thread that has the turn cannot end it while
 /// this one looks.
 fn look_for_the_turn_with(processors: usize) -> Duration {
+    // Trial only: this branch is not for merging.
+    if let Some(micros) = std::env::var("UMBRACHYX_TRIAL_LOOK_US")
+        .ok()
+        .and_then(|micros| micros.parse().ok())
+    {
+        return Duration::from_micros(micros);
+    }
     if processors > 1 {
         LOOK_FOR_THE_TURN
     } else {

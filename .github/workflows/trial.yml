@@ -1,0 +1,31 @@
+# Trial only, not for merging: runs bench/trial.sh on a pushed trial
+# branch, to tell what the serving threads' waiting costs a client on
+# the server's own machine.
+name: trial
+
+on:
+  push:
+    branches: ['trial/**']
+
+permissions:
+  contents: read
+
+jobs:
+  trial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build
+        run: cargo build --release -p umbrachyx
+      - name: Valkey
+        run: |
+          git clone --quiet --depth 1 --branch 9.1.3 https://github.com/valkey-io/valkey.git "$RUNNER_TEMP/valkey"
+          make -C "$RUNNER_TEMP/valkey" -j"$(nproc)" BUILD_TLS=no >/dev/null
+          echo "$RUNNER_TEMP/valkey/src" >> "$GITHUB_PATH"
+      - name: Trial
+        run: bench/trial.sh target/release/umbrachyx 3 | tee trial.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trial
+          path: trial.csv

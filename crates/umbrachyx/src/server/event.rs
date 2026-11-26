@@ -75,6 +75,13 @@ const STAY_AWAKE: Duration = Duration::from_micros(50);
 /// processor, one client got about 90,000 `GET`s a second from a thread
 /// that looked first and 130,000 or more from one that slept at once.
 fn stay_awake_with(processors: usize) -> Duration {
+    // Trial only: this branch is not for merging.
+    if let Some(micros) = std::env::var("UMBRACHYX_TRIAL_STAY_AWAKE_US")
+        .ok()
+        .and_then(|micros| micros.parse().ok())
+    {
+        return Duration::from_micros(micros);
+    }
     if processors > 1 {
         STAY_AWAKE
     } else {
@@ -210,6 +217,16 @@ pub(super) fn spawn(server: Server, number: usize) -> io::Result<Handle> {
     let poll = Poll::new()?;
     let waker = Arc::new(Waker::new(poll.registry(), WAKE)?);
     let (incoming, received) = mpsc::channel();
+    if number == 0 && std::env::var_os("UMBRACHYX_TRIAL_STATS").is_some() {
+        // Trial only: how many puts the serving threads held themselves.
+        let writer = server.writer.clone();
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(1));
+                eprintln!("held-early {}", writer.puts_held_early());
+            }
+        });
+    }
     let mut serving = Loop {
         server,
         poll,
