@@ -8,8 +8,10 @@
   disk took. A put that comes during a sync is now held beside the
   store and answered, and the held puts are written once they are half
   of what may be held. On a CI runner of four virtual CPUs the slowest
-  write from 64 clients went from 75–96 ms to 2.8–6.0, and writes sent
-  64 at a time from 798,000–840,000 a second to 1,025,000–1,067,000
+  write from 64 clients went from 94–97 ms to 3.0–4.3 in three rounds
+  of four, and writes sent 64 at a time from 773,000–807,000 a second
+  to 983,000–1,035,000; on a laptop, from 1,283,000–1,294,000 to
+  1,682,000–1,898,000
   (`bench/results/2026-11-26-puts-through-a-sync/`). What a plain-async
   table promises is unchanged.
 - **A `GET` copies its value once.** It is opened straight from where

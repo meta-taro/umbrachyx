@@ -1987,12 +1987,14 @@ So a table can be declared to keep no history at all.
   when it is durable — so it was not tried. On a CI runner of four
   virtual CPUs, old and new in turn
   ([`bench/results/2026-11-26-puts-through-a-sync/`](../bench/results/2026-11-26-puts-through-a-sync/)):
-  the slowest write from 64 clients 75–96 ms to 2.8–6.0 (Valkey
-  5.3–8.8), writes sent 64 at a time 798,000–840,000 a second to
-  1,025,000–1,067,000 (Valkey 1,063,000–1,083,000). Sent 64 at a time
-  on that disk, more comes during one sync than may be held beside the
-  store, and one write in a hundred still waits 68–78 ms. Not yet
-  measured on the release machine.
+  the slowest write from 64 clients 94–97 ms to 3.0–4.3 in three
+  rounds of four and 96 in the fourth (Valkey 5.0–5.8), writes sent 64
+  at a time 773,000–807,000 a second to 983,000–1,035,000 (Valkey
+  971,000–1,011,000). Sent 64 at a time on that disk, more comes
+  during one sync than may be held ahead of it, and one write in a
+  hundred still waits about 70 ms. On a laptop, writes sent 64 at a
+  time 1,283,000–1,294,000 to 1,682,000–1,898,000. Not yet measured on
+  the release machine.
 - **The map hashes a key once, and writes a short value over where it
   is** (measured, taken). The map of these tables is in 64 parts, each a
   hash table of its own; a key was hashed once to choose the part and
