@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A `SET` to a plain-async table no longer waits for the sync of
+  the ones before it.** Once every `--sync-every`, and whenever 4 MiB
+  was held ahead of the disk, no write was answered for as long as the
+  disk took. A put that comes during a sync is now held beside the
+  store and answered, and the held puts are written once they are half
+  of what may be held. On a CI runner of four virtual CPUs the slowest
+  write from 64 clients went from 75–96 ms to 2.8–6.0, and writes sent
+  64 at a time from 798,000–840,000 a second to 1,025,000–1,067,000
+  (`bench/results/2026-11-26-puts-through-a-sync/`). What a plain-async
+  table promises is unchanged.
 - **A `GET` copies its value once.** It is opened straight from where
   it is stored into the bytes that are sent, where it was copied to be
   shared, opened into new memory, and copied twice more on the way out.

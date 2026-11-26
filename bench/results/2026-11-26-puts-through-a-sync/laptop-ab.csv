@@ -1,0 +1,31 @@
+side,clients,test,rps,p50_latency_ms,p99_latency_ms
+old,"plain-async, 1 clients",SET,63492.06,0.015,0.031
+old,"plain-async, 8 clients",SET,218340.61,0.023,0.071
+old,"plain-async, 64 clients",SET,240673.89,0.127,0.231
+old,"plain-async, 256 clients",SET,236966.83,0.495,2.327
+old,"plain-async, 50 clients, 64 at a time",SET,1278772.38,1.679,24.831
+new,"plain-async, 1 clients",SET,66555.73,0.015,0.023
+new,"plain-async, 8 clients",SET,230946.89,0.023,0.071
+new,"plain-async, 64 clients",SET,233644.86,0.127,0.391
+new,"plain-async, 256 clients",SET,252525.25,0.495,0.999
+new,"plain-async, 50 clients, 64 at a time",SET,1515151.50,1.303,21.663
+old,"plain-async, 1 clients",SET,65040.65,0.015,0.023
+old,"plain-async, 8 clients",SET,219780.22,0.023,0.071
+old,"plain-async, 64 clients",SET,244200.25,0.127,0.239
+old,"plain-async, 256 clients",SET,243605.36,0.487,0.967
+old,"plain-async, 50 clients, 64 at a time",SET,1274697.25,1.679,24.831
+new,"plain-async, 1 clients",SET,66291.02,0.015,0.023
+new,"plain-async, 8 clients",SET,234466.59,0.023,0.071
+new,"plain-async, 64 clients",SET,256739.42,0.127,0.239
+new,"plain-async, 256 clients",SET,256739.42,0.495,0.783
+new,"plain-async, 50 clients, 64 at a time",SET,1763668.50,0.967,18.463
+old,"plain-async, 1 clients",SET,63877.36,0.015,0.031
+old,"plain-async, 8 clients",SET,220507.17,0.023,0.071
+old,"plain-async, 64 clients",SET,240384.61,0.127,0.239
+old,"plain-async, 256 clients",SET,240096.03,0.495,0.831
+old,"plain-async, 50 clients, 64 at a time",SET,1289490.62,1.703,24.463
+new,"plain-async, 1 clients",SET,66533.60,0.015,0.023
+new,"plain-async, 8 clients",SET,231481.47,0.023,0.071
+new,"plain-async, 64 clients",SET,236966.83,0.127,0.391
+new,"plain-async, 256 clients",SET,256410.27,0.495,0.919
+new,"plain-async, 50 clients, 64 at a time",SET,1615508.88,1.159,21.615

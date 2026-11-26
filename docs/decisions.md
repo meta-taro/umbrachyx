@@ -1950,6 +1950,38 @@ So a table can be declared to keep no history at all.
   ([#36](https://github.com/meta-taro/umbrachyx/issues/36)), and gains
   as above once they have keys. The release machines have not measured
   it.
+
+- **A put is answered while the puts before it are synced** (measured,
+  taken). Writing the held puts holds the store for as long as the disk
+  takes, and a put that came meanwhile went to the thread that writes
+  and waited: once every `--sync-every`, and whenever 4 MiB was held,
+  nobody was answered for the length of a sync. The slowest write of
+  every row showed it — about 20 ms on the release machine and 100 ms
+  on a CI runner, against Valkey's few, whose sync is on a thread of
+  its own. Two things changed. While the store syncs, a serving thread
+  holds its puts beside it: applied to the map, which takes puts
+  without the store, in the order they come, and taken into the store
+  when the sync ends, behind the puts just written and ahead of
+  anything queued; up to 4 MiB of them, and never for a connection
+  with writes of its own still queued, which they must not go ahead
+  of. And the thread that writes is told when half of 4 MiB is held and
+  syncs then, so that the sync is this one, which puts are answered
+  through, and not the one a put that found no room would cause. What
+  a plain-async table promises is as before: the log holds the puts in
+  the order they were answered, a power cut loses the tail of them, and
+  the next sync is due `--sync-every` after the last began, so a put
+  held beside the store waits no longer than one held in it. Syncing on
+  a thread of its own, the store let go, would have done as much and
+  touched what every other write relies on — a record is in the log
+  when it is durable — so it was not tried. On a CI runner of four
+  virtual CPUs, old and new in turn
+  ([`bench/results/2026-11-26-puts-through-a-sync/`](../bench/results/2026-11-26-puts-through-a-sync/)):
+  the slowest write from 64 clients 75–96 ms to 2.8–6.0 (Valkey
+  5.3–8.8), writes sent 64 at a time 798,000–840,000 a second to
+  1,025,000–1,067,000 (Valkey 1,063,000–1,083,000). Sent 64 at a time
+  on that disk, more comes during one sync than may be held beside the
+  store, and one write in a hundred still waits 68–78 ms. Not yet
+  measured on the release machine.
 - **The map hashes a key once, and writes a short value over where it
   is** (measured, taken). The map of these tables is in 64 parts, each a
   hash table of its own; a key was hashed once to choose the part and
