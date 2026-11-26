@@ -166,10 +166,13 @@ fn sync_when_due(writer: &Writer, due: Option<Instant>, sync_every: Duration) ->
     if Instant::now() < due {
         return Some(due);
     }
+    let started = Instant::now();
     if let Err(error) = writer.sync_puts() {
         stop_ahead_of_the_disk(&error.to_string());
     }
-    None
+    // Puts answered while the disk took those are held now, the oldest
+    // since the sync began.
+    writer.has_unsynced_puts().then(|| started + sync_every)
 }
 
 /// Ends the process: writes were answered that the disk refused, so
@@ -598,7 +601,8 @@ impl Connection {
         }
         let puts = std::mem::take(&mut self.early);
         let count = puts.len();
-        match server.writer.hold_early(puts) {
+        let has_writes_out = !self.unanswered.is_empty();
+        match server.writer.hold_early(puts, has_writes_out) {
             Ok(HeldEarly::Held { is_first }) => {
                 self.must_tell |= is_first;
                 for _ in 0..count {

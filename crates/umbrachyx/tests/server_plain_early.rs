@@ -11,10 +11,10 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use umbrachyx::keys::{FileKeyStorage, KeyStorage, Keys};
-use umbrachyx::log::{Engine, FileStorage};
+use umbrachyx::log::{Engine, FileStorage, Storage};
 use umbrachyx::server::Server;
 use umbrachyx::store::{Committer, MAIN_BRANCH, Provenance, Store, SystemClock};
 
@@ -313,4 +313,102 @@ fn clients_writing_the_same_keys_at_once_leave_what_the_log_replays() {
             assert!(replayed == value, "{key} replays to what was shown");
         }
     }
+}
+
+/// A disk whose every sync takes long enough to send writes meanwhile.
+struct SlowSync(FileStorage);
+
+const SLOW_SYNC: Duration = Duration::from_millis(400);
+
+impl Storage for SlowSync {
+    fn read_all(&mut self) -> std::io::Result<Vec<u8>> {
+        self.0.read_all()
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.0.append(bytes)
+    }
+
+    fn sync(&mut self) -> std::io::Result<()> {
+        thread::sleep(SLOW_SYNC);
+        self.0.sync()
+    }
+
+    fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+        self.0.truncate(len)
+    }
+}
+
+/// While the puts answered earlier are being synced the store is held
+/// for as long as the disk takes. A put that comes meanwhile is answered
+/// at once all the same, a read sees it, and it is in the log once the
+/// server has had the time it promises.
+#[test]
+fn a_set_is_answered_while_the_sets_before_it_are_being_synced() {
+    const SYNC_EVERY: Duration = Duration::from_millis(50);
+    let dir = TempDir::new("through-a-sync");
+    {
+        // Declares the table and makes the branch, on a disk of
+        // ordinary speed.
+        drop(dir.store(false));
+    }
+    let storage = SlowSync(FileStorage::open(&dir.0.join("log")).expect("opens file"));
+    let store = Store::open(storage, SystemClock).expect("opens store");
+    let committer = Committer::start(store);
+    let server = Server::new(BRANCH, committer.writer(), committer.reader())
+        .expect("serves a branch")
+        .threads(2)
+        .sync_every(SYNC_EVERY);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+    let address = listener.local_addr().expect("has an address");
+    thread::spawn(move || server.serve(listener));
+    let mut client = connect(address);
+    let mut other = connect(address);
+    assert_eq!(ask_line(&mut other, &["PING"]), "+PONG");
+
+    assert_eq!(ask_line(&mut client, &["SET", "cache/1/a", "first"]), "+OK");
+    // Its sync starts 50 ms on and ends 400 ms after that.
+    thread::sleep(SYNC_EVERY + SLOW_SYNC / 4);
+    let held_before = committer.writer().puts_held_early();
+    let asked = Instant::now();
+    assert_eq!(
+        ask_line(&mut client, &["SET", "cache/1/b", "second"]),
+        "+OK"
+    );
+    assert_eq!(ask_line(&mut other, &["SET", "cache/2/c", "third"]), "+OK");
+    assert_eq!(get(&mut other, "cache/1/b"), Some("second".to_owned()));
+    let waited = asked.elapsed();
+
+    assert!(
+        waited < SLOW_SYNC / 4,
+        "answered after {waited:?}, with the sync still going"
+    );
+    assert_eq!(committer.writer().puts_held_early() - held_before, 2);
+    // The first sync ends, and the one that carries these two: neither
+    // is asked for by anything but the server's own promise.
+    thread::sleep(SYNC_EVERY + 3 * SLOW_SYNC);
+    assert!(!committer.writer().has_unsynced_puts());
+    // Not stopped, which would write what is held: the log must hold
+    // them already.
+    let bytes = std::fs::read(dir.0.join("log")).expect("reads the log");
+    for value in ["first", "second", "third"] {
+        assert!(
+            bytes.windows(value.len()).any(|at| at == value.as_bytes()),
+            "{value} is in the log"
+        );
+    }
+    drop(committer.stop());
+    let store = dir.open(false);
+    assert_eq!(
+        text(store.get(BRANCH, b"cache/1/a")),
+        Some("first".to_owned())
+    );
+    assert_eq!(
+        text(store.get(BRANCH, b"cache/1/b")),
+        Some("second".to_owned())
+    );
+    assert_eq!(
+        text(store.get(BRANCH, b"cache/2/c")),
+        Some("third".to_owned())
+    );
 }

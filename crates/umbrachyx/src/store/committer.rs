@@ -36,6 +36,7 @@ use std::time::Duration;
 use super::backup::Origin;
 use super::follow::{Feed, Follower};
 use super::replicas::Replicas;
+use super::unsynced::Aside;
 use super::{
     Clock, CommitId, CommitRequest, Inspect, Provenance, Request, Review, Store, StoreError, View,
 };
@@ -69,7 +70,7 @@ trait Engine: Send + Sync {
     /// Writes everything queued. The caller holds the turn.
     fn write_queue(&self);
     /// See [`Writer::hold_early`].
-    fn hold_early(&self, puts: Vec<Edit>) -> Result<HeldEarly, Vec<Edit>>;
+    fn hold_early(&self, puts: Vec<Edit>, has_writes_out: bool) -> Result<HeldEarly, Vec<Edit>>;
     /// See [`Writer::puts_held_early`].
     fn puts_held_early(&self) -> u64;
     /// Whether the store was there to ask. The caller holds the turn.
@@ -146,6 +147,12 @@ struct Core<S: Storage, C: Clock> {
     look_for_the_turn: Duration,
     /// How many puts were held by the thread that read them.
     held_early: AtomicU64,
+    /// Where puts are held while the ones before them are being
+    /// synced, which holds the store for as long as the disk takes;
+    /// `None` at any other time.
+    aside: Mutex<Option<Aside>>,
+    /// Whether `aside` holds one, so that asking costs no lock.
+    is_aside_open: AtomicBool,
 }
 
 impl<S: Storage, C: Clock> Core<S, C> {
@@ -200,13 +207,20 @@ impl<S: Storage, C: Clock> Core<S, C> {
     }
 
     /// See [`Writer::hold_early`].
-    fn hold_early(&self, puts: Vec<Edit>) -> Result<HeldEarly, Vec<Edit>> {
-        if self.is_following || self.replicas.is_some() {
-            // A store that follows refuses writes, and one that waits
-            // for replicas may have to: both are for the thread that
-            // writes to say.
+    fn hold_early(&self, puts: Vec<Edit>, has_writes_out: bool) -> Result<HeldEarly, Vec<Edit>> {
+        if !self.answers_puts_early() {
             return Err(puts);
         }
+        // Puts of a connection whose earlier writes are still queued
+        // must not be applied ahead of them.
+        let puts = if has_writes_out {
+            puts
+        } else {
+            match self.hold_aside(puts) {
+                Ok(held) => return Ok(held),
+                Err(puts) => puts,
+            }
+        };
         let Some(_turn) = self.turns.take_if_idle(self.look_for_the_turn) else {
             return Err(puts);
         };
@@ -230,6 +244,34 @@ impl<S: Storage, C: Clock> Core<S, C> {
             self.has_unsynced_puts.store(true, Ordering::Release);
         }
         Ok(held)
+    }
+
+    /// Whether puts may be answered before they are written. A store
+    /// that follows refuses writes, and one that waits for replicas may
+    /// have to: both are for the thread that writes to say.
+    fn answers_puts_early(&self) -> bool {
+        !self.is_following && self.replicas.is_none()
+    }
+
+    /// Holds `puts` beside the store while it syncs the puts before
+    /// them, or gives them back if it is not syncing.
+    fn hold_aside(&self, puts: Vec<Edit>) -> Result<HeldEarly, Vec<Edit>> {
+        if !self.is_aside_open.load(Ordering::Acquire) {
+            return Err(puts);
+        }
+        let count = puts.len() as u64;
+        let mut aside = lock(&self.aside);
+        let Some(open) = aside.as_mut() else {
+            return Err(puts);
+        };
+        match open.hold(puts) {
+            Some(puts) => Err(puts),
+            None => {
+                self.held_early.fetch_add(count, Ordering::Relaxed);
+                // Whoever syncs looks again when its sync ends.
+                Ok(HeldEarly::Held { is_first: false })
+            }
+        }
     }
 
     fn publish(&self, store: &Store<S, C>) {
@@ -269,11 +311,25 @@ impl<S: Storage, C: Clock> Core<S, C> {
             .store(store.lost_answered_puts(), Ordering::Release);
     }
 
-    fn sync_puts(&self) -> Result<(), StoreError> {
+    /// Writes the puts held ahead of the disk. With `takes_more`, the
+    /// puts that come while the disk takes them are held beside the
+    /// store and are in it, not yet written, when this returns.
+    fn sync_puts(&self, takes_more: bool) -> Result<(), StoreError> {
         self.write_queue();
         let mut store = lock(&self.store);
         let store = store.as_mut().ok_or(StoreError::Stopped)?;
+        if takes_more && self.answers_puts_early() && store.has_unsynced_puts() {
+            let mut aside = lock(&self.aside);
+            *aside = store.aside();
+            self.is_aside_open.store(aside.is_some(), Ordering::Release);
+        }
         let synced = store.sync_puts();
+        // Closed before the store is let go: a put that finds it shut
+        // waits for the store, and so comes after the ones taken in.
+        self.is_aside_open.store(false, Ordering::Release);
+        if let Some(aside) = lock(&self.aside).take() {
+            store.take_in(aside);
+        }
         self.note_unsynced(store);
         synced
     }
@@ -284,7 +340,7 @@ impl<S: Storage, C: Clock> Core<S, C> {
         let _turn = self.turns.take();
         // If the log refuses them, it refuses every write from then on:
         // whoever takes the store finds that out from the store itself.
-        let _ = self.sync_puts();
+        let _ = self.sync_puts(false);
         lock(&self.store).take()
     }
 }
@@ -306,8 +362,8 @@ where
         Core::write_queue(self);
     }
 
-    fn hold_early(&self, puts: Vec<Edit>) -> Result<HeldEarly, Vec<Edit>> {
-        Core::hold_early(self, puts)
+    fn hold_early(&self, puts: Vec<Edit>, has_writes_out: bool) -> Result<HeldEarly, Vec<Edit>> {
+        Core::hold_early(self, puts, has_writes_out)
     }
 
     fn puts_held_early(&self) -> u64 {
@@ -419,7 +475,7 @@ where
     }
 
     fn sync_puts(&self) -> Result<(), StoreError> {
-        Core::sync_puts(self)
+        Core::sync_puts(self, true)
     }
 
     fn lost_answered_puts(&self) -> bool {
@@ -498,6 +554,8 @@ where
                     std::thread::available_parallelism().map_or(1, usize::from),
                 ),
                 held_early: AtomicU64::new(0),
+                aside: Mutex::new(None),
+                is_aside_open: AtomicBool::new(false),
             }),
         }
     }
@@ -615,8 +673,17 @@ impl Writer {
     /// [`Writer::put_sealed`], if they would have to wait: somebody is
     /// writing, something is queued that they must not go ahead of, or
     /// the store holds as much ahead of the disk as it may.
-    pub fn hold_early(&self, puts: Vec<Edit>) -> Result<HeldEarly, Vec<Edit>> {
-        self.engine.hold_early(puts)
+    ///
+    /// While the puts held earlier are being synced, the store is held
+    /// for as long as the disk takes; puts are then held beside it and
+    /// answered all the same, unless `has_writes_out`: the caller has
+    /// writes queued that these must not be applied ahead of.
+    pub fn hold_early(
+        &self,
+        puts: Vec<Edit>,
+        has_writes_out: bool,
+    ) -> Result<HeldEarly, Vec<Edit>> {
+        self.engine.hold_early(puts, has_writes_out)
     }
 
     /// How many puts [`Writer::hold_early`] has held since the committer
@@ -640,7 +707,10 @@ impl Writer {
     }
 
     /// Writes everything queued, then the puts answered before they were
-    /// on disk, and returns once they are durable. An error means memory
+    /// on disk, and returns once they are durable. Puts that
+    /// [`Writer::hold_early`] answers meanwhile are not among them:
+    /// [`Writer::has_unsynced_puts`] says afterwards whether there are
+    /// any. An error means memory
     /// is ahead of the disk for good: the log takes no more writes, and
     /// what was answered and not written is lost when the process ends.
     pub fn sync_puts(&self) -> Result<(), StoreError> {
