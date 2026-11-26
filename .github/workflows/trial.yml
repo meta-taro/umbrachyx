@@ -30,7 +30,7 @@ jobs:
           make -C "$RUNNER_TEMP/valkey" -j"$(nproc)" BUILD_TLS=no >/dev/null
           echo "$RUNNER_TEMP/valkey/src" >> "$GITHUB_PATH"
       - name: Trial
-        run: bench/trial.sh "$RUNNER_TEMP/old-target/release/umbrachyx" target/release/umbrachyx 4 | tee trial.csv
+        run: set -o pipefail; bash bench/trial.sh "$RUNNER_TEMP/old-target/release/umbrachyx" target/release/umbrachyx 4 | tee trial.csv
       - uses: actions/upload-artifact@v4
         with:
           name: trial
